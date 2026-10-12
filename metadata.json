@@ -1,0 +1,8 @@
+{
+  "name": "GoAMAAS — All-in-One Business Growth Platform",
+  "description": "Complete business growth SaaS platform by AMAAS featuring multi-store management, orders, inventory, landing page builder, AI automations, website service requests, and analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
