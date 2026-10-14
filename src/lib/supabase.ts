@@ -127,8 +127,23 @@ export async function signInWithGoogle(customRedirectTo?: string): Promise<{ dat
   }
 
   try {
-    const origin = window.location.origin;
+    // Determine the authoritative redirect URL:
+    // If running in production on app.amaas.xyz (or any non-preview domain), ensure we use that origin.
+    const isProductionHost = typeof window !== 'undefined' && (
+      window.location.hostname === 'app.amaas.xyz' ||
+      window.location.hostname.endsWith('.amaas.xyz')
+    );
+    const origin = isProductionHost ? 'https://app.amaas.xyz' : window.location.origin;
     const redirectTo = customRedirectTo || `${origin}/auth/callback`;
+
+    // Diagnostic logging without sensitive credentials or tokens
+    console.info('[GoAMAAS Auth] Initiating Google OAuth flow', {
+      origin: window.location.origin,
+      hostname: window.location.hostname,
+      isProductionHost,
+      resolvedRedirectTo: redirectTo,
+    });
+
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {

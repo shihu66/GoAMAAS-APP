@@ -39,6 +39,12 @@ export const AuthCallbackPage: React.FC = () => {
         return;
       }
       try {
+        console.info('[GoAMAAS AuthCallback] Processing OAuth callback', {
+          origin: window.location.origin,
+          pathname: window.location.pathname,
+          hasCodeParam: searchParams.has('code'),
+          hasHash: Boolean(window.location.hash),
+        });
         const code = searchParams.get('code');
         if (code) {
           // PKCE flow code exchange
