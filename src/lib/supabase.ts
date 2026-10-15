@@ -148,6 +148,7 @@ export async function signInWithGoogle(customRedirectTo?: string): Promise<{ dat
       provider: 'google',
       options: {
         redirectTo,
+        skipBrowserRedirect: true, // We inspect and handle navigation explicitly
         queryParams: {
           access_type: 'offline',
           prompt: 'consent',
@@ -156,7 +157,27 @@ export async function signInWithGoogle(customRedirectTo?: string): Promise<{ dat
     });
 
     if (error) {
+      console.error('[GoAMAAS Auth] signInWithOAuth returned error:', error.message);
       return { data: null, error };
+    }
+
+    if (data?.url) {
+      let targetAuthHost = 'unknown';
+      try {
+        const parsedUrl = new URL(data.url);
+        targetAuthHost = parsedUrl.host;
+      } catch {}
+
+      console.info('[GoAMAAS Auth] Navigating directly to Supabase Auth provider URL', {
+        currentHostname: window.location.hostname,
+        targetAuthHost,
+        resolvedRedirectTo: redirectTo,
+      });
+
+      // Explicitly assign top-level window location to avoid any iframe/bridge interception
+      if (typeof window !== 'undefined') {
+        window.location.assign(data.url);
+      }
     }
 
     return { data, error: null };
