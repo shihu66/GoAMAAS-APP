@@ -2,6 +2,13 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import {
   Product,
   Order,
+  ServiceTrialRecord,
+  ServiceAccessStatus,
+  ServiceTrialCategory,
+  PaymentRequest,
+  PaymentGatewayConfig,
+  PaymentMethodType,
+  PaymentRequestStatus,
   OrderStatus,
   PaymentStatus,
   Customer,
@@ -52,6 +59,18 @@ import {
   getUserProfile,
   upsertUserProfile,
   getSupabaseConfigStatus,
+  fetchUserServiceTrials,
+  activateServiceTrialInDb,
+  RawServiceTrialRow,
+  fetchUserPaymentRequests,
+  createPaymentRequestInDb,
+  adminApprovePaymentInDb,
+  adminRejectPaymentInDb,
+  RawPaymentRequestRow,
+  fetchPublishedWebsiteBySubdomain,
+  publishClientWebsiteInDb,
+  updateClientWebsiteInDb,
+  unpublishClientWebsiteInDb,
 } from '../lib/supabase';
 
 export interface ToastMessage {
@@ -152,6 +171,38 @@ interface AppContextType {
   invoices: Invoice[];
   updatePlan: (plan: 'STARTER' | 'BUSINESS' | 'PRO' | 'ENTERPRISE') => void;
   cancelSubscription: () => void;
+
+  // Independent 7-Day Free Trial System For Every Service
+  serviceTrials: ServiceTrialRecord[];
+  isTrialsLoading: boolean;
+  getServiceAccess: (serviceId: string, serviceName: string, category: ServiceTrialCategory) => ServiceAccessStatus;
+  activateServiceTrial: (serviceId: string, serviceName: string, category: ServiceTrialCategory) => Promise<{ success: boolean; message: string; trial?: ServiceTrialRecord }>;
+  refreshServiceTrials: () => Promise<void>;
+
+  // Payment Requests & Gateways System
+  paymentRequests: PaymentRequest[];
+  isPaymentsLoading: boolean;
+  paymentGatewayConfigs: PaymentGatewayConfig[];
+  submitPaymentRequest: (params: {
+    serviceType: 'website_subscription' | 'website_package' | 'dashboard_plan' | 'ai_automation';
+    serviceId: string;
+    serviceName: string;
+    planTier: string;
+    amount: number;
+    paymentMethod: PaymentMethodType;
+    transactionId?: string;
+    senderNumber?: string;
+    bankName?: string;
+    bankAccountName?: string;
+    bankReference?: string;
+  }) => Promise<{ success: boolean; message: string; request?: PaymentRequest }>;
+  adminApprovePayment: (requestId: string, notes?: string) => Promise<{ success: boolean; message: string }>;
+  adminRejectPayment: (requestId: string, reason: string) => Promise<{ success: boolean; message: string }>;
+  refreshPaymentRequests: () => Promise<void>;
+  updatePaymentGatewayConfig: (id: string, updates: Partial<PaymentGatewayConfig>) => void;
+  publishWebsite: (websiteId: string) => Promise<{ success: boolean; message: string }>;
+  unpublishWebsite: (websiteId: string) => Promise<{ success: boolean; message: string }>;
+  resolvePublicWebsite: (subdomain: string) => Promise<{ site: SubscribedWebsite | null; notFound: boolean }>;
 
   // Team
   teamMembers: TeamMember[];
@@ -888,7 +939,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       fullDomainUrl: `${cleanSub}.amaas.xyz`,
       monthlyFee: websiteSubscriptionPlan.priceMonthly,
       subscriptionStatus: 'active',
-      paymentStatus: 'paid',
+      paymentStatus: 'pending', // Verified payment approval required before publishing
       deploymentStatus: 'provisioning',
       sslStatus: 'pending',
       nextBillingDate,
@@ -915,21 +966,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       date: today,
       planName: `AMAAS Website Lite (${cleanSub}.amaas.xyz)`,
       amount: websiteSubscriptionPlan.priceMonthly,
-      status: 'Paid',
+      status: 'Pending',
     };
     setInvoices((prev) => [newInvoice, ...prev]);
 
     const notif: AppNotification = {
       id: `notif-${Date.now()}`,
-      title: 'Website Subscription Activated',
-      message: `Your business website "${newSite.businessName}" is live at ${newSite.fullDomainUrl}!`,
+      title: 'Website Created — Payment Approval Pending',
+      message: `Your business website "${newSite.businessName}" was created. Please submit payment verification to publish live at ${newSite.fullDomainUrl}.`,
       type: 'billing',
       read: false,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
     setNotifications((prev) => [notif, ...prev]);
 
-    showToast(`Website "${newSite.businessName}" launched at ${newSite.fullDomainUrl}!`, 'success');
+    showToast(`Website "${newSite.businessName}" created! Submit payment to publish live.`, "info");
     return newSite;
   };
 
@@ -938,6 +989,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSubscribedWebsites((prev) =>
       prev.map((w) => (w.id === id ? { ...w, ...updates, lastUpdatedAt: today } : w))
     );
+    if (isSupabaseConfigured) {
+      updateClientWebsiteInDb(id, updates).catch((err) => {
+        console.warn('[GoAMAAS Website] Failed to sync update to database:', err);
+      });
+    }
     showToast('Website configuration saved successfully', 'success');
   };
 
@@ -1016,6 +1072,583 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [trialDaysLeft, setTrialDaysLeft] = useState<number>(7);
   const [invoices, setInvoices] = useState<Invoice[]>(() => getStored('invoices', INITIAL_INVOICES));
   useEffect(() => setStored('invoices', invoices), [invoices]);
+
+  // ==============================================================================
+  // Independent 7-Day Free Trial System For Every Service
+  // ==============================================================================
+  const [serviceTrials, setServiceTrials] = useState<ServiceTrialRecord[]>(() => {
+    return getStored('service_trials', []);
+  });
+  const [isTrialsLoading, setIsTrialsLoading] = useState<boolean>(false);
+
+  useEffect(() => {
+    setStored('service_trials', serviceTrials);
+  }, [serviceTrials]);
+
+  // ==============================================================================
+  // Payment Gateways & Manual Verification System
+  // ==============================================================================
+  const INITIAL_GATEWAY_CONFIGS: PaymentGatewayConfig[] = [
+    {
+      id: 'bkash',
+      displayName: 'bKash Personal (Send Money)',
+      isEnabled: true,
+      accountNumber: '+8801822332020',
+      accountName: 'AMAAS Official Merchant',
+      instructions: 'Send Money the exact payable amount to this personal bKash number, then submit your transaction ID below.',
+    },
+    {
+      id: 'nagad',
+      displayName: 'Nagad Personal (Send Money)',
+      isEnabled: false,
+      accountNumber: '',
+      instructions: 'Nagad payment channel is currently being provisioned. Please use bKash or Bank Transfer.',
+    },
+    {
+      id: 'bank_transfer',
+      displayName: 'Official Bank Transfer',
+      isEnabled: true,
+      bankName: 'City Bank PLC',
+      accountName: 'AMAAS TECHNOLOGIES',
+      accountNumber: '1503892019001',
+      branchName: 'Gulshan Avenue Branch',
+      routingNumber: '225261783',
+      instructions: 'Deposit or transfer the exact payable amount. Send your deposit receipt or transfer screenshot to our official WhatsApp contact for manual clearance.',
+    },
+    {
+      id: 'whatsapp_support',
+      displayName: 'Official WhatsApp Billing & Domain Support',
+      isEnabled: true,
+      accountNumber: '+8801822332020',
+      instructions: 'Contact for instant manual verification, bank receipts, and custom domain setup.',
+    },
+  ];
+
+  const [paymentGatewayConfigs, setPaymentGatewayConfigs] = useState<PaymentGatewayConfig[]>(() =>
+    getStored('payment_gateway_configs', INITIAL_GATEWAY_CONFIGS)
+  );
+  useEffect(() => setStored('payment_gateway_configs', paymentGatewayConfigs), [paymentGatewayConfigs]);
+
+  const publishWebsite = async (websiteId: string): Promise<{ success: boolean; message: string }> => {
+    const site = subscribedWebsites.find((s) => s.id === websiteId);
+    if (!site) {
+      showToast('Website not found.', 'error');
+      return { success: false, message: 'Website not found' };
+    }
+
+    if (site.paymentStatus !== 'paid' && role !== 'admin') {
+      const msg = 'Payment verification required before public publishing can be enabled.';
+      showToast(msg, 'warning');
+      return { success: false, message: msg };
+    }
+
+    if (isSupabaseConfigured) {
+      const { success, message, error } = await publishClientWebsiteInDb(websiteId);
+      if (!success && error) {
+        showToast(message || error.message, 'error');
+        return { success: false, message: message || error.message };
+      }
+    }
+
+    setSubscribedWebsites((prev) =>
+      prev.map((s) => (s.id === websiteId ? { ...s, deploymentStatus: 'live', subscriptionStatus: 'active' } : s))
+    );
+    showToast(`🎉 Website published! Accessible at https://${site.fullDomainUrl}`, 'success');
+    return { success: true, message: 'Website published successfully' };
+  };
+
+  const unpublishWebsite = async (websiteId: string): Promise<{ success: boolean; message: string }> => {
+    setSubscribedWebsites((prev) =>
+      prev.map((s) => (s.id === websiteId ? { ...s, deploymentStatus: 'suspended' } : s))
+    );
+    if (isSupabaseConfigured) {
+      await unpublishClientWebsiteInDb(websiteId);
+    }
+    showToast('Website unpublished. Public visitors will see the maintenance notice.', 'info');
+    return { success: true, message: 'Website unpublished' };
+  };
+
+  const resolvePublicWebsite = async (subdomain: string): Promise<{ site: SubscribedWebsite | null; notFound: boolean }> => {
+    const clean = subdomain.toLowerCase().trim();
+    // 1. Check local state first
+    const local = subscribedWebsites.find((s) => s.subdomain.toLowerCase() === clean);
+    if (local && local.deploymentStatus === 'live' && local.paymentStatus === 'paid') {
+      return { site: local, notFound: false };
+    }
+
+    // 2. Fetch from Supabase
+    if (isSupabaseConfigured) {
+      const { data, notFound } = await fetchPublishedWebsiteBySubdomain(clean);
+      if (data) {
+        const mapped: SubscribedWebsite = {
+          id: data.id || `site-${data.subdomain}`,
+          storeId: data.storeId || data.store_id || 'store-tenant',
+          businessName: data.businessName || data.business_name || 'Business',
+          ownerName: data.ownerName || 'Merchant',
+          email: data.email || data.config?.email || '',
+          phone: data.phone || data.config?.phone || '',
+          niche: data.niche || 'ecommerce',
+          nicheLabel: data.nicheLabel || data.template_name || 'Business Storefront',
+          templateId: data.templateId || data.template_id || data.config?.templateId || 'tpl-modern-business',
+          templateName: data.templateName || data.template_name || 'Modern Executive',
+          subdomain: data.subdomain,
+          fullDomainUrl: data.fullDomainUrl || data.full_domain || `${data.subdomain}.amaas.xyz`,
+          brandColor: data.brandColor || data.config?.brandColor || '#2563EB',
+          address: data.address || data.config?.address || '',
+          headline: data.headline || data.config?.headline || 'Welcome to our official website',
+          subheadline: data.subheadline || data.config?.subheadline || 'Explore our catalog and connect with our team.',
+          aboutText: data.aboutText || data.config?.aboutText || '',
+          servicesOrProducts: data.servicesOrProducts || data.config?.servicesOrProducts || data.config?.items || [],
+          whatsappNumber: data.whatsappNumber || data.config?.whatsappNumber || data.phone || data.config?.phone || '',
+          socialLinks: data.socialLinks || data.config?.socialLinks || {},
+          planName: data.planName || data.plan_tier || 'AMAAS Website Lite',
+          monthlyFee: Number(data.monthlyFee || data.monthly_fee || 600),
+          subscriptionStatus: data.subscriptionStatus || data.status || 'active',
+          paymentStatus: data.paymentStatus || data.payment_status || 'paid',
+          deploymentStatus: data.deploymentStatus || data.deployment_status || 'live',
+          sslStatus: 'active',
+          nextBillingDate: data.nextBillingDate || data.next_billing_date || '',
+          createdAt: data.createdAt || data.created_at || new Date().toISOString(),
+          lastUpdatedAt: data.lastUpdatedAt || data.updated_at || new Date().toISOString(),
+          resourceUsage: data.resourceUsage || data.resource_usage || {
+            pagesCount: 1,
+            pagesLimit: 5,
+            storageUsedMb: 12,
+            storageLimitMb: 500,
+            bandwidthUsedGb: 1.2,
+            bandwidthLimitGb: 25,
+            monthlyUpdatesUsed: 0,
+            monthlyUpdatesLimit: 2,
+          },
+        };
+        return { site: mapped, notFound: false };
+      }
+      if (notFound) return { site: null, notFound: true };
+    }
+
+    if (local) {
+      return { site: local, notFound: false };
+    }
+    return { site: null, notFound: true };
+  };
+
+  const updatePaymentGatewayConfig = (id: string, updates: Partial<PaymentGatewayConfig>) => {
+    setPaymentGatewayConfigs((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, ...updates } : c))
+    );
+    showToast('Payment gateway configuration saved.', 'success');
+  };
+
+  const [paymentRequests, setPaymentRequests] = useState<PaymentRequest[]>(() =>
+    getStored('payment_requests', [])
+  );
+  const [isPaymentsLoading, setIsPaymentsLoading] = useState<boolean>(false);
+
+  useEffect(() => {
+    setStored('payment_requests', paymentRequests);
+  }, [paymentRequests]);
+
+  const refreshPaymentRequests = async () => {
+    if (!user?.id || !isSupabaseConfigured) return;
+    setIsPaymentsLoading(true);
+    try {
+      const { data, error } = await fetchUserPaymentRequests(role === 'admin' ? undefined : user.id);
+      if (!error && data) {
+        const mapped: PaymentRequest[] = data.map((r: RawPaymentRequestRow) => ({
+          id: r.id,
+          userId: r.user_id,
+          storeId: r.store_id || undefined,
+          customerName: r.customer_name,
+          customerPhone: r.customer_phone,
+          customerEmail: r.customer_email,
+          serviceType: r.service_type,
+          serviceId: r.service_id,
+          serviceName: r.service_name,
+          planTier: r.plan_tier,
+          amount: Number(r.amount),
+          currency: r.currency || '৳',
+          paymentMethod: r.payment_method,
+          transactionId: r.transaction_id || undefined,
+          senderNumber: r.sender_number || undefined,
+          bankName: r.bank_name || undefined,
+          bankAccountName: r.bank_account_name || undefined,
+          bankReference: r.bank_reference || undefined,
+          status: r.status,
+          adminNotes: r.admin_notes || undefined,
+          reviewedBy: r.reviewed_by || undefined,
+          reviewedAt: r.reviewed_at || undefined,
+          createdAt: r.created_at,
+          updatedAt: r.updated_at,
+        }));
+        setPaymentRequests(mapped);
+      }
+    } catch (err) {
+      console.warn('Failed to sync payment requests from Supabase:', err);
+    } finally {
+      setIsPaymentsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (user?.id) {
+      refreshPaymentRequests();
+    }
+  }, [user?.id, role]);
+
+  const submitPaymentRequest = async (params: {
+    serviceType: 'website_subscription' | 'website_package' | 'dashboard_plan' | 'ai_automation';
+    serviceId: string;
+    serviceName: string;
+    planTier: string;
+    amount: number;
+    paymentMethod: PaymentMethodType;
+    transactionId?: string;
+    senderNumber?: string;
+    bankName?: string;
+    bankAccountName?: string;
+    bankReference?: string;
+  }): Promise<{ success: boolean; message: string; request?: PaymentRequest }> => {
+    if (!user?.id) {
+      const msg = 'Please sign in to submit a payment request.';
+      showToast(msg, 'warning');
+      return { success: false, message: msg };
+    }
+
+    if (params.paymentMethod === 'Nagad') {
+      const nagadConfig = paymentGatewayConfigs.find((c) => c.id === 'nagad');
+      if (!nagadConfig || !nagadConfig.isEnabled || !nagadConfig.accountNumber) {
+        const msg = 'Nagad payment is currently not configured or available. Please use bKash or Bank Transfer.';
+        showToast(msg, 'warning');
+        return { success: false, message: msg };
+      }
+    }
+
+    if (isSupabaseConfigured) {
+      const { data, error } = await createPaymentRequestInDb({
+        userId: user.id,
+        storeId: activeStoreId || undefined,
+        customerName: user.name || 'Merchant',
+        customerPhone: activeStore?.phone || '+880 1711-000000',
+        customerEmail: user.email || '',
+        ...params,
+      });
+
+      if (!error && data) {
+        const newReq: PaymentRequest = {
+          id: data.id,
+          userId: data.user_id,
+          storeId: data.store_id || undefined,
+          customerName: data.customer_name,
+          customerPhone: data.customer_phone,
+          customerEmail: data.customer_email,
+          serviceType: data.service_type,
+          serviceId: data.service_id,
+          serviceName: data.service_name,
+          planTier: data.plan_tier,
+          amount: Number(data.amount),
+          currency: data.currency,
+          paymentMethod: data.payment_method,
+          transactionId: data.transaction_id || undefined,
+          senderNumber: data.sender_number || undefined,
+          bankName: data.bank_name || undefined,
+          bankAccountName: data.bank_account_name || undefined,
+          bankReference: data.bank_reference || undefined,
+          status: data.status,
+          createdAt: data.created_at,
+          updatedAt: data.updated_at,
+        };
+        setPaymentRequests((prev) => [newReq, ...prev]);
+        showToast('Payment submission received! Pending manual admin verification.', 'success');
+        return { success: true, message: 'Payment submitted successfully', request: newReq };
+      }
+    }
+
+    // Local state fallback
+    const now = new Date().toISOString();
+    const fallbackReq: PaymentRequest = {
+      id: `req-${Date.now()}`,
+      userId: user.id,
+      storeId: activeStoreId || undefined,
+      customerName: user.name || 'Merchant',
+      customerPhone: activeStore?.phone || '+880 1711-000000',
+      customerEmail: user.email || '',
+      ...params,
+      status: 'pending',
+      currency: '৳',
+      createdAt: now,
+      updatedAt: now,
+    };
+    setPaymentRequests((prev) => [fallbackReq, ...prev]);
+    showToast('Payment submission received! Pending manual admin verification.', 'success');
+    return { success: true, message: 'Payment submitted successfully', request: fallbackReq };
+  };
+
+  const adminApprovePayment = async (requestId: string, notes?: string): Promise<{ success: boolean; message: string }> => {
+    if (role !== 'admin') {
+      return { success: false, message: 'Unauthorized. Admin role required.' };
+    }
+
+    if (isSupabaseConfigured) {
+      const { success, error } = await adminApprovePaymentInDb(requestId, notes);
+      if (!success && error) {
+        showToast(error.message, 'error');
+        return { success: false, message: error.message };
+      }
+    }
+
+    // Update local state atomically
+    setPaymentRequests((prev) =>
+      prev.map((r) => {
+        if (r.id === requestId) {
+          return {
+            ...r,
+            status: 'approved',
+            adminNotes: notes || r.adminNotes,
+            reviewedBy: user?.id,
+            reviewedAt: new Date().toISOString(),
+          };
+        }
+        return r;
+      })
+    );
+
+    // If website subscription, activate website status
+    const req = paymentRequests.find((r) => r.id === requestId);
+    if (req && req.serviceType === 'website_subscription') {
+      setSubscribedWebsites((prev) =>
+        prev.map((w) => {
+          if (w.id === req.serviceId || w.storeId === req.storeId) {
+            return {
+              ...w,
+              subscriptionStatus: 'active',
+              paymentStatus: 'paid',
+              deploymentStatus: 'live',
+              nextBillingDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+            };
+          }
+          return w;
+        })
+      );
+    }
+
+    showToast('Payment approved. Service subscription activated!', 'success');
+    return { success: true, message: 'Payment approved successfully' };
+  };
+
+  const adminRejectPayment = async (requestId: string, reason: string): Promise<{ success: boolean; message: string }> => {
+    if (role !== 'admin') {
+      return { success: false, message: 'Unauthorized. Admin role required.' };
+    }
+
+    if (isSupabaseConfigured) {
+      const { success, error } = await adminRejectPaymentInDb(requestId, reason);
+      if (!success && error) {
+        showToast(error.message, 'error');
+        return { success: false, message: error.message };
+      }
+    }
+
+    setPaymentRequests((prev) =>
+      prev.map((r) => {
+        if (r.id === requestId) {
+          return {
+            ...r,
+            status: 'rejected',
+            adminNotes: reason,
+            reviewedBy: user?.id,
+            reviewedAt: new Date().toISOString(),
+          };
+        }
+        return r;
+      })
+    );
+
+    showToast('Payment rejected and reason recorded.', 'info');
+    return { success: true, message: 'Payment rejected' };
+  };
+
+  // Synchronize trials with Supabase when authenticated user is present
+  const refreshServiceTrials = async () => {
+    if (!user?.id || !isSupabaseConfigured) return;
+    setIsTrialsLoading(true);
+    try {
+      const { data, error } = await fetchUserServiceTrials(user.id);
+      if (!error && data) {
+        const mapped: ServiceTrialRecord[] = data.map((row: RawServiceTrialRow) => ({
+          id: row.id,
+          userId: row.user_id,
+          storeId: row.store_id || undefined,
+          serviceId: row.service_id,
+          serviceName: row.service_name,
+          serviceCategory: row.service_category,
+          status: row.status,
+          startedAt: row.started_at,
+          expiresAt: row.expires_at,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+        }));
+        setServiceTrials(mapped);
+      }
+    } catch (err) {
+      console.warn('Failed to sync service trials from remote database:', err);
+    } finally {
+      setIsTrialsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (user?.id) {
+      refreshServiceTrials();
+    }
+  }, [user?.id]);
+
+  // Evaluates real-time access status for any individual service module
+  const getServiceAccess = (
+    serviceId: string,
+    serviceName: string,
+    category: ServiceTrialCategory
+  ): ServiceAccessStatus => {
+    // 1. Super admin always has full unrestricted access
+    if (role === 'admin') {
+      return {
+        serviceId,
+        serviceName,
+        serviceCategory: category,
+        status: 'subscribed',
+        hasAccess: true,
+        isExpired: false,
+      };
+    }
+
+    // 2. Check if a trial record exists for this specific service
+    const record = serviceTrials.find((t) => t.serviceId === serviceId && (!t.userId || t.userId === user?.id));
+
+    if (!record) {
+      return {
+        serviceId,
+        serviceName,
+        serviceCategory: category,
+        status: 'available',
+        hasAccess: false,
+        isExpired: false,
+      };
+    }
+
+    const now = new Date();
+    const expiresAt = new Date(record.expiresAt);
+    const diffMs = expiresAt.getTime() - now.getTime();
+    const isExpired = diffMs <= 0 || record.status === 'expired';
+
+    if (isExpired) {
+      return {
+        serviceId,
+        serviceName,
+        serviceCategory: category,
+        status: 'trial_expired',
+        hasAccess: false,
+        trialRecord: record,
+        daysRemaining: 0,
+        hoursRemaining: 0,
+        formattedExpiresAt: expiresAt.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }),
+        isExpired: true,
+      };
+    }
+
+    const daysRemaining = Math.max(1, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
+    const hoursRemaining = Math.max(1, Math.ceil(diffMs / (1000 * 60 * 60)));
+
+    return {
+      serviceId,
+      serviceName,
+      serviceCategory: category,
+      status: 'trial_active',
+      hasAccess: true,
+      trialRecord: record,
+      daysRemaining,
+      hoursRemaining,
+      formattedExpiresAt: expiresAt.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }),
+      isExpired: false,
+    };
+  };
+
+  // Activates a dedicated 7-day free trial for a specific service
+  const activateServiceTrial = async (
+    serviceId: string,
+    serviceName: string,
+    category: ServiceTrialCategory
+  ): Promise<{ success: boolean; message: string; trial?: ServiceTrialRecord }> => {
+    // Enforce authentication
+    if (!user?.id) {
+      const msg = 'Please sign in or register to activate your 7-day free trial.';
+      showToast(msg, 'warning');
+      return { success: false, message: msg };
+    }
+
+    // Client-side quick check
+    const existing = serviceTrials.find((t) => t.serviceId === serviceId && t.userId === user.id);
+    if (existing) {
+      const msg = `You have already activated your 7-day free trial for ${serviceName}.`;
+      showToast(msg, 'info');
+      return { success: false, message: msg, trial: existing };
+    }
+
+    // Server-side database activation in Supabase
+    if (isSupabaseConfigured) {
+      const { data, error, alreadyUsed } = await activateServiceTrialInDb({
+        serviceId,
+        serviceName,
+        serviceCategory: category,
+        userId: user.id,
+        storeId: activeStoreId || undefined,
+      });
+
+      if (alreadyUsed) {
+        const msg = `You have already activated the 7-day free trial for ${serviceName}.`;
+        showToast(msg, 'info');
+        return { success: false, message: msg };
+      }
+
+      if (!error && data) {
+        const newRecord: ServiceTrialRecord = {
+          id: data.id,
+          userId: data.user_id,
+          storeId: data.store_id || undefined,
+          serviceId: data.service_id,
+          serviceName: data.service_name,
+          serviceCategory: data.service_category,
+          status: data.status,
+          startedAt: data.started_at,
+          expiresAt: data.expires_at,
+          createdAt: data.created_at,
+          updatedAt: data.updated_at,
+        };
+        setServiceTrials((prev) => [newRecord, ...prev.filter((t) => t.serviceId !== serviceId)]);
+        showToast(`🎉 7-Day Free Trial activated for ${serviceName}!`, 'success');
+        return { success: true, message: 'Trial activated successfully', trial: newRecord };
+      }
+    }
+
+    // Local state fallback if Supabase table is not yet provisioned
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    const fallbackRecord: ServiceTrialRecord = {
+      id: `trial-${Date.now()}`,
+      userId: user.id,
+      storeId: activeStoreId || undefined,
+      serviceId,
+      serviceName,
+      serviceCategory: category,
+      status: 'active',
+      startedAt: now.toISOString(),
+      expiresAt,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+    };
+
+    setServiceTrials((prev) => [fallbackRecord, ...prev.filter((t) => t.serviceId !== serviceId)]);
+    showToast(`🎉 7-Day Free Trial activated for ${serviceName}!`, 'success');
+    return { success: true, message: 'Trial activated successfully', trial: fallbackRecord };
+  };
 
   const updatePlan = (newPlan: 'STARTER' | 'BUSINESS' | 'PRO' | 'ENTERPRISE') => {
     setCurrentPlan(newPlan);
@@ -1221,6 +1854,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         invoices,
         updatePlan,
         cancelSubscription,
+        serviceTrials,
+        isTrialsLoading,
+        getServiceAccess,
+        activateServiceTrial,
+        refreshServiceTrials,
+        paymentRequests,
+        isPaymentsLoading,
+        paymentGatewayConfigs,
+        submitPaymentRequest,
+        adminApprovePayment,
+        adminRejectPayment,
+        refreshPaymentRequests,
+        updatePaymentGatewayConfig,
+        publishWebsite,
+        unpublishWebsite,
+        resolvePublicWebsite,
         teamMembers,
         addTeamMember,
         removeTeamMember,

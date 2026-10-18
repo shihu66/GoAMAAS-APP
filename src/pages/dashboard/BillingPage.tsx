@@ -27,6 +27,7 @@ import {
 } from '../../data/pricingConfig';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
+import { TrialStatusBadge } from '../../components/ui/TrialStatusBadge';
 
 export const BillingPage: React.FC = () => {
   const navigate = useNavigate();
@@ -40,6 +41,9 @@ export const BillingPage: React.FC = () => {
     websiteSubscriptionPlan,
     subscribedWebsites,
     showToast,
+    serviceTrials,
+    getServiceAccess,
+    activateServiceTrial,
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<'dashboard' | 'automations' | 'websites' | 'webSubscription'>('dashboard');
@@ -85,41 +89,122 @@ export const BillingPage: React.FC = () => {
         </p>
       </div>
 
-      {/* Trial Countdown Card */}
-      <div className="p-6 rounded-2xl bg-gradient-to-r from-blue-900 via-slate-900 to-slate-950 text-white border border-blue-800 shadow-lg flex flex-col md:flex-row items-center justify-between gap-6">
-        <div className="flex items-center gap-4">
-          <div className="w-12 h-12 rounded-xl bg-blue-600 flex items-center justify-center font-bold text-lg shrink-0">
-            {trialDaysLeft}d
-          </div>
-          <div>
+      {/* Independent 7-Day Free Trial Hub */}
+      <div className="p-6 sm:p-7 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 dark:border-slate-800 pb-4">
+          <div className="space-y-1">
             <div className="flex items-center gap-2">
-              <h2 className="text-base font-bold">7-Day Free Trial Active ({currentPlan} Plan)</h2>
-              <span className="px-2 py-0.5 rounded-full bg-blue-500/30 text-blue-300 text-[10px] font-semibold uppercase">
-                Trial Mode
-              </span>
+              <Sparkles className="w-4 h-4 text-blue-600" />
+              <h2 className="text-base font-bold text-slate-900 dark:text-white">
+                Independent 7-Day Free Trials for Every Service
+              </h2>
             </div>
-            <p className="text-xs text-slate-300 mt-1">
-              You have {trialDaysLeft} days remaining on your unrestricted free trial. All features are fully active.
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Eligible services (Dashboard Plans, AI Automations, Landing Page Builder) have independent 7-day free trials. Due to server provisioning, Website Service has NO free trial.
             </p>
+          </div>
+          <div className="flex items-center gap-2 text-xs font-semibold text-slate-600 dark:text-slate-300">
+            <span className="font-mono tabular-nums text-blue-600 dark:text-blue-400 font-bold">
+              {serviceTrials.filter((t) => {
+                const diff = new Date(t.expiresAt).getTime() - Date.now();
+                return diff > 0 && t.status === 'active';
+              }).length}
+            </span>
+            <span>Active Service Trials (Dashboard & AI)</span>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
-          <button
-            onClick={() => {
-              const target = DASHBOARD_SUBSCRIPTION_PLANS.find((p) => p.id === 'BUSINESS') || DASHBOARD_SUBSCRIPTION_PLANS[1];
-              setSelectedDashboardPlan(target);
-            }}
-            className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs transition-colors"
-          >
-            Switch Plan
-          </button>
-          <button
-            onClick={() => setIsCancelDialogOpen(true)}
-            className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition-colors"
-          >
-            Cancel Trial
-          </button>
+        {/* 4 Core Services Grid */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {/* Service 1: Dashboard Plan */}
+          <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/60 flex flex-col justify-between space-y-3">
+            <div>
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Core SaaS</span>
+                <span className="text-xs font-bold text-blue-600">৳599/mo</span>
+              </div>
+              <h3 className="font-bold text-sm text-slate-900 dark:text-white mt-1">Dashboard & Commerce</h3>
+              <p className="text-[11px] text-slate-500 mt-1 leading-snug">
+                Multi-channel order fulfillment, stock management & Courier APIs.
+              </p>
+            </div>
+            <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60">
+              <TrialStatusBadge
+                serviceId="dashboard_business"
+                serviceName="Dashboard Business Tier"
+                category="dashboard"
+                className="w-full justify-center"
+              />
+            </div>
+          </div>
+
+          {/* Service 2: AI Automations */}
+          <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/60 flex flex-col justify-between space-y-3">
+            <div>
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">AI Messaging</span>
+                <span className="text-xs font-bold text-purple-600">৳999/mo</span>
+              </div>
+              <h3 className="font-bold text-sm text-slate-900 dark:text-white mt-1">AI Automation Suite</h3>
+              <p className="text-[11px] text-slate-500 mt-1 leading-snug">
+                24/7 Messenger & WhatsApp bots, cart recovery & automated notifications.
+              </p>
+            </div>
+            <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60">
+              <TrialStatusBadge
+                serviceId="ai_automations"
+                serviceName="AI Automation Suite"
+                category="ai_automation"
+                className="w-full justify-center"
+              />
+            </div>
+          </div>
+
+          {/* Service 3: Landing Page Visual Builder */}
+          <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/60 flex flex-col justify-between space-y-3">
+            <div>
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Page Engine</span>
+                <span className="text-xs font-bold text-blue-600">Pro Feature</span>
+              </div>
+              <h3 className="font-bold text-sm text-slate-900 dark:text-white mt-1">Landing Page Builder</h3>
+              <p className="text-[11px] text-slate-500 mt-1 leading-snug">
+                High-converting campaign landing pages with 1-click Cash on Delivery forms.
+              </p>
+            </div>
+            <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60">
+              <TrialStatusBadge
+                serviceId="landing_page_builder"
+                serviceName="Landing Page Visual Builder"
+                category="landing_pages"
+                className="w-full justify-center"
+              />
+            </div>
+          </div>
+
+          {/* Service 4: Business Website Lite */}
+          <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/60 flex flex-col justify-between space-y-3">
+            <div>
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Managed Web</span>
+                <span className="text-xs font-bold text-emerald-600">৳600/mo</span>
+              </div>
+              <h3 className="font-bold text-sm text-slate-900 dark:text-white mt-1">Business Website Lite</h3>
+              <p className="text-[11px] text-slate-500 mt-1 leading-snug">
+                Custom branded website with hosting, subdomain & monthly update requests.
+              </p>
+            </div>
+            <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60">
+              <button
+                type="button"
+                onClick={() => navigate('/create-website')}
+                className="w-full py-1.5 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <Globe className="w-3.5 h-3.5" />
+                <span>Build Website (No Free Trial)</span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 

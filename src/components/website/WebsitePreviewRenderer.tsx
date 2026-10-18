@@ -18,13 +18,18 @@ interface WebsitePreviewRendererProps {
   site: Partial<SubscribedWebsite>;
   viewMode?: 'desktop' | 'mobile';
   showGraceBanner?: boolean;
+  isPublicView?: boolean;
 }
 
 export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
   site,
   viewMode = 'desktop',
   showGraceBanner = false,
+  isPublicView = false,
 }) => {
+  const [inquiryName, setInquiryName] = React.useState('');
+  const [inquiryContact, setInquiryContact] = React.useState('');
+  const [inquiryNote, setInquiryNote] = React.useState('');
   const brandColor = site.brandColor || '#2563EB';
   const businessName = site.businessName || 'Your Business Name';
   const headline = site.headline || 'Exceptional Products & Services Tailored for You';
@@ -47,11 +52,16 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
 
   return (
     <div
-      className={`mx-auto bg-white text-slate-900 overflow-hidden shadow-2xl transition-all duration-300 rounded-2xl border border-slate-300 dark:border-slate-800 ${
-        viewMode === 'mobile' ? 'max-w-sm rounded-[36px] border-8 border-slate-900' : 'w-full'
+      className={`mx-auto bg-white text-slate-900 overflow-hidden transition-all duration-300 ${
+        isPublicView
+          ? 'w-full min-h-screen rounded-none border-0 shadow-none'
+          : viewMode === 'mobile'
+          ? 'max-w-sm rounded-[36px] border-8 border-slate-900 shadow-2xl my-6'
+          : 'w-full max-w-5xl rounded-2xl border border-slate-300 dark:border-slate-800 shadow-2xl my-4'
       }`}
     >
       {/* Browser Chrome Simulation Header */}
+      {!isPublicView && (
       <div className="bg-slate-900 text-slate-300 px-4 py-2.5 flex items-center justify-between border-b border-slate-800 text-xs select-none">
         <div className="flex items-center gap-1.5">
           <span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block" />
@@ -70,6 +80,7 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
           {viewMode === 'mobile' ? 'Mobile View' : 'Desktop 1080p'}
         </div>
       </div>
+      )}
 
       {/* Grace Period Notification Banner */}
       {isGracePeriod && !isSuspended && (
@@ -320,33 +331,52 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                   </div>
                 </div>
 
-                {/* Simulated Inquiry Form */}
+                {/* Interactive / Simulated Inquiry Form */}
                 <div className="pt-2 border-t border-slate-100 space-y-2 text-xs">
                   <div>
                     <label className="block text-[11px] font-medium text-slate-600 mb-0.5">Your Name</label>
                     <input
                       type="text"
-                      disabled
+                      disabled={!isPublicView}
+                      value={inquiryName}
+                      onChange={(e) => setInquiryName(e.target.value)}
                       placeholder="Jane Doe"
-                      className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 text-slate-500 text-xs"
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 text-slate-800 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
                     />
                   </div>
                   <div>
                     <label className="block text-[11px] font-medium text-slate-600 mb-0.5">Phone or WhatsApp</label>
                     <input
                       type="text"
-                      disabled
+                      disabled={!isPublicView}
+                      value={inquiryContact}
+                      onChange={(e) => setInquiryContact(e.target.value)}
                       placeholder="+880 17..."
-                      className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 text-slate-500 text-xs"
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 text-slate-800 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
                     />
                   </div>
-                  <button
-                    disabled
-                    className="w-full py-2 rounded-lg text-white font-semibold text-xs shadow-xs opacity-90 cursor-not-allowed"
-                    style={{ backgroundColor: brandColor }}
-                  >
-                    Submit Inquiry (Live on {fullDomainUrl})
-                  </button>
+                  {isPublicView ? (
+                    <a
+                      href={`https://wa.me/${whatsappNumber.replace(/[^0-9]/g, '')}?text=${encodeURIComponent(
+                        `Hello ${businessName}, I am contacting you from your website (${fullDomainUrl}).\nName: ${inquiryName || 'Visitor'}\nContact: ${inquiryContact || 'Not specified'}\nI would like to inquire about your products.`
+                      )}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="w-full py-2.5 rounded-lg text-white font-semibold text-xs shadow-xs transition-opacity hover:opacity-90 flex items-center justify-center gap-1.5"
+                      style={{ backgroundColor: brandColor }}
+                    >
+                      <MessageSquare className="w-3.5 h-3.5" />
+                      <span>Send Message on WhatsApp</span>
+                    </a>
+                  ) : (
+                    <button
+                      disabled
+                      className="w-full py-2 rounded-lg text-white font-semibold text-xs shadow-xs opacity-90 cursor-not-allowed"
+                      style={{ backgroundColor: brandColor }}
+                    >
+                      Submit Inquiry (Live on {fullDomainUrl})
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -378,6 +408,21 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
               <span className="text-blue-400 font-mono">{fullDomainUrl}</span>
             </div>
           </footer>
+          {/* Floating WhatsApp Action Button for Public Visitors */}
+          {isPublicView && (
+            <a
+              href={`https://wa.me/${whatsappNumber.replace(/[^0-9]/g, '')}?text=${encodeURIComponent(
+                `Hello ${businessName}, I am browsing your online store at ${fullDomainUrl}!`
+              )}`}
+              target="_blank"
+              rel="noreferrer"
+              className="fixed bottom-5 right-5 z-50 px-4 py-2.5 rounded-full text-white font-bold text-xs shadow-2xl flex items-center gap-2 hover:scale-105 transition-transform"
+              style={{ backgroundColor: '#25D366' }}
+            >
+              <MessageSquare className="w-4 h-4 fill-white" />
+              <span>Chat with Us</span>
+            </a>
+          )}
         </div>
       )}
     </div>

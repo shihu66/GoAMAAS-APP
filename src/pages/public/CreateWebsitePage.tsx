@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams, Link } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
 import { SubscribedWebsite, BusinessNiche } from '../../types';
 import { WebsitePreviewRenderer } from '../../components/website/WebsitePreviewRenderer';
+import { ManualPaymentModal } from '../../components/payment/ManualPaymentModal';
+import { CATEGORY_SPECS, THEME_PALETTES, CategorySpec } from '../../data/websiteBuilderConfig';
 import {
   Globe,
   Sparkles,
@@ -28,371 +30,249 @@ import {
   User,
   Plus,
   Trash2,
+  Copy,
+  Lock,
+  MessageSquare,
+  Search,
 } from 'lucide-react';
-
-const NICHES: Array<{ id: BusinessNiche; label: string; icon: any; defaultProducts: Array<{ name: string; price: string; description: string }> }> = [
-  {
-    id: 'restaurant',
-    label: 'Restaurant & Dining',
-    icon: Utensils,
-    defaultProducts: [
-      { name: 'Chef Special Biryani', price: '৳550', description: 'Fragrant basmati rice with slow-cooked tender meat.' },
-      { name: 'Grilled Kebab Platter', price: '৳720', description: 'Assorted charcoal-grilled skewers with mint chutney.' },
-    ],
-  },
-  {
-    id: 'cafe',
-    label: 'Café & Roastery',
-    icon: Utensils,
-    defaultProducts: [
-      { name: 'Single Origin Pour-Over', price: '৳380', description: 'Freshly roasted Ethiopian beans with floral aroma.' },
-      { name: 'French Croissant Basket', price: '৳450', description: 'Warm baked butter croissants with strawberry preserve.' },
-    ],
-  },
-  {
-    id: 'ecommerce',
-    label: 'Retail & E-Commerce',
-    icon: Store,
-    defaultProducts: [
-      { name: 'Signature Cotton Shirt', price: '৳1,850', description: '100% Egyptian combed breathable cotton.' },
-      { name: 'Minimalist Automatic Watch', price: '৳4,200', description: 'Sleek brushed steel case with sapphire crystal.' },
-    ],
-  },
-  {
-    id: 'gym',
-    label: 'Fitness & Gym Studio',
-    icon: Dumbbell,
-    defaultProducts: [
-      { name: 'Monthly All-Access Pass', price: '৳3,500/mo', description: 'Full access to weight room, cardio, and saunas.' },
-      { name: 'Personal Coaching (10 Sessions)', price: '৳10,000', description: 'Custom nutrition guidelines and 1-on-1 coaching.' },
-    ],
-  },
-  {
-    id: 'salon',
-    label: 'Salon, Spa & Beauty',
-    icon: Scissors,
-    defaultProducts: [
-      { name: 'Signature Hair Spa & Treatment', price: '৳2,200', description: 'Deep botanical conditioning and scalp massage.' },
-      { name: 'Organic Facial Cleanse', price: '৳1,800', description: 'Herbal exfoliation with revitalizing clay mask.' },
-    ],
-  },
-  {
-    id: 'real_estate',
-    label: 'Real Estate & Properties',
-    icon: Home,
-    defaultProducts: [
-      { name: 'Luxury 3-Bed Gulshan Flat', price: '৳3.8 Cr', description: '2,400 sqft apartment with 2 parking spots and lake view.' },
-      { name: 'Commercial Office Space Banani', price: '৳1.8L/mo', description: '1,800 sqft plug-and-play modern corporate suite.' },
-    ],
-  },
-  {
-    id: 'agency',
-    label: 'Creative & Digital Agency',
-    icon: Briefcase,
-    defaultProducts: [
-      { name: 'Brand Identity Package', price: '৳25,000', description: 'Complete typography, logo guide, and brand guidelines.' },
-      { name: 'Social Media Growth Management', price: '৳18,000/mo', description: '16 high-converting monthly posts and ads manager.' },
-    ],
-  },
-  {
-    id: 'portfolio',
-    label: 'Professional Portfolio',
-    icon: User,
-    defaultProducts: [
-      { name: 'Consulting Session (1 Hour)', price: '৳5,000', description: 'Strategic business advisory and architecture review.' },
-      { name: 'Full-Stack Development Project', price: 'Custom', description: 'Custom tailored software development per scope.' },
-    ],
-  },
-];
-
-const TEMPLATES = [
-  {
-    id: 'tpl-modern-business',
-    name: 'Modern Executive',
-    description: 'Clean typography, high-impact hero, and elegant card grids.',
-    previewColor: '#2563EB',
-  },
-  {
-    id: 'tpl-warm-bistro',
-    name: 'Warm Culinary & Boutique',
-    description: 'Earthy luxury tones, menu item highlights, and instant WhatsApp chat.',
-    previewColor: '#D97706',
-  },
-  {
-    id: 'tpl-vibrant-power',
-    name: 'Vibrant Dynamic',
-    description: 'Energetic, bold contrasts for fitness studios, gadgets, and active brands.',
-    previewColor: '#EF4444',
-  },
-  {
-    id: 'tpl-minimal-emerald',
-    name: 'Botanical Organic',
-    description: 'Serene, clean layout designed for wellness, spas, organics, and eco-brands.',
-    previewColor: '#059669',
-  },
-];
-
-const BRAND_COLORS = [
-  { name: 'Electric Blue', hex: '#2563EB' },
-  { name: 'Emerald Forest', hex: '#059669' },
-  { name: 'Warm Amber', hex: '#D97706' },
-  { name: 'Crimson Power', hex: '#EF4444' },
-  { name: 'Royal Purple', hex: '#7C3AED' },
-  { name: 'Midnight Slate', hex: '#334155' },
-];
 
 export const CreateWebsitePage: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const {
-    activeStore,
     user,
+    isAuthenticated,
+    activeStore,
     websiteSubscriptionPlan,
     createSubscribedWebsite,
     checkSubdomainAvailability,
+    paymentRequests,
     showToast,
   } = useApp();
 
-  const [step, setStep] = useState<1 | 2 | 3 | 4 | 5 | 6>(1);
+  // Wizard Step
+  const [step, setStep] = useState<1 | 2 | 3 | 4 | 5>(1);
+
+  // Search & Filter for Step 1 Categories
+  const [categorySearch, setCategorySearch] = useState('');
+  const [selectedGroup, setSelectedGroup] = useState<string>('All');
 
   // Form State
+  const [selectedCategory, setSelectedCategory] = useState<CategorySpec>(CATEGORY_SPECS[0]);
   const [businessName, setBusinessName] = useState(activeStore?.name || '');
-  const [niche, setNiche] = useState<BusinessNiche>('ecommerce');
-  const [brandColor, setBrandColor] = useState('#2563EB');
-  const [phone, setPhone] = useState(activeStore?.phone || '+880 1711-889900');
-  const [email, setEmail] = useState(user?.email || 'contact@mybusiness.com');
-  const [address, setAddress] = useState('Dhaka, Bangladesh');
-  const [whatsappNumber, setWhatsappNumber] = useState(activeStore?.phone || '+880 1711-889900');
-  const [headline, setHeadline] = useState('Quality Products & Exceptional Service');
-  const [subheadline, setSubheadline] = useState('Welcome to our official business website. Browse our offerings and chat with us.');
-  const [aboutText, setAboutText] = useState('We are a committed local business dedicated to delivering the highest quality products and personalized customer service.');
-  const [socialLinks, setSocialLinks] = useState({ facebook: '', instagram: '' });
+  const [subdomain, setSubdomain] = useState('');
+  const [isSubdomainChecking, setIsSubdomainChecking] = useState(false);
+  const [subdomainError, setSubdomainError] = useState<string | null>(null);
 
-  // Template State
-  const [selectedTemplateId, setSelectedTemplateId] = useState('tpl-modern-business');
+  // Visual Theme & Palette
+  const [selectedPalette, setSelectedPalette] = useState(THEME_PALETTES[0]);
+  const [brandColor, setBrandColor] = useState(THEME_PALETTES[0].brandColor);
+  const [headline, setHeadline] = useState('Premium Quality & Exceptional Service');
+  const [subheadline, setSubheadline] = useState('Explore our curated collections and connect with our specialists today.');
+  const [aboutText, setAboutText] = useState('We are a forward-thinking business dedicated to craftsmanship, authenticity, and attentive customer service.');
+  const [phone, setPhone] = useState(activeStore?.phone || '+880 1822-332020');
+  const [whatsappNumber, setWhatsappNumber] = useState(activeStore?.phone || '+880 1822-332020');
+  const [address, setAddress] = useState(activeStore?.address || 'Dhaka, Bangladesh');
 
-  // Products/Services list
+  // Category items
   const [items, setItems] = useState<Array<{ id: string; name: string; price: string; description: string }>>([
-    { id: '1', name: 'Signature Offering 1', price: '৳1,500', description: 'Our bestselling product crafted with premium quality.' },
-    { id: '2', name: 'Signature Offering 2', price: '৳2,800', description: 'Exceptional service delivered with guaranteed satisfaction.' },
+    { id: '1', name: selectedCategory.defaultItems[0]?.name || 'Flagship Item', price: selectedCategory.defaultItems[0]?.price || '৳1,500', description: selectedCategory.defaultItems[0]?.description || 'Top tier quality' },
+    { id: '2', name: selectedCategory.defaultItems[1]?.name || 'Secondary Service', price: selectedCategory.defaultItems[1]?.price || '৳2,500', description: selectedCategory.defaultItems[1]?.description || 'Customer favorite' },
   ]);
 
-  // Subdomain
-  const [subdomain, setSubdomain] = useState('');
-  const [subdomainCheckResult, setSubdomainCheckResult] = useState<{ available: boolean; reason?: string } | null>(null);
+  // CTA Selection
+  const [primaryCta, setPrimaryCta] = useState(selectedCategory.primaryCtaOptions[0] || 'Order on WhatsApp');
 
   // Preview Mode
   const [previewDevice, setPreviewDevice] = useState<'desktop' | 'mobile'>('desktop');
 
-  // Deployment Simulation
-  const [isDeploying, setIsDeploying] = useState(false);
-  const [deploymentStage, setDeploymentStage] = useState(0);
+  // Payment Modal
+  const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
+  const [createdSiteId, setCreatedSiteId] = useState<string>('');
 
-  // Payment Demo Method
-  const [paymentGateway, setPaymentGateway] = useState<'bKash' | 'Nagad' | 'Card'>('bKash');
-
-  // Auto-generate suggested subdomain when business name changes
-  useEffect(() => {
-    if (businessName && !subdomain) {
-      const suggested = businessName.toLowerCase().replace(/[^a-z0-9]/g, '');
-      setSubdomain(suggested.slice(0, 20));
+  // Update defaults when category changes
+  const handleSelectCategory = (cat: CategorySpec) => {
+    setSelectedCategory(cat);
+    if (!headline || headline === 'Premium Quality & Exceptional Service') {
+      setHeadline(`Welcome to Our Official ${cat.label} Space`);
     }
-  }, [businessName]);
+    setPrimaryCta(cat.primaryCtaOptions[0] || 'Contact Us');
+    setItems([
+      { id: '1', name: cat.defaultItems[0]?.name || 'Core Product', price: cat.defaultItems[0]?.price || '৳1,500', description: cat.defaultItems[0]?.description || 'High quality' },
+      { id: '2', name: cat.defaultItems[1]?.name || 'Popular Service', price: cat.defaultItems[1]?.price || '৳2,500', description: cat.defaultItems[1]?.description || 'Recommended choice' },
+    ]);
+    setStep(2);
+  };
 
-  // Auto-fill template & default offerings when niche changes
-  const handleNicheSelect = (selectedNiche: BusinessNiche) => {
-    setNiche(selectedNiche);
-    const nicheObj = NICHES.find((n) => n.id === selectedNiche);
-    if (nicheObj) {
-      setItems(
-        nicheObj.defaultProducts.map((p, idx) => ({
-          id: String(idx + 1),
-          ...p,
-        }))
-      );
-      if (selectedNiche === 'cafe' || selectedNiche === 'restaurant') {
-        setSelectedTemplateId('tpl-warm-bistro');
-        setBrandColor('#D97706');
-        setHeadline('Artisan Flavors & Memorable Dining');
-      } else if (selectedNiche === 'gym') {
-        setSelectedTemplateId('tpl-vibrant-power');
-        setBrandColor('#EF4444');
-        setHeadline('Transform Your Fitness & Unleash Your Strength');
-      } else if (selectedNiche === 'salon') {
-        setSelectedTemplateId('tpl-minimal-emerald');
-        setBrandColor('#059669');
-        setHeadline('Rejuvenate Your Mind, Body & Style');
-      } else {
-        setSelectedTemplateId('tpl-modern-business');
-        setBrandColor('#2563EB');
-        setHeadline('Premium Essentials & Reliable Service');
-      }
+  // Subdomain validation
+  useEffect(() => {
+    if (!subdomain.trim()) {
+      setSubdomainError(null);
+      return;
+    }
+    const clean = subdomain.toLowerCase().replace(/[^a-z0-9-]/g, '');
+    if (clean !== subdomain) {
+      setSubdomain(clean);
+    }
+    if (clean.length < 3) {
+      setSubdomainError('Subdomain must be at least 3 characters.');
+      return;
+    }
+    const available = checkSubdomainAvailability(clean);
+    if (!available) {
+      setSubdomainError('This subdomain is already taken or reserved.');
+    } else {
+      setSubdomainError(null);
+    }
+  }, [subdomain, checkSubdomainAvailability]);
+
+  // Auto-generate subdomain from business name
+  const handleNameChange = (val: string) => {
+    setBusinessName(val);
+    if (!subdomain) {
+      const slug = val
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 18);
+      setSubdomain(slug);
     }
   };
 
-  // Subdomain Validation effect
-  useEffect(() => {
-    if (subdomain) {
-      const result = checkSubdomainAvailability(subdomain);
-      setSubdomainCheckResult(result);
-    } else {
-      setSubdomainCheckResult(null);
-    }
-  }, [subdomain]);
-
-  // Add Item
   const handleAddItem = () => {
+    const nextId = String(Date.now());
     setItems((prev) => [
       ...prev,
-      {
-        id: String(Date.now()),
-        name: 'New Offering',
-        price: '৳500',
-        description: 'Brief description of this offering.',
-      },
+      { id: nextId, name: `New ${selectedCategory.itemTypeLabel.slice(0, -1)}`, price: '৳1,000', description: 'Detailed specifications and highlights.' },
     ]);
   };
 
   const handleRemoveItem = (id: string) => {
-    setItems((prev) => prev.filter((i) => i.id !== id));
+    if (items.length <= 1) {
+      showToast('You must keep at least one item or offering.', 'warning');
+      return;
+    }
+    setItems((prev) => prev.filter((item) => item.id !== id));
   };
 
-  const handleItemChange = (id: string, field: 'name' | 'price' | 'description', value: string) => {
+  const handleUpdateItem = (id: string, field: 'name' | 'price' | 'description', value: string) => {
     setItems((prev) =>
-      prev.map((i) => (i.id === id ? { ...i, [field]: value } : i))
+      prev.map((item) => (item.id === id ? { ...item, [field]: value } : item))
     );
   };
 
-  // Deployment action
-  const handleDeployAndActivate = () => {
-    if (!subdomainCheckResult?.available) {
-      showToast('Please specify a valid, available subdomain first.', 'error');
-      setStep(4);
-      return;
-    }
-
-    setIsDeploying(true);
-    setDeploymentStage(1);
-
-    setTimeout(() => {
-      setDeploymentStage(2);
-      setTimeout(() => {
-        setDeploymentStage(3);
-        setTimeout(() => {
-          setDeploymentStage(4);
-          setTimeout(() => {
-            // Commit to AppContext
-            const selectedNicheObj = NICHES.find((n) => n.id === niche);
-            const selectedTpl = TEMPLATES.find((t) => t.id === selectedTemplateId);
-
-            createSubscribedWebsite({
-              storeId: activeStore?.id || 'store-1',
-              businessName,
-              ownerName: user?.name || 'Store Owner',
-              email,
-              phone,
-              niche,
-              nicheLabel: selectedNicheObj?.label || 'Business',
-              templateId: selectedTemplateId,
-              templateName: selectedTpl?.name || 'Modern Executive',
-              subdomain,
-              fullDomainUrl: `${subdomain}.amaas.xyz`,
-              brandColor,
-              address,
-              headline,
-              subheadline,
-              aboutText,
-              servicesOrProducts: items,
-              whatsappNumber,
-              socialLinks,
-              planName: websiteSubscriptionPlan.name,
-              monthlyFee: websiteSubscriptionPlan.priceMonthly,
-              subscriptionStatus: 'active',
-              paymentStatus: 'paid',
-              deploymentStatus: 'provisioning',
-              sslStatus: 'pending',
-              nextBillingDate: new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0],
-            });
-
-            setIsDeploying(false);
-            navigate('/dashboard/subscribed-website');
-          }, 900);
-        }, 900);
-      }, 900);
-    }, 900);
-  };
-
-  // Assembled site preview object
-  const currentPreviewSite: Partial<SubscribedWebsite> = {
-    businessName,
-    niche,
-    nicheLabel: NICHES.find((n) => n.id === niche)?.label,
+  // Construct draft website object for preview
+  const draftSite: Partial<SubscribedWebsite> = {
+    businessName: businessName || 'Your Business Name',
+    niche: selectedCategory.id,
+    nicheLabel: selectedCategory.label,
     brandColor,
     subdomain: subdomain || 'yourbusiness',
     fullDomainUrl: `${subdomain || 'yourbusiness'}.amaas.xyz`,
-    phone,
-    email,
-    address,
-    whatsappNumber,
     headline,
     subheadline,
     aboutText,
+    phone,
+    whatsappNumber,
+    address,
     servicesOrProducts: items,
+    planName: 'AMAAS Website Lite',
+    monthlyFee: websiteSubscriptionPlan.priceMonthly,
     subscriptionStatus: 'active',
-    deploymentStatus: 'provisioning',
+    deploymentStatus: 'live',
   };
+
+  const handleCompleteDraft = () => {
+    if (!isAuthenticated) {
+      showToast('Please sign in to save and launch your website.', 'warning');
+      navigate('/login?redirect=/create-website');
+      return;
+    }
+    if (!businessName.trim()) {
+      showToast('Please enter your business name.', 'warning');
+      setStep(2);
+      return;
+    }
+    if (!subdomain.trim() || subdomainError) {
+      showToast('Please choose an available AMAAS subdomain.', 'warning');
+      setStep(2);
+      return;
+    }
+
+    const newId = `web-${Date.now()}`;
+    setCreatedSiteId(newId);
+
+    // Save initial record as pending subscription payment
+    createSubscribedWebsite({
+      storeId: activeStore?.id || 'store-1',
+      businessName,
+      ownerName: user?.name || 'Store Owner',
+      email: user?.email || 'contact@business.com',
+      phone,
+      niche: selectedCategory.id,
+      nicheLabel: selectedCategory.label,
+      templateId: 'tpl-modern-business',
+      templateName: `${selectedCategory.label} Pro`,
+      subdomain,
+      fullDomainUrl: `${subdomain}.amaas.xyz`,
+      brandColor,
+      address,
+      headline,
+      subheadline,
+      aboutText,
+      servicesOrProducts: items,
+      whatsappNumber,
+      socialLinks: { facebook: 'https://facebook.com', instagram: 'https://instagram.com' },
+      planName: 'AMAAS Website Lite',
+      monthlyFee: websiteSubscriptionPlan.priceMonthly,
+      subscriptionStatus: 'active',
+      paymentStatus: 'pending',
+      deploymentStatus: 'provisioning',
+      sslStatus: 'active',
+      nextBillingDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+    });
+
+    setStep(5);
+  };
+
+  // Filtered categories
+  const filteredCategories = CATEGORY_SPECS.filter((cat) => {
+    const matchesSearch =
+      cat.label.toLowerCase().includes(categorySearch.toLowerCase()) ||
+      cat.shortDesc.toLowerCase().includes(categorySearch.toLowerCase());
+    const matchesGroup = selectedGroup === 'All' || cat.group === selectedGroup;
+    return matchesSearch && matchesGroup;
+  });
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 py-10 transition-colors">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
-        {/* Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-6">
-          <div>
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-50 dark:bg-blue-950/60 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300 text-xs font-semibold mb-2">
-              <Sparkles className="w-3.5 h-3.5 text-blue-600" />
-              <span>AMAAS Website Lite — ৳600/month Subscription</span>
-            </div>
-            <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">
-              Website Builder & Subdomain Provisioning
-            </h1>
-            <p className="text-xs sm:text-sm text-slate-500 mt-1">
-              Build your customized business website draft, select your <code className="text-blue-600 font-mono">*.amaas.xyz</code> subdomain, and activate with zero upfront development fees.
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => navigate('/pricing')}
-              className="px-3.5 py-2 rounded-lg text-xs font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-            >
-              Back to Pricing
-            </button>
-          </div>
-        </div>
-
-        {/* Step Indicator Bar */}
-        <div className="grid grid-cols-5 gap-2 sm:gap-4 text-xs font-medium">
-          {[
-            { num: 1, label: 'Business Profile' },
-            { num: 2, label: 'Design & Colors' },
-            { num: 3, label: 'Offerings & Content' },
-            { num: 4, label: 'Live Preview & Edit' },
-            { num: 5, label: 'Subdomain & Launch' },
-          ].map((s) => (
-            <button
-              key={s.num}
-              onClick={() => setStep(s.num as any)}
-              className={`p-3 rounded-xl border text-left transition-all ${
-                step === s.num
-                  ? 'border-blue-600 bg-blue-50/50 dark:bg-blue-950/40 text-blue-900 dark:text-blue-200 shadow-xs'
-                  : step > s.num
-                  ? 'border-emerald-300 dark:border-emerald-900 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300'
-                  : 'border-slate-200 dark:border-slate-800 bg-white/60 dark:bg-slate-900/60 text-slate-400'
-              }`}
-            >
-              <div className="flex items-center gap-2">
+        {/* Wizard Progress Stepper */}
+        <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
+          <div className="flex items-center justify-between max-w-3xl mx-auto text-xs font-semibold">
+            {[
+              { num: 1, label: '1. Category' },
+              { num: 2, label: '2. Business Info' },
+              { num: 3, label: '3. Offerings & Items' },
+              { num: 4, label: '4. Colors & Theme' },
+              { num: 5, label: '5. Launch & Pay' },
+            ].map((s) => (
+              <button
+                key={s.num}
+                onClick={() => {
+                  if (s.num <= step) setStep(s.num as any);
+                }}
+                className={`flex items-center gap-2 py-1 px-2 rounded-lg transition-colors cursor-pointer ${
+                  step === s.num
+                    ? 'text-blue-600 dark:text-blue-400 font-bold bg-blue-50 dark:bg-blue-950/60'
+                    : step > s.num
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : 'text-slate-400 opacity-60'
+                }`}
+              >
                 <span
-                  className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                  className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] ${
                     step === s.num
                       ? 'bg-blue-600 text-white'
                       : step > s.num
@@ -402,660 +282,558 @@ export const CreateWebsitePage: React.FC = () => {
                 >
                   {step > s.num ? '✓' : s.num}
                 </span>
-                <span className="truncate hidden sm:inline">{s.label}</span>
-              </div>
-            </button>
-          ))}
+                <span className="hidden sm:inline">{s.label}</span>
+              </button>
+            ))}
+          </div>
         </div>
 
-        {/* =========================================================================
-            STEP 1: BUSINESS PROFILE & NICHE SELECTION
-           ========================================================================= */}
+        {/* STEP 1: CATEGORY SELECTION */}
         {step === 1 && (
-          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 sm:p-8 space-y-8 shadow-xs">
-            <div>
-              <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-                Step 1: Your Business Niche & Core Identity
-              </h2>
-              <p className="text-xs text-slate-500 mt-1">
-                AMAAS Website Lite supports any commercial or creative niche. Select your primary category to customize layout and catalog structure.
+          <div className="space-y-6">
+            <div className="text-center max-w-2xl mx-auto space-y-2">
+              <span className="text-xs font-bold text-blue-600 uppercase tracking-wider">
+                Step 1 of 5
+              </span>
+              <h1 className="text-2xl sm:text-3xl font-black text-slate-900 dark:text-white tracking-tight">
+                Select Your Business Industry
+              </h1>
+              <p className="text-xs sm:text-sm text-slate-500">
+                Choose the category that best matches your trade. Your website forms, fields, and CTAs will adapt automatically.
               </p>
             </div>
 
-            {/* Niche Selector Grid */}
-            <div className="space-y-3">
-              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                Select Your Business Niche *
-              </label>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                {NICHES.map((n) => {
-                  const Icon = n.icon;
-                  const isSelected = niche === n.id;
-                  return (
-                    <button
-                      key={n.id}
-                      type="button"
-                      onClick={() => handleNicheSelect(n.id)}
-                      className={`p-4 rounded-xl border text-left flex flex-col items-start gap-2.5 transition-all ${
-                        isSelected
-                          ? 'border-blue-600 bg-blue-50/50 dark:bg-blue-950/40 text-blue-900 dark:text-blue-200 font-bold ring-2 ring-blue-600'
-                          : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 hover:border-slate-300'
-                      }`}
-                    >
-                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${isSelected ? 'bg-blue-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}`}>
-                        <Icon className="w-4 h-4" />
-                      </div>
-                      <span className="text-xs leading-snug">{n.label}</span>
-                    </button>
-                  );
-                })}
+            {/* Filter controls */}
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="relative w-full sm:w-80">
+                <Search className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Search industries (e.g. food, clinic, fashion)..."
+                  value={categorySearch}
+                  onChange={(e) => setCategorySearch(e.target.value)}
+                  className="w-full pl-9 pr-4 py-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-xs"
+                />
+              </div>
+
+              <div className="flex items-center gap-1 overflow-x-auto w-full sm:w-auto pb-1 text-xs">
+                {['All', 'Commerce', 'Food & Hospitality', 'Property & Construction', 'Health & Personal Care', 'Professional Services'].map((grp) => (
+                  <button
+                    key={grp}
+                    onClick={() => setSelectedGroup(grp)}
+                    className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors cursor-pointer ${
+                      selectedGroup === grp
+                        ? 'bg-blue-600 text-white font-semibold'
+                        : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-50'
+                    }`}
+                  >
+                    {grp}
+                  </button>
+                ))}
               </div>
             </div>
 
-            {/* Business Contact & Information */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+            {/* Category Cards Grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {filteredCategories.map((cat) => {
+                const isSelected = selectedCategory.id === cat.id;
+                return (
+                  <div
+                    key={cat.id}
+                    onClick={() => handleSelectCategory(cat)}
+                    className={`p-5 rounded-2xl bg-white dark:bg-slate-900 border transition-all cursor-pointer flex flex-col justify-between space-y-4 hover:shadow-md ${
+                      isSelected
+                        ? 'border-blue-600 ring-2 ring-blue-500/20 shadow-sm'
+                        : 'border-slate-200 dark:border-slate-800 hover:border-slate-300'
+                    }`}
+                  >
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{cat.group}</span>
+                        <span className="text-[10px] px-2 py-0.5 rounded bg-blue-50 dark:bg-blue-950/60 text-blue-600 font-medium">
+                          {cat.itemTypeLabel}
+                        </span>
+                      </div>
+                      <h3 className="text-base font-bold text-slate-900 dark:text-white">{cat.label}</h3>
+                      <p className="text-xs text-slate-500 leading-relaxed">{cat.shortDesc}</p>
+                    </div>
+
+                    <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-xs font-semibold text-blue-600">
+                      <span>Select Industry & Continue</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* STEP 2: BUSINESS INFORMATION */}
+        {step === 2 && (
+          <div className="space-y-6 max-w-2xl mx-auto">
+            <div className="text-center space-y-2">
+              <span className="text-xs font-bold text-blue-600 uppercase tracking-wider">
+                Step 2 of 5 · {selectedCategory.label}
+              </span>
+              <h2 className="text-2xl font-bold text-slate-900 dark:text-white">
+                Tell Us About Your Business
+              </h2>
+              <p className="text-xs text-slate-500">
+                Configure your brand name, official contact details, and free <code className="font-mono text-blue-600">.amaas.xyz</code> subdomain.
+              </p>
+            </div>
+
+            <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
               <div>
-                <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
                   Business / Brand Name *
                 </label>
                 <input
                   type="text"
                   required
                   value={businessName}
-                  onChange={(e) => setBusinessName(e.target.value)}
-                  placeholder="e.g. Apex Lifestyle BD"
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
+                  onChange={(e) => handleNameChange(e.target.value)}
+                  placeholder="e.g. Apex Lifestyle & Boutique"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-semibold"
                 />
               </div>
 
+              {/* Subdomain Input */}
               <div>
-                <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  WhatsApp Contact Number *
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Free Subdomain (yourbusiness.amaas.xyz) *
+                </label>
+                <div className="flex items-center rounded-xl border border-slate-300 dark:border-slate-700 overflow-hidden bg-white dark:bg-slate-800">
+                  <span className="px-3 text-slate-400 font-mono text-xs">https://</span>
+                  <input
+                    type="text"
+                    required
+                    value={subdomain}
+                    onChange={(e) => setSubdomain(e.target.value)}
+                    placeholder="mybusiness"
+                    className="flex-1 py-2.5 bg-transparent font-mono text-xs font-bold text-blue-600 outline-none"
+                  />
+                  <span className="px-3 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 font-mono text-xs border-l border-slate-200 dark:border-slate-600">
+                    .amaas.xyz
+                  </span>
+                </div>
+                {subdomainError ? (
+                  <p className="text-[11px] text-rose-500 mt-1 flex items-center gap-1">
+                    <AlertCircle className="w-3 h-3" />
+                    <span>{subdomainError}</span>
+                  </p>
+                ) : subdomain ? (
+                  <p className="text-[11px] text-emerald-600 mt-1 flex items-center gap-1">
+                    <CheckCircle2 className="w-3 h-3" />
+                    <span>https://{subdomain}.amaas.xyz is available!</span>
+                  </p>
+                ) : null}
+              </div>
+
+              {/* Phone & WhatsApp */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    Customer Phone Number *
+                  </label>
+                  <input
+                    type="text"
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    placeholder="+880 1XXXXXXXXX"
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    WhatsApp Orders / Chat Number *
+                  </label>
+                  <input
+                    type="text"
+                    value={whatsappNumber}
+                    onChange={(e) => setWhatsappNumber(e.target.value)}
+                    placeholder="+880 1XXXXXXXXX"
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono"
+                  />
+                </div>
+              </div>
+
+              {/* Office Address */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Physical Store / Office Address
                 </label>
                 <input
                   type="text"
-                  required
-                  value={whatsappNumber}
-                  onChange={(e) => setWhatsappNumber(e.target.value)}
-                  placeholder="+880 1711-..."
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
-                />
-              </div>
-
-              <div>
-                <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  Support Email Address *
-                </label>
-                <input
-                  type="email"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="contact@business.com"
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
-                />
-              </div>
-
-              <div>
-                <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  Physical Address / Showroom Location *
-                </label>
-                <input
-                  type="text"
-                  required
                   value={address}
                   onChange={(e) => setAddress(e.target.value)}
-                  placeholder="e.g. Gulshan 1, Dhaka"
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
+                  placeholder="e.g. House 42, Road 11, Banani, Dhaka"
+                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
                 />
               </div>
-            </div>
 
-            <div className="flex justify-end pt-4 border-t border-slate-100 dark:border-slate-800">
-              <button
-                type="button"
-                onClick={() => {
-                  if (!businessName) {
-                    showToast('Please enter your business name', 'warning');
-                    return;
-                  }
-                  setStep(2);
-                }}
-                className="px-6 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs transition-colors flex items-center gap-2 shadow-xs"
-              >
-                <span>Continue to Design & Colors</span>
-                <ArrowRight className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* =========================================================================
-            STEP 2: DESIGN TEMPLATE & BRAND COLORS
-           ========================================================================= */}
-        {step === 2 && (
-          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 sm:p-8 space-y-8 shadow-xs">
-            <div>
-              <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-                Step 2: Choose Design Template & Brand Color Palette
-              </h2>
-              <p className="text-xs text-slate-500 mt-1">
-                Select from our mobile-optimized layouts tailored for responsiveness and conversions.
-              </p>
-            </div>
-
-            {/* Template Selector */}
-            <div className="space-y-3">
-              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                Design Template
-              </label>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                {TEMPLATES.map((tpl) => {
-                  const isSelected = selectedTemplateId === tpl.id;
-                  return (
-                    <div
-                      key={tpl.id}
-                      onClick={() => setSelectedTemplateId(tpl.id)}
-                      className={`p-5 rounded-xl border cursor-pointer transition-all flex flex-col justify-between ${
-                        isSelected
-                          ? 'border-blue-600 bg-blue-50/40 dark:bg-blue-950/40 ring-2 ring-blue-600'
-                          : 'border-slate-200 dark:border-slate-800 hover:border-slate-300'
-                      }`}
-                    >
-                      <div className="space-y-3">
-                        <div
-                          className="h-20 rounded-lg flex items-center justify-center text-white font-bold text-xs shadow-inner"
-                          style={{ backgroundColor: tpl.previewColor }}
-                        >
-                          <Layout className="w-6 h-6 opacity-80" />
-                        </div>
-                        <h4 className="font-bold text-xs text-slate-900 dark:text-white">
-                          {tpl.name}
-                        </h4>
-                        <p className="text-[11px] text-slate-500 leading-relaxed">
-                          {tpl.description}
-                        </p>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Brand Color Palette */}
-            <div className="space-y-3">
-              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                Primary Brand Accent Color
-              </label>
-              <div className="flex flex-wrap items-center gap-3">
-                {BRAND_COLORS.map((col) => (
-                  <button
-                    key={col.hex}
-                    type="button"
-                    onClick={() => setBrandColor(col.hex)}
-                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-medium transition-all ${
-                      brandColor === col.hex
-                        ? 'border-slate-900 dark:border-white ring-2 ring-blue-500 text-slate-900 dark:text-white font-bold'
-                        : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400'
-                    }`}
-                  >
-                    <span
-                      className="w-3.5 h-3.5 rounded-full inline-block border border-black/10"
-                      style={{ backgroundColor: col.hex }}
-                    />
-                    <span>{col.name}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="flex justify-between pt-4 border-t border-slate-100 dark:border-slate-800">
-              <button
-                type="button"
-                onClick={() => setStep(1)}
-                className="px-5 py-2.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-semibold text-xs transition-colors flex items-center gap-2"
-              >
-                <ArrowLeft className="w-4 h-4" />
-                <span>Back</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setStep(3)}
-                className="px-6 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs transition-colors flex items-center gap-2 shadow-xs"
-              >
-                <span>Continue to Offerings & Content</span>
-                <ArrowRight className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* =========================================================================
-            STEP 3: OFFERINGS & EDITABLE CONTENT
-           ========================================================================= */}
-        {step === 3 && (
-          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 sm:p-8 space-y-8 shadow-xs">
-            <div>
-              <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-                Step 3: Business Copy & Catalog Offerings
-              </h2>
-              <p className="text-xs text-slate-500 mt-1">
-                Customize your headline, about story, and featured services or menu items.
-              </p>
-            </div>
-
-            <div className="space-y-4 text-xs">
+              {/* Headline & Subheadline */}
               <div>
-                <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  Hero Headline *
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Homepage Hero Headline
                 </label>
                 <input
                   type="text"
                   value={headline}
                   onChange={(e) => setHeadline(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
+                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-medium"
                 />
               </div>
 
               <div>
-                <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  Sub-headline / Supporting Value Proposition *
-                </label>
-                <input
-                  type="text"
-                  value={subheadline}
-                  onChange={(e) => setSubheadline(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
-                />
-              </div>
-
-              <div>
-                <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  About Business Description *
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Supporting Story / Subtitle
                 </label>
                 <textarea
-                  rows={3}
-                  value={aboutText}
-                  onChange={(e) => setAboutText(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
+                  rows={2}
+                  value={subheadline}
+                  onChange={(e) => setSubheadline(e.target.value)}
+                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs leading-relaxed"
                 />
               </div>
             </div>
 
-            {/* Dynamic Items List */}
-            <div className="space-y-3 pt-4 border-t border-slate-100 dark:border-slate-800">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-xs font-bold text-slate-900 dark:text-white uppercase tracking-wider">
-                    Featured Products or Services ({items.length})
-                  </h3>
-                  <p className="text-[11px] text-slate-500">
-                    Customers can browse and click order directly on WhatsApp.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleAddItem}
-                  className="px-3 py-1.5 rounded-lg bg-blue-50 dark:bg-blue-950 text-blue-600 dark:text-blue-400 font-semibold text-xs flex items-center gap-1.5 hover:bg-blue-100 dark:hover:bg-blue-900 transition-colors"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Add Item</span>
-                </button>
-              </div>
-
-              <div className="space-y-3">
-                {items.map((item, index) => (
-                  <div
-                    key={item.id}
-                    className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-850 grid grid-cols-1 sm:grid-cols-12 gap-3 items-center text-xs"
-                  >
-                    <div className="sm:col-span-4">
-                      <label className="block text-[10px] text-slate-400 mb-0.5">Item Name</label>
-                      <input
-                        type="text"
-                        value={item.name}
-                        onChange={(e) => handleItemChange(item.id, 'name', e.target.value)}
-                        className="w-full px-2.5 py-1.5 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white text-xs font-medium"
-                      />
-                    </div>
-                    <div className="sm:col-span-3">
-                      <label className="block text-[10px] text-slate-400 mb-0.5">Price / Tag</label>
-                      <input
-                        type="text"
-                        value={item.price}
-                        onChange={(e) => handleItemChange(item.id, 'price', e.target.value)}
-                        className="w-full px-2.5 py-1.5 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white text-xs font-mono"
-                      />
-                    </div>
-                    <div className="sm:col-span-4">
-                      <label className="block text-[10px] text-slate-400 mb-0.5">Description</label>
-                      <input
-                        type="text"
-                        value={item.description}
-                        onChange={(e) => handleItemChange(item.id, 'description', e.target.value)}
-                        className="w-full px-2.5 py-1.5 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white text-xs"
-                      />
-                    </div>
-                    <div className="sm:col-span-1 flex justify-end">
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveItem(item.id)}
-                        className="p-1.5 text-slate-400 hover:text-red-600 rounded-md transition-colors"
-                        title="Delete item"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="flex justify-between pt-4 border-t border-slate-100 dark:border-slate-800">
+            <div className="flex items-center justify-between pt-4">
               <button
                 type="button"
-                onClick={() => setStep(2)}
-                className="px-5 py-2.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-semibold text-xs transition-colors flex items-center gap-2"
+                onClick={() => setStep(1)}
+                className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold flex items-center gap-1.5"
               >
-                <ArrowLeft className="w-4 h-4" />
-                <span>Back</span>
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>Change Category</span>
               </button>
               <button
                 type="button"
-                onClick={() => setStep(4)}
-                className="px-6 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs transition-colors flex items-center gap-2 shadow-xs"
-              >
-                <span>Continue to Live Preview</span>
-                <ArrowRight className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* =========================================================================
-            STEP 4: INTERACTIVE LIVE PREVIEW & EDIT
-           ========================================================================= */}
-        {step === 4 && (
-          <div className="space-y-6">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs">
-              <div>
-                <h2 className="text-base font-bold text-slate-900 dark:text-white">
-                  Step 4: Interactive Live Website Draft
-                </h2>
-                <p className="text-xs text-slate-500">
-                  Test your mobile and desktop layout. All sections, WhatsApp triggers, and contact forms are fully responsive.
-                </p>
-              </div>
-
-              <div className="flex items-center gap-3">
-                <div className="inline-flex p-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs">
-                  <button
-                    onClick={() => setPreviewDevice('desktop')}
-                    className={`px-3 py-1.5 rounded-md flex items-center gap-1.5 font-medium transition-colors ${
-                      previewDevice === 'desktop'
-                        ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-xs font-semibold'
-                        : 'text-slate-500 hover:text-slate-900 dark:hover:text-white'
-                    }`}
-                  >
-                    <Monitor className="w-3.5 h-3.5" />
-                    <span>Desktop</span>
-                  </button>
-                  <button
-                    onClick={() => setPreviewDevice('mobile')}
-                    className={`px-3 py-1.5 rounded-md flex items-center gap-1.5 font-medium transition-colors ${
-                      previewDevice === 'mobile'
-                        ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-xs font-semibold'
-                        : 'text-slate-500 hover:text-slate-900 dark:hover:text-white'
-                    }`}
-                  >
-                    <Smartphone className="w-3.5 h-3.5" />
-                    <span>Mobile</span>
-                  </button>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => setStep(5)}
-                  className="px-5 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs flex items-center gap-2 shadow-xs transition-colors"
-                >
-                  <span>Approve & Pick Subdomain</span>
-                  <ArrowRight className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-
-            {/* Live Interactive Preview */}
-            <div className="p-4 sm:p-8 bg-slate-200/60 dark:bg-slate-900/40 rounded-2xl border border-slate-300 dark:border-slate-800 flex justify-center">
-              <WebsitePreviewRenderer site={currentPreviewSite} viewMode={previewDevice} />
-            </div>
-
-            <div className="flex justify-between">
-              <button
-                type="button"
+                disabled={!businessName.trim() || !subdomain.trim() || !!subdomainError}
                 onClick={() => setStep(3)}
-                className="px-5 py-2.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 font-semibold text-xs transition-colors flex items-center gap-2"
+                className="px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-md flex items-center gap-2 disabled:opacity-50 cursor-pointer"
               >
-                <ArrowLeft className="w-4 h-4" />
-                <span>Back to Content Edit</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setStep(5)}
-                className="px-6 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs transition-colors flex items-center gap-2 shadow-xs"
-              >
-                <span>Continue to Subdomain Selection</span>
-                <ArrowRight className="w-4 h-4" />
+                <span>Continue to Offerings</span>
+                <ArrowRight className="w-3.5 h-3.5" />
               </button>
             </div>
           </div>
         )}
 
-        {/* =========================================================================
-            STEP 5: SUBDOMAIN CHECK & DEMO ACTIVATION
-           ========================================================================= */}
-        {step === 5 && (
-          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 sm:p-8 space-y-8 shadow-xs max-w-3xl mx-auto">
-            <div>
-              <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-                Step 5: Choose Subdomain & Activate Subscription
+        {/* STEP 3: OFFERINGS & PRODUCTS */}
+        {step === 3 && (
+          <div className="space-y-6 max-w-3xl mx-auto">
+            <div className="text-center space-y-2">
+              <span className="text-xs font-bold text-blue-600 uppercase tracking-wider">
+                Step 3 of 5 · {selectedCategory.label}
+              </span>
+              <h2 className="text-2xl font-bold text-slate-900 dark:text-white">
+                Showcase Your {selectedCategory.itemTypeLabel}
               </h2>
-              <p className="text-xs text-slate-500 mt-1">
-                Your website will be hosted and routed on the AMAAS network under your chosen subdomain.
+              <p className="text-xs text-slate-500">
+                Add featured items, services, or properties for your storefront with pricing and descriptions.
               </p>
             </div>
 
-            {/* Subdomain Checker Card */}
-            <div className="p-6 rounded-2xl bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-800 space-y-4">
-              <label className="block text-xs font-bold text-slate-900 dark:text-white">
-                Choose Your Desired Subdomain:
-              </label>
-
-              <div className="flex items-center gap-2">
-                <div className="relative flex-1">
-                  <input
-                    type="text"
-                    value={subdomain}
-                    onChange={(e) => setSubdomain(e.target.value.toLowerCase().trim())}
-                    placeholder="yourbusiness"
-                    className="w-full px-3 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white text-sm font-mono"
-                  />
-                </div>
-                <span className="font-mono font-bold text-slate-700 dark:text-slate-300 text-sm whitespace-nowrap">
-                  .amaas.xyz
-                </span>
-              </div>
-
-              {/* Real-time Status Feedback */}
-              {subdomainCheckResult && (
+            <div className="space-y-4">
+              {items.map((item, idx) => (
                 <div
-                  className={`p-3 rounded-xl text-xs flex items-start gap-2.5 ${
-                    subdomainCheckResult.available
-                      ? 'bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300 font-medium'
-                      : 'bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 text-red-800 dark:text-red-300'
-                  }`}
+                  key={item.id}
+                  className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3"
                 >
-                  {subdomainCheckResult.available ? (
-                    <>
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                      <div>
-                        <strong>Subdomain Available!</strong>{' '}
-                        <code className="font-mono text-emerald-700 dark:text-emerald-200 font-bold">
-                          https://{subdomain}.amaas.xyz
-                        </code>{' '}
-                        is ready for assignment under your account.
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
-                      <div>
-                        <strong>Unavailable:</strong> {subdomainCheckResult.reason}
-                      </div>
-                    </>
-                  )}
-                </div>
-              )}
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-blue-600">
+                      {selectedCategory.itemTypeLabel.slice(0, -1)} #{idx + 1}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveItem(item.id)}
+                      className="p-1 text-slate-400 hover:text-rose-500 transition-colors"
+                      title="Remove item"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
 
-              {/* Subdomain Disclosures */}
-              <div className="text-[11px] text-slate-500 space-y-1.5 pt-2 border-t border-slate-200 dark:border-slate-800">
-                <p>
-                  • Subdomain format is provided under AMAAS infrastructure (<code className="font-mono">businessname.amaas.xyz</code>). It is not a separately registered top-level domain (.com).
-                </p>
-                <p>
-                  • Custom domain upgrade (e.g. <code className="font-mono">yourbusiness.com</code>) can be connected at any time from your website dashboard.
-                </p>
-              </div>
-            </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div className="sm:col-span-2">
+                      <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                        Title / Name *
+                      </label>
+                      <input
+                        type="text"
+                        value={item.name}
+                        onChange={(e) => handleUpdateItem(item.id, 'name', e.target.value)}
+                        className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-semibold"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                        Display Price / Fee *
+                      </label>
+                      <input
+                        type="text"
+                        value={item.price}
+                        onChange={(e) => handleUpdateItem(item.id, 'price', e.target.value)}
+                        placeholder="e.g. ৳1,850 or Custom"
+                        className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono font-bold"
+                      />
+                    </div>
+                  </div>
 
-            {/* Plan & Pricing Summary */}
-            <div className="p-6 rounded-2xl bg-gradient-to-r from-blue-900 to-slate-900 text-white border border-blue-800 space-y-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="px-2 py-0.5 rounded-full bg-blue-500/30 text-blue-200 text-[10px] font-semibold uppercase">
-                    Monthly Subscription
-                  </span>
-                  <h3 className="text-lg font-bold text-white mt-1">
-                    {websiteSubscriptionPlan.name}
-                  </h3>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                      Highlight Description
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={item.description}
+                      onChange={(e) => handleUpdateItem(item.id, 'description', e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs leading-relaxed"
+                    />
+                  </div>
                 </div>
-                <div className="text-right">
-                  <span className="text-2xl sm:text-3xl font-extrabold font-mono">
-                    ৳{websiteSubscriptionPlan.priceMonthly.toLocaleString()}
-                  </span>
-                  <span className="text-xs text-slate-300"> / month</span>
-                </div>
-              </div>
+              ))}
 
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-3 border-t border-blue-800/80 text-[11px] text-slate-300">
-                <div>
-                  <span className="text-slate-400 block">Upfront Setup:</span>
-                  <strong className="text-white">৳0 (Zero Dev Fee)</strong>
-                </div>
-                <div>
-                  <span className="text-slate-400 block">Hosting & SSL:</span>
-                  <strong className="text-white">Included</strong>
-                </div>
-                <div>
-                  <span className="text-slate-400 block">Monthly Updates:</span>
-                  <strong className="text-white">Up to 2 / month</strong>
-                </div>
-                <div>
-                  <span className="text-slate-400 block">Grace Period:</span>
-                  <strong className="text-white">7 Days (Preserved)</strong>
-                </div>
-              </div>
-            </div>
-
-            {/* Payment Gateway (Demo Flow) */}
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                  Select Payment Method
-                </label>
-                <span className="text-[10px] text-slate-400">Instant Automated Activation</span>
-              </div>
-              <div className="grid grid-cols-3 gap-3">
-                {['bKash', 'Nagad', 'Card'].map((gw) => (
-                  <button
-                    key={gw}
-                    type="button"
-                    onClick={() => setPaymentGateway(gw as any)}
-                    className={`py-3 px-4 rounded-xl border text-xs font-semibold transition-all ${
-                      paymentGateway === gw
-                        ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/40 text-blue-900 dark:text-blue-200 ring-2 ring-blue-600'
-                        : 'border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300'
-                    }`}
-                  >
-                    {gw} Instant Checkout
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Action Buttons */}
-            <div className="flex justify-between pt-4 border-t border-slate-100 dark:border-slate-800">
               <button
                 type="button"
-                onClick={() => setStep(4)}
-                className="px-5 py-2.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-semibold text-xs transition-colors flex items-center gap-2"
+                onClick={handleAddItem}
+                className="w-full py-3 rounded-2xl border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-blue-500 hover:bg-blue-50/50 dark:hover:bg-blue-950/20 text-xs font-semibold text-slate-600 dark:text-slate-300 transition-all flex items-center justify-center gap-2 cursor-pointer"
               >
-                <ArrowLeft className="w-4 h-4" />
+                <Plus className="w-4 h-4 text-blue-600" />
+                <span>+ Add Another {selectedCategory.itemTypeLabel.slice(0, -1)}</span>
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between pt-4">
+              <button
+                type="button"
+                onClick={() => setStep(2)}
+                className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold flex items-center gap-1.5"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
                 <span>Back</span>
               </button>
               <button
                 type="button"
-                disabled={!subdomainCheckResult?.available}
-                onClick={handleDeployAndActivate}
-                className="px-7 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs transition-colors flex items-center gap-2 shadow-md"
+                onClick={() => setStep(4)}
+                className="px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-md flex items-center gap-2 cursor-pointer"
               >
-                <Zap className="w-4 h-4 text-amber-300" />
-                <span>Confirm & Deploy Website (৳600/mo)</span>
+                <span>Continue to Theme</span>
+                <ArrowRight className="w-3.5 h-3.5" />
               </button>
             </div>
           </div>
         )}
 
-        {/* Modal: Deployment Progress Simulation */}
-        {isDeploying && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-xs p-4">
-            <div className="bg-slate-900 border border-slate-800 text-white rounded-2xl max-w-md w-full p-6 space-y-6 shadow-2xl text-center">
-              <div className="w-16 h-16 rounded-2xl bg-blue-600/30 text-blue-400 flex items-center justify-center mx-auto border border-blue-500/40 animate-pulse">
-                <Globe className="w-8 h-8" />
+        {/* STEP 4: COLOR THEME & PREVIEW */}
+        {step === 4 && (
+          <div className="space-y-6">
+            <div className="text-center max-w-2xl mx-auto space-y-2">
+              <span className="text-xs font-bold text-blue-600 uppercase tracking-wider">
+                Step 4 of 5 · Design & Live Preview
+              </span>
+              <h2 className="text-2xl font-bold text-slate-900 dark:text-white">
+                Choose Brand Colors & Visual Theme
+              </h2>
+              <p className="text-xs text-slate-500">
+                Personalize your storefront palette and verify how your website looks across mobile and desktop devices.
+              </p>
+            </div>
+
+            {/* Palette Selection Grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+              {THEME_PALETTES.map((pal) => (
+                <button
+                  key={pal.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedPalette(pal);
+                    setBrandColor(pal.brandColor);
+                  }}
+                  className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                    brandColor === pal.brandColor
+                      ? 'border-blue-600 ring-2 ring-blue-500/20 bg-blue-50/40 dark:bg-blue-950/40'
+                      : 'border-slate-200 dark:border-slate-800 hover:bg-slate-50'
+                  }`}
+                >
+                  <div className="w-6 h-6 rounded-full shadow-xs mb-2" style={{ backgroundColor: pal.brandColor }} />
+                  <span className="font-bold text-[11px] text-slate-900 dark:text-white block truncate">{pal.name}</span>
+                  <span className="text-[10px] text-slate-400 font-mono mt-0.5 block">{pal.fontPairing}</span>
+                </button>
+              ))}
+            </div>
+
+            {/* Device Switcher for Preview */}
+            <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-700 dark:text-slate-300">
+                <Sparkles className="w-4 h-4 text-blue-600" />
+                <span>Interactive Live Preview: https://{subdomain || 'yourbusiness'}.amaas.xyz</span>
+              </div>
+              <div className="flex items-center p-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setPreviewDevice('desktop')}
+                  className={`p-1.5 rounded-md flex items-center gap-1 ${
+                    previewDevice === 'desktop' ? 'bg-white dark:bg-slate-900 shadow-xs text-blue-600 font-bold' : 'text-slate-500'
+                  }`}
+                >
+                  <Monitor className="w-3.5 h-3.5" />
+                  <span>Desktop</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewDevice('mobile')}
+                  className={`p-1.5 rounded-md flex items-center gap-1 ${
+                    previewDevice === 'mobile' ? 'bg-white dark:bg-slate-900 shadow-xs text-blue-600 font-bold' : 'text-slate-500'
+                  }`}
+                >
+                  <Smartphone className="w-3.5 h-3.5" />
+                  <span>Mobile</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Live Rendered Preview */}
+            <div className="p-4 rounded-3xl bg-slate-100 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 overflow-hidden">
+              <WebsitePreviewRenderer site={draftSite} viewMode={previewDevice} />
+            </div>
+
+            <div className="flex items-center justify-between pt-4">
+              <button
+                type="button"
+                onClick={() => setStep(3)}
+                className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold flex items-center gap-1.5"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>Back</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleCompleteDraft}
+                className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white text-xs font-bold shadow-md flex items-center gap-2 cursor-pointer"
+              >
+                <span>Save Draft & Proceed to Subscription</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* STEP 5: LAUNCH, PRICING & PAYMENT */}
+        {step === 5 && (
+          <div className="space-y-6 max-w-2xl mx-auto">
+            <div className="text-center space-y-2">
+              <div className="w-12 h-12 rounded-2xl bg-emerald-100 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400 flex items-center justify-center mx-auto shadow-sm">
+                <CheckCircle2 className="w-6 h-6" />
+              </div>
+              <h2 className="text-2xl font-black text-slate-900 dark:text-white">
+                Website Draft Created Successfully!
+              </h2>
+              <p className="text-xs text-slate-500">
+                Your website has been saved at <strong className="font-mono text-blue-600">https://{subdomain}.amaas.xyz</strong>.
+              </p>
+            </div>
+
+            {/* Policy Disclosure Box: Website Service Free Trial Exclusion */}
+            <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-900 dark:text-amber-200 text-xs space-y-2">
+              <div className="flex items-center gap-2 font-bold">
+                <ShieldCheck className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                <span>Website Service Subscription Terms (No Free Trial)</span>
+              </div>
+              <p className="leading-relaxed text-[11px] text-amber-800 dark:text-amber-300">
+                To guarantee zero downtime, dedicated SSL provisioning, and cloud hosting infrastructure, the <strong>AMAAS Website Lite</strong> service does not operate on a free trial. Public domain publishing is enabled immediately once your manual payment is verified by our administrative team.
+              </p>
+            </div>
+
+            {/* Plan Fee Breakdown Card */}
+            <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-md space-y-4">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+                <div>
+                  <h3 className="font-bold text-sm text-slate-900 dark:text-white">AMAAS Website Lite Subscription</h3>
+                  <span className="text-[11px] text-slate-400 font-mono">https://{subdomain}.amaas.xyz</span>
+                </div>
+                <div className="text-right">
+                  <span className="text-2xl font-black text-blue-600 font-mono tabular-nums">৳600</span>
+                  <span className="text-xs text-slate-400">/ month</span>
+                </div>
               </div>
 
+              <div className="space-y-2 text-xs text-slate-600 dark:text-slate-300">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-blue-600" />
+                  <span>Free <code className="font-mono text-blue-600">{subdomain}.amaas.xyz</code> subdomain with instant SSL</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-blue-600" />
+                  <span>Cloud SSD hosting with unlimited bandwidth</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-blue-600" />
+                  <span>Up to 2 monthly content update requests handled by AMAAS engineers</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-blue-600" />
+                  <span>Cash on Delivery order capture and direct WhatsApp chat button</span>
+                </div>
+              </div>
+
+              <div className="pt-4 border-t border-slate-100 dark:border-slate-800 flex flex-col sm:flex-row items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsPaymentModalOpen(true)}
+                  className="w-full sm:flex-1 py-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <CreditCard className="w-4 h-4" />
+                  <span>Submit Payment (bKash / Nagad / Bank)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigate('/dashboard/subscribed-website')}
+                  className="w-full sm:w-auto px-4 py-3 rounded-xl border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 transition-colors"
+                >
+                  Go to Website Hub
+                </button>
+              </div>
+            </div>
+
+            {/* Custom Domain Request Callout */}
+            <div className="p-4 rounded-xl bg-slate-100 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
               <div>
-                <h3 className="text-lg font-bold">Deploying Your Business Website</h3>
-                <p className="text-xs text-slate-400 font-mono mt-1">
-                  https://{subdomain}.amaas.xyz
-                </p>
+                <span className="font-bold text-slate-900 dark:text-white block">Want to connect your own custom domain?</span>
+                <span className="text-[11px] text-slate-500">
+                  e.g. <strong className="font-mono">www.yourbrand.com</strong> instead of .amaas.xyz.
+                </span>
               </div>
-
-              <div className="space-y-3 text-xs text-left bg-slate-950 p-4 rounded-xl border border-slate-850">
-                <div className={`flex items-center gap-2 ${deploymentStage >= 1 ? 'text-emerald-400 font-semibold' : 'text-slate-600'}`}>
-                  <span>{deploymentStage >= 1 ? '✓' : '○'}</span>
-                  <span>1. Allocating Subdomain DNS Record</span>
-                </div>
-                <div className={`flex items-center gap-2 ${deploymentStage >= 2 ? 'text-emerald-400 font-semibold' : 'text-slate-600'}`}>
-                  <span>{deploymentStage >= 2 ? '✓' : '○'}</span>
-                  <span>2. Generating SSL/HTTPS Encryption Handshake</span>
-                </div>
-                <div className={`flex items-center gap-2 ${deploymentStage >= 3 ? 'text-emerald-400 font-semibold' : 'text-slate-600'}`}>
-                  <span>{deploymentStage >= 3 ? '✓' : '○'}</span>
-                  <span>3. Bundling Catalog & WhatsApp Order Hooks</span>
-                </div>
-                <div className={`flex items-center gap-2 ${deploymentStage >= 4 ? 'text-emerald-400 font-semibold' : 'text-slate-600'}`}>
-                  <span>{deploymentStage >= 4 ? '✓' : '○'}</span>
-                  <span>4. Activating ৳600/mo Recurring Subscription</span>
-                </div>
-              </div>
-
-              <div className="text-[11px] text-slate-400 font-mono">
-                Connecting to GoAMAAS Hosting Core...
-              </div>
+              <a
+                href={`https://wa.me/8801822332020?text=${encodeURIComponent(`Hello AMAAS! I created a website draft for "${businessName}" (${subdomain}.amaas.xyz) and would like to connect a custom top-level domain.`)}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs flex items-center gap-1.5 shrink-0"
+              >
+                <MessageSquare className="w-3.5 h-3.5" />
+                <span>Contact on WhatsApp</span>
+              </a>
             </div>
           </div>
         )}
       </div>
+
+      {/* Manual Payment Verification Modal */}
+      <ManualPaymentModal
+        isOpen={isPaymentModalOpen}
+        onClose={() => setIsPaymentModalOpen(false)}
+        serviceType="website_subscription"
+        serviceId={createdSiteId}
+        serviceName={`AMAAS Website Lite (${businessName})`}
+        planTier="৳600/month"
+        amount={600}
+        onSuccess={() => {
+          showToast('Payment submitted for verification! Your website will be publicly active once approved.', 'success');
+          navigate('/dashboard/subscribed-website');
+        }}
+      />
     </div>
   );
 };

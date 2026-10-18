@@ -21,9 +21,12 @@ import {
 } from 'lucide-react';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
+import { TrialStatusBadge } from '../../components/ui/TrialStatusBadge';
+import { TrialGateBanner } from '../../components/ui/TrialGateBanner';
 
 export const LandingPageBuilderPage: React.FC = () => {
   const {
+    getServiceAccess,
     landingPages,
     createLandingPage,
     updateLandingPage,
@@ -31,6 +34,7 @@ export const LandingPageBuilderPage: React.FC = () => {
     togglePublishLandingPage,
     showToast,
   } = useApp();
+  const serviceAccess = getServiceAccess('landing_page_builder', 'Landing Page Visual Builder', 'landing_pages');
 
   const [activeTab, setActiveTab] = useState<'pages' | 'editor'>('pages');
   const [selectedPage, setSelectedPage] = useState<LandingPage>(landingPages[0]);
@@ -121,9 +125,16 @@ export const LandingPageBuilderPage: React.FC = () => {
       {/* Title & Navigation */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
-            Landing Page Visual Builder
-          </h1>
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
+              Landing Page Visual Builder
+            </h1>
+            <TrialStatusBadge
+              serviceId="landing_page_builder"
+              serviceName="Landing Page Visual Builder"
+              category="landing_pages"
+            />
+          </div>
           <p className="text-xs text-slate-500 mt-1">
             Build, customize, and publish high-converting campaign pages with direct COD checkout.
           </p>
@@ -149,8 +160,25 @@ export const LandingPageBuilderPage: React.FC = () => {
         </div>
       </div>
 
-      {/* VIEW 1: Pages Directory */}
-      {activeTab === 'pages' ? (
+      {/* Independent Trial Gate Banner if trial not active or expired */}
+      {!serviceAccess.hasAccess ? (
+        <TrialGateBanner
+          serviceId="landing_page_builder"
+          serviceName="Landing Page Visual Builder"
+          category="landing_pages"
+          serviceDescription="Design and launch fast-loading, mobile-optimized landing pages with built-in Cash on Delivery order forms and conversion tracking with our 7-day free trial."
+          features={[
+            'Drag-and-Drop Visual Section Controls',
+            '1-Click Cash on Delivery Checkout Funnels',
+            'Mobile & Desktop Interactive Preview Modes',
+            'Ad-Campaign Conversion Tracking & Analytics',
+            'Customizable Brand Colors & Typography',
+            'Real-Time Visitor & Order Syncing',
+          ]}
+          subscribePath="/dashboard/billing"
+          subscribePriceLabel="Included in Dashboard Pro"
+        />
+      ) : activeTab === 'pages' ? (
         <div className="space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {landingPages.map((lp) => {

@@ -43,10 +43,18 @@ export const AdminDashboardPage: React.FC = () => {
     renewSubscribedWebsite,
     automations,
     invoices,
+    paymentRequests,
+    adminApprovePayment,
+    adminRejectPayment,
+    paymentGatewayConfigs,
+    updatePaymentGatewayConfig,
     showToast,
   } = useApp();
 
-  const [activeAdminTab, setActiveAdminTab] = useState<'requests' | 'tenants' | 'transactions' | 'websiteSubscriptions'>('websiteSubscriptions');
+  const [activeAdminTab, setActiveAdminTab] = useState<'payments' | 'websiteSubscriptions' | 'requests' | 'tenants' | 'gateways' | 'transactions'>('payments');
+  const [paymentFilter, setPaymentFilter] = useState<'all' | 'pending' | 'approved' | 'rejected'>('pending');
+  const [rejectionModalId, setRejectionModalId] = useState<string | null>(null);
+  const [rejectionReason, setRejectionReason] = useState('');
   const [requestSearch, setRequestSearch] = useState('');
   const [websiteSearch, setWebsiteSearch] = useState('');
 
@@ -145,6 +153,17 @@ export const AdminDashboardPage: React.FC = () => {
       {/* Admin Navigation Tabs */}
       <div className="flex items-center gap-1 border-b border-slate-800 text-xs font-semibold overflow-x-auto pb-1">
         <button
+          onClick={() => setActiveAdminTab('payments')}
+          className={`px-4 py-2 rounded-t-lg transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+            activeAdminTab === 'payments'
+              ? 'bg-slate-900 text-emerald-400 border-b-2 border-emerald-500 font-bold'
+              : 'text-slate-400 hover:text-white'
+          }`}
+        >
+          <CreditCard className="w-3.5 h-3.5 text-emerald-400" />
+          <span>Manual Payments Queue ({paymentRequests.filter((p) => p.status === 'pending').length} Pending)</span>
+        </button>
+        <button
           onClick={() => setActiveAdminTab('websiteSubscriptions')}
           className={`px-4 py-2 rounded-t-lg transition-colors flex items-center gap-2 whitespace-nowrap ${
             activeAdminTab === 'websiteSubscriptions'
@@ -181,17 +200,261 @@ export const AdminDashboardPage: React.FC = () => {
         </button>
 
         <button
-          onClick={() => setActiveAdminTab('transactions')}
-          className={`px-4 py-2 rounded-t-lg transition-colors flex items-center gap-2 whitespace-nowrap ${
-            activeAdminTab === 'transactions'
-              ? 'bg-slate-900 text-purple-400 border-b-2 border-purple-500 font-bold'
+          onClick={() => setActiveAdminTab('gateways')}
+          className={`px-4 py-2 rounded-t-lg transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+            activeAdminTab === 'gateways'
+              ? 'bg-slate-900 text-blue-400 border-b-2 border-blue-500 font-bold'
               : 'text-slate-400 hover:text-white'
           }`}
         >
-          <CreditCard className="w-3.5 h-3.5" />
-          <span>Payment Ledger Audit</span>
+          <Settings className="w-3.5 h-3.5" />
+          <span>Gateway Accounts & WhatsApp Config</span>
         </button>
       </div>
+
+      {/* TAB: Manual Payments Queue */}
+      {activeAdminTab === 'payments' && (
+        <div className="space-y-6">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                <span>Manual Payment Verification Queue</span>
+                <span className="px-2 py-0.5 rounded-full bg-emerald-950 border border-emerald-800 text-emerald-400 text-xs">
+                  Real-Time bKash / Nagad / Bank Inbound
+                </span>
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Review submitted TrxIDs and deposit slips. Approving activates the service subscription automatically.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2 text-xs">
+              {(['all', 'pending', 'approved', 'rejected'] as const).map((st) => (
+                <button
+                  key={st}
+                  onClick={() => setPaymentFilter(st)}
+                  className={`px-3 py-1.5 rounded-lg capitalize transition-colors cursor-pointer ${
+                    paymentFilter === st
+                      ? 'bg-emerald-600 text-white font-bold'
+                      : 'bg-slate-900 text-slate-400 hover:bg-slate-800'
+                  }`}
+                >
+                  {st}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Payments Table */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-950 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
+                  <tr>
+                    <th className="p-4">Customer & Store</th>
+                    <th className="p-4">Service & Plan</th>
+                    <th className="p-4">Amount</th>
+                    <th className="p-4">Method & TrxID</th>
+                    <th className="p-4">Status</th>
+                    <th className="p-4">Date</th>
+                    <th className="p-4 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60 text-slate-300">
+                  {paymentRequests
+                    .filter((p) => paymentFilter === 'all' || p.status === paymentFilter)
+                    .map((req) => (
+                      <tr key={req.id} className="hover:bg-slate-850/50 transition-colors">
+                        <td className="p-4">
+                          <span className="font-bold text-white block">{req.customerName}</span>
+                          <span className="text-[11px] text-slate-400 font-mono block">{req.customerPhone}</span>
+                          <span className="text-[10px] text-slate-500">{req.customerEmail}</span>
+                        </td>
+                        <td className="p-4">
+                          <span className="font-semibold text-white block">{req.serviceName}</span>
+                          <span className="text-[11px] text-slate-400">{req.planTier}</span>
+                        </td>
+                        <td className="p-4 font-mono font-bold text-sm text-emerald-400 tabular-nums">
+                          ৳{req.amount.toLocaleString()}
+                        </td>
+                        <td className="p-4">
+                          <span className="inline-block px-2 py-0.5 rounded bg-slate-800 text-[10px] font-bold text-white mb-1">
+                            {req.paymentMethod}
+                          </span>
+                          <span className="font-mono text-[11px] text-slate-300 block font-semibold">
+                            {req.transactionId || req.bankReference || 'Receipt on WhatsApp'}
+                          </span>
+                          {req.senderNumber && (
+                            <span className="text-[10px] text-slate-500 font-mono block">From: {req.senderNumber}</span>
+                          )}
+                        </td>
+                        <td className="p-4">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                              req.status === 'approved'
+                                ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                                : req.status === 'rejected'
+                                ? 'bg-rose-950 text-rose-400 border border-rose-800'
+                                : 'bg-amber-950 text-amber-400 border border-amber-800 animate-pulse'
+                            }`}
+                          >
+                            {req.status}
+                          </span>
+                          {req.adminNotes && (
+                            <p className="text-[10px] text-slate-400 mt-1 max-w-xs">{req.adminNotes}</p>
+                          )}
+                        </td>
+                        <td className="p-4 text-slate-400 text-[11px] whitespace-nowrap">
+                          {new Date(req.createdAt).toLocaleDateString()}
+                        </td>
+                        <td className="p-4 text-right">
+                          {req.status === 'pending' ? (
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                onClick={() => adminApprovePayment(req.id, 'Verified via SMS & bank statement.')}
+                                className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition-colors cursor-pointer"
+                              >
+                                Approve
+                              </button>
+                              <button
+                                onClick={() => setRejectionModalId(req.id)}
+                                className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/60 text-slate-300 hover:text-rose-200 font-semibold text-xs transition-colors cursor-pointer"
+                              >
+                                Reject
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="text-[11px] text-slate-500 italic">Settled</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  {paymentRequests.length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="p-8 text-center text-slate-500 text-xs">
+                        No manual payment submissions recorded yet.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB: Gateway Accounts & WhatsApp Configuration */}
+      {activeAdminTab === 'gateways' && (
+        <div className="space-y-6">
+          <div>
+            <h2 className="text-lg font-bold text-white">Payment Gateways & Contact Configuration</h2>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Configure receiving numbers and bank details displayed to customers during manual checkout.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {paymentGatewayConfigs.map((gw) => (
+              <div key={gw.id} className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-white text-sm">{gw.displayName}</span>
+                  <button
+                    onClick={() => updatePaymentGatewayConfig(gw.id, { isEnabled: !gw.isEnabled })}
+                    className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase transition-colors cursor-pointer ${
+                      gw.isEnabled
+                        ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                        : 'bg-slate-800 text-slate-400 border border-slate-700'
+                    }`}
+                  >
+                    {gw.isEnabled ? 'Enabled' : 'Disabled'}
+                  </button>
+                </div>
+
+                <div className="space-y-3 text-xs">
+                  {gw.accountNumber !== undefined && (
+                    <div>
+                      <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">
+                        Account / WhatsApp Number
+                      </label>
+                      <input
+                        type="text"
+                        value={gw.accountNumber}
+                        onChange={(e) => updatePaymentGatewayConfig(gw.id, { accountNumber: e.target.value })}
+                        className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-white font-mono"
+                      />
+                    </div>
+                  )}
+
+                  {gw.bankName !== undefined && (
+                    <div>
+                      <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Bank Name</label>
+                      <input
+                        type="text"
+                        value={gw.bankName}
+                        onChange={(e) => updatePaymentGatewayConfig(gw.id, { bankName: e.target.value })}
+                        className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-white"
+                      />
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">
+                      Customer Instructions
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={gw.instructions}
+                      onChange={(e) => updatePaymentGatewayConfig(gw.id, { instructions: e.target.value })}
+                      className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-white leading-relaxed"
+                    />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Rejection Reason Modal */}
+      <Modal
+        isOpen={!!rejectionModalId}
+        onClose={() => setRejectionModalId(null)}
+        title="Reject Payment Request"
+        maxWidth="md"
+      >
+        <div className="space-y-4 text-xs">
+          <p className="text-slate-400">
+            Please provide a specific reason for rejecting this payment submission (e.g. TrxID not found in bKash merchant statement).
+          </p>
+          <textarea
+            rows={3}
+            value={rejectionReason}
+            onChange={(e) => setRejectionReason(e.target.value)}
+            placeholder="Reason for rejection..."
+            className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white"
+          />
+          <div className="flex justify-end gap-2 pt-2">
+            <button
+              onClick={() => setRejectionModalId(null)}
+              className="px-4 py-2 rounded-lg bg-slate-800 text-slate-300 font-semibold text-xs"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => {
+                if (rejectionModalId) {
+                  adminRejectPayment(rejectionModalId, rejectionReason || 'Transaction ID not verified.');
+                  setRejectionModalId(null);
+                  setRejectionReason('');
+                }
+              }}
+              className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-semibold text-xs cursor-pointer"
+            >
+              Confirm Rejection
+            </button>
+          </div>
+        </div>
+      </Modal>
 
       {/* TAB 0: Website Subscriptions Management (Lite ৳600/month Plan) */}
       {activeAdminTab === 'websiteSubscriptions' && (

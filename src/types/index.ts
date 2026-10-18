@@ -226,9 +226,12 @@ export type BusinessNiche =
   | 'restaurant'
   | 'cafe'
   | 'ecommerce'
+  | 'fashion'
   | 'gym'
   | 'salon'
+  | 'clinic'
   | 'real_estate'
+  | 'architecture'
   | 'agency'
   | 'portfolio'
   | 'other';
@@ -278,7 +281,7 @@ export interface SubscribedWebsite {
   planName: string; // 'AMAAS Website Lite'
   monthlyFee: number; // 600
   subscriptionStatus: 'active' | 'grace_period' | 'past_due' | 'suspended';
-  paymentStatus: 'paid' | 'pending' | 'failed';
+  paymentStatus: 'paid' | 'pending' | 'failed' | 'pending_review';
   deploymentStatus: 'live' | 'provisioning' | 'maintenance' | 'suspended';
   sslStatus: 'active' | 'pending';
   nextBillingDate: string;
@@ -307,4 +310,84 @@ export interface WebsiteSubscriptionPlanConfig {
   };
   disclosures: string[];
   isVisible: boolean;
+}
+
+// ==============================================================================
+// Service Trials System (Independent 7-Day Free Trial For Every Service)
+// ==============================================================================
+export type ServiceTrialCategory = 'dashboard' | 'ai_automation' | 'website' | 'landing_pages';
+
+export type ServiceTrialStatus = 'active' | 'expired' | 'converted';
+
+export interface ServiceTrialRecord {
+  id: string;
+  userId: string;
+  storeId?: string | null;
+  serviceId: string;
+  serviceName: string;
+  serviceCategory: ServiceTrialCategory;
+  status: ServiceTrialStatus;
+  startedAt: string;
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ServiceAccessStatus {
+  serviceId: string;
+  serviceName: string;
+  serviceCategory: ServiceTrialCategory;
+  status: 'available' | 'trial_active' | 'trial_expired' | 'subscribed';
+  hasAccess: boolean;
+  trialRecord?: ServiceTrialRecord;
+  daysRemaining?: number;
+  hoursRemaining?: number;
+  formattedExpiresAt?: string;
+  isExpired: boolean;
+}
+
+// ==============================================================================
+// Payment Requests & Gateways System
+// ==============================================================================
+export type PaymentMethodType = 'bKash' | 'Nagad' | 'Bank Transfer';
+
+export type PaymentRequestStatus = 'pending' | 'approved' | 'rejected';
+
+export interface PaymentRequest {
+  id: string;
+  userId: string;
+  storeId?: string | null;
+  customerName: string;
+  customerPhone: string;
+  customerEmail: string;
+  serviceType: 'website_subscription' | 'website_package' | 'dashboard_plan' | 'ai_automation';
+  serviceId: string;
+  serviceName: string;
+  planTier: string;
+  amount: number;
+  currency: string;
+  paymentMethod: PaymentMethodType;
+  transactionId?: string;
+  senderNumber?: string;
+  bankName?: string;
+  bankAccountName?: string;
+  bankReference?: string;
+  status: PaymentRequestStatus;
+  adminNotes?: string;
+  reviewedBy?: string | null;
+  reviewedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PaymentGatewayConfig {
+  id: 'bkash' | 'nagad' | 'bank_transfer' | 'whatsapp_support';
+  displayName: string;
+  isEnabled: boolean;
+  accountNumber?: string;
+  accountName?: string;
+  bankName?: string;
+  branchName?: string;
+  routingNumber?: string;
+  instructions: string;
 }

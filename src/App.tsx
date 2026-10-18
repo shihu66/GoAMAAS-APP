@@ -19,6 +19,7 @@ import { PricingPage } from './pages/public/PricingPage';
 import { AboutPage } from './pages/public/AboutPage';
 import { ContactPage } from './pages/public/ContactPage';
 import { CreateWebsitePage } from './pages/public/CreateWebsitePage';
+import { PublicTenantWebsitePage } from './pages/public/PublicTenantWebsitePage';
 
 // Auth Pages
 import { LoginPage } from './pages/auth/LoginPage';
@@ -48,9 +49,21 @@ import { SupportPage } from './pages/dashboard/SupportPage';
 import { AdminDashboardPage } from './pages/admin/AdminDashboardPage';
 
 export default function App() {
+  // Check if current request is dispatched to a tenant subdomain (e.g. urbanfashion.amaas.xyz)
+  const isTenantSubdomain = typeof window !== 'undefined' &&
+    window.location.hostname.endsWith('.amaas.xyz') &&
+    window.location.hostname !== 'app.amaas.xyz' &&
+    window.location.hostname !== 'amaas.xyz';
+
   return (
     <AppProvider>
       <BrowserRouter>
+        {isTenantSubdomain && (
+          <Routes>
+            <Route path="*" element={<PublicTenantWebsitePage />} />
+          </Routes>
+        )}
+        {!isTenantSubdomain && (
         <Routes>
           {/* Public Website Routes */}
           <Route element={<PublicLayout />}>
@@ -62,6 +75,9 @@ export default function App() {
             <Route path="/contact" element={<ContactPage />} />
             <Route path="/create-website" element={<CreateWebsitePage />} />
           </Route>
+
+          {/* Multi-Tenant Public Website Routes */}
+          <Route path="/sites/:subdomain" element={<PublicTenantWebsitePage />} />
 
           {/* Authentication & OAuth Callback Routes */}
           <Route path="/login" element={<LoginPage />} />
@@ -119,6 +135,7 @@ export default function App() {
           {/* Catch-all redirect */}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        )}
       </BrowserRouter>
     </AppProvider>
   );

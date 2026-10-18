@@ -192,26 +192,27 @@ export const DashboardOverviewPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Trial Status Notice */}
-      <div className="p-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-md">
+      {/* Independent Service Trials Summary Strip */}
+      <div className="p-4 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-lg bg-white/20 flex items-center justify-center shrink-0">
-            <Clock className="w-5 h-5 text-white" />
+          <div className="w-9 h-9 rounded-lg bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
+            <Clock className="w-5 h-5" />
           </div>
           <div>
-            <span className="font-bold text-sm block">
-              {currentPlan} Workspace Active
+            <span className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white block">
+              Independent 7-Day Free Trials Available
             </span>
-            <span className="text-xs text-blue-100">
-              {trialDaysLeft} days remaining in trial. Full multi-channel commerce features enabled.
+            <span className="text-xs text-slate-500 dark:text-slate-400">
+              Every GoAMAAS service (Dashboard, AI Automations, Landing Page Builder, Website) has its own independent 7-day free trial.
             </span>
           </div>
         </div>
         <Link
           to="/dashboard/billing"
-          className="self-start sm:self-auto px-4 py-2 rounded-lg bg-white text-blue-600 text-xs font-bold hover:bg-blue-50 transition-colors shrink-0"
+          className="self-start sm:self-auto px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-xs transition-colors shrink-0 flex items-center gap-1.5"
         >
-          View Subscription & Billing
+          <span>Manage Service Trials</span>
+          <ArrowRight className="w-3.5 h-3.5" />
         </Link>
       </div>
 

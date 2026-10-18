@@ -5,8 +5,12 @@ import { SubscribedWebsite } from '../../types';
 import { WebsitePreviewRenderer } from '../../components/website/WebsitePreviewRenderer';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
+import { TrialStatusBadge } from '../../components/ui/TrialStatusBadge';
+import { TrialGateBanner } from '../../components/ui/TrialGateBanner';
+import { ManualPaymentModal } from '../../components/payment/ManualPaymentModal';
 import {
   Globe,
+  CreditCard,
   ExternalLink,
   Copy,
   CheckCircle2,
@@ -40,7 +44,11 @@ export const SubscribedWebsitePage: React.FC = () => {
     renewSubscribedWebsite,
     requestWebsiteContentUpdate,
     showToast,
+    getServiceAccess,
+    publishWebsite,
+    unpublishWebsite,
   } = useApp();
+  const serviceAccess = getServiceAccess('business_website_lite', 'Business Website Lite', 'website');
 
   // Find website belonging to current active store or fallback to first website
   const activeWebsite: SubscribedWebsite | undefined =
@@ -51,6 +59,7 @@ export const SubscribedWebsitePage: React.FC = () => {
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isRequestModalOpen, setIsRequestModalOpen] = useState(false);
   const [isRenewModalOpen, setIsRenewModalOpen] = useState(false);
+  const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
   const [previewDevice, setPreviewDevice] = useState<'desktop' | 'mobile'>('desktop');
 
   // Edit Form State
@@ -163,9 +172,32 @@ export const SubscribedWebsitePage: React.FC = () => {
               </span>
             </div>
 
-            <h1 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white tracking-tight">
-              {activeWebsite.businessName} Website Hub
-            </h1>
+            <div className="flex flex-wrap items-center gap-3">
+              <h1 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white tracking-tight">
+                {activeWebsite.businessName} Website Hub
+              </h1>
+              {activeWebsite.paymentStatus === 'paid' && activeWebsite.deploymentStatus === 'live' ? (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-xs font-semibold">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                  <span>Published & Live</span>
+                </span>
+              ) : activeWebsite.paymentStatus === 'paid' ? (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 text-xs font-semibold">
+                  <Sparkles className="w-3.5 h-3.5 text-blue-500" />
+                  <span>Approved · Ready to Publish</span>
+                </span>
+              ) : activeWebsite.paymentStatus === 'pending_review' ? (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200 border border-amber-300 dark:border-amber-800 text-xs font-semibold">
+                  <Clock className="w-3.5 h-3.5 text-amber-600" />
+                  <span>Payment Audit Review Required</span>
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800 text-xs font-semibold">
+                  <Clock className="w-3.5 h-3.5 text-amber-500" />
+                  <span>Payment Verification Pending</span>
+                </span>
+              )}
+            </div>
 
             {/* Live Domain Badge & Quick Links */}
             <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -192,6 +224,27 @@ export const SubscribedWebsitePage: React.FC = () => {
 
           {/* Quick Action Buttons */}
           <div className="flex flex-wrap items-center gap-2.5">
+            {activeWebsite.paymentStatus === 'paid' && activeWebsite.deploymentStatus !== 'live' && (
+              <button
+                onClick={async () => {
+                  await publishWebsite(activeWebsite.id);
+                }}
+                className="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-md transition-all cursor-pointer"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>1-Click Publish Website</span>
+              </button>
+            )}
+            {activeWebsite.paymentStatus === 'paid' && activeWebsite.deploymentStatus === 'live' && (
+              <button
+                onClick={async () => {
+                  await unpublishWebsite(activeWebsite.id);
+                }}
+                className="px-3.5 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-semibold text-xs transition-colors cursor-pointer"
+              >
+                <span>Unpublish Website</span>
+              </button>
+            )}
             <button
               onClick={() => {
                 setEditHeadline(activeWebsite.headline);
@@ -217,11 +270,11 @@ export const SubscribedWebsitePage: React.FC = () => {
             </button>
 
             <button
-              onClick={() => setIsRenewModalOpen(true)}
-              className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center gap-1.5 transition-colors shadow-xs"
+              onClick={() => setIsPaymentModalOpen(true)}
+              className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
             >
-              <RefreshCw className="w-3.5 h-3.5" />
-              <span>Renew Plan (৳600)</span>
+              <CreditCard className="w-3.5 h-3.5" />
+              <span>Pay / Renew (৳600)</span>
             </button>
           </div>
         </div>
@@ -330,6 +383,27 @@ export const SubscribedWebsitePage: React.FC = () => {
         >
           Explore Custom .COM Upgrade
         </button>
+      </div>
+
+      {/* Custom Domain Request Callout */}
+      <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col sm:flex-row items-center justify-between gap-4">
+        <div>
+          <span className="font-bold text-xs text-slate-900 dark:text-white block">
+            Want to use your own custom domain? (e.g. www.{activeWebsite.subdomain}.com)
+          </span>
+          <span className="text-[11px] text-slate-500">
+            Contact AMAAS to connect and configure your custom domain with free SSL.
+          </span>
+        </div>
+        <a
+          href={`https://wa.me/8801822332020?text=${encodeURIComponent(`Hello AMAAS! I would like to connect a custom domain for my GoAMAAS website "${activeWebsite.businessName}" (${activeWebsite.fullDomainUrl}).`)}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs flex items-center gap-1.5 shrink-0"
+        >
+          <MessageSquare className="w-3.5 h-3.5" />
+          <span>Contact on WhatsApp</span>
+        </a>
       </div>
 
       {/* Embedded Live Preview Section */}

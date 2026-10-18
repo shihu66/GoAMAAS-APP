@@ -20,9 +20,12 @@ import {
   HelpCircle,
 } from 'lucide-react';
 import { Modal } from '../../components/ui/Modal';
+import { TrialStatusBadge } from '../../components/ui/TrialStatusBadge';
+import { TrialGateBanner } from '../../components/ui/TrialGateBanner';
 
 export const AutomationsPage: React.FC = () => {
-  const { automations, toggleAutomation, updateAutomation, testRunAutomation, showToast } = useApp();
+  const { automations, toggleAutomation, updateAutomation, testRunAutomation, showToast, getServiceAccess } = useApp();
+  const serviceAccess = getServiceAccess('ai_automations', 'AI Automation Suite', 'ai_automation');
 
   const [activeTab, setActiveTab] = useState<'workflows' | 'chatSimulator'>('workflows');
   const [selectedAuto, setSelectedAuto] = useState<AIAutomation | null>(null);
@@ -108,9 +111,16 @@ export const AutomationsPage: React.FC = () => {
       {/* Title & Navigation */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
-            AI Automation Center & Messaging Hub
-          </h1>
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
+              AI Automation Center & Messaging Hub
+            </h1>
+            <TrialStatusBadge
+              serviceId="ai_automations"
+              serviceName="AI Automation Suite"
+              category="ai_automation"
+            />
+          </div>
           <p className="text-xs text-slate-500 mt-1">
             Deploy 24/7 conversational bots on WhatsApp & Messenger, recover abandoned carts, and send dispatch SMS.
           </p>
@@ -143,8 +153,25 @@ export const AutomationsPage: React.FC = () => {
         </div>
       </div>
 
-      {/* VIEW 1: Automation Workflows */}
-      {activeTab === 'workflows' ? (
+      {/* Independent Trial Gate Banner if trial not active or expired */}
+      {!serviceAccess.hasAccess ? (
+        <TrialGateBanner
+          serviceId="ai_automations"
+          serviceName="AI Automation Suite"
+          category="ai_automation"
+          serviceDescription="Unlock 24/7 conversational bots for WhatsApp & Facebook Messenger, automated cart abandonment follow-ups, and instant courier dispatch alerts with our independent 7-day free trial."
+          features={[
+            'Facebook Messenger & WhatsApp Chatbots',
+            'Order Status & Tracking Auto-Replies',
+            'Abandoned Cart Recovery Workflows',
+            'Custom FAQ Knowledgebase Training',
+            'Delivery Fee & Courier Inquiry Automation',
+            'Interactive Chat Simulator Access',
+          ]}
+          subscribePath="/dashboard/billing"
+          subscribePriceLabel="৳999/mo"
+        />
+      ) : activeTab === 'workflows' ? (
         <div className="space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {automations.map((auto) => {

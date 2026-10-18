@@ -435,3 +435,489 @@ export async function signOutFromSupabase(): Promise<{ error: Error | null }> {
 }
 
 export type { SupabaseUser, Session };
+
+// ==============================================================================
+// Service Trials Database API
+// ==============================================================================
+export interface RawServiceTrialRow {
+  id: string;
+  user_id: string;
+  store_id?: string | null;
+  service_id: string;
+  service_name: string;
+  service_category: 'dashboard' | 'ai_automation' | 'website' | 'landing_pages';
+  status: 'active' | 'expired' | 'converted';
+  started_at: string;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function fetchUserServiceTrials(userId: string): Promise<{ data: RawServiceTrialRow[] | null; error: Error | null }> {
+  if (!isSupabaseConfigured || !supabase) {
+    return { data: null, error: null };
+  }
+  try {
+    const { data, error } = await supabase
+      .from('service_trials')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      // If table has not been created yet in remote Supabase, gracefully report error
+      return { data: null, error };
+    }
+    return { data: (data as RawServiceTrialRow[]) || [], error: null };
+  } catch (err: unknown) {
+    return {
+      data: null,
+      error: err instanceof Error ? err : new Error('Failed to query service trials from Supabase'),
+    };
+  }
+}
+
+export async function activateServiceTrialInDb(params: {
+  serviceId: string;
+  serviceName: string;
+  serviceCategory: 'dashboard' | 'ai_automation' | 'website' | 'landing_pages';
+  userId: string;
+  storeId?: string | null;
+}): Promise<{ data: RawServiceTrialRow | null; error: Error | null; alreadyUsed?: boolean }> {
+  if (!isSupabaseConfigured || !supabase) {
+    return {
+      data: null,
+      error: new Error('Supabase is not configured. Please ensure credentials are set up.'),
+    };
+  }
+
+  try {
+    // 1. Try invoking the secure server-side stored procedure if available
+    const { data: rpcData, error: rpcError } = await supabase.rpc('activate_service_trial', {
+      p_service_id: params.serviceId,
+      p_service_name: params.serviceName,
+      p_service_category: params.serviceCategory,
+      p_store_id: params.storeId || null,
+    });
+
+    if (!rpcError && rpcData) {
+      const response = rpcData as { success: boolean; code?: string; message?: string; trial?: RawServiceTrialRow };
+      if (!response.success && response.code === 'TRIAL_ALREADY_USED') {
+        return { data: response.trial || null, error: new Error(response.message || 'Trial already activated'), alreadyUsed: true };
+      }
+      if (response.success && response.trial) {
+        return { data: response.trial, error: null };
+      }
+    }
+
+    // 2. Direct table insert fallback protected by RLS and unique constraint
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
+
+    const { data: insertData, error: insertError } = await supabase
+      .from('service_trials')
+      .insert({
+        user_id: params.userId,
+        store_id: params.storeId || null,
+        service_id: params.serviceId,
+        service_name: params.serviceName,
+        service_category: params.serviceCategory,
+        status: 'active',
+        started_at: now.toISOString(),
+        expires_at: expiresAt,
+      })
+      .select('*')
+      .single();
+
+    if (insertError) {
+      // 23505 is PostgreSQL unique_violation code
+      if (insertError.code === '23505' || insertError.message.includes('duplicate key') || insertError.message.includes('uq_user_service_trial')) {
+        return { data: null, error: new Error('You have already activated the 7-day free trial for this service.'), alreadyUsed: true };
+      }
+      return { data: null, error: insertError };
+    }
+
+    return { data: insertData as RawServiceTrialRow, error: null };
+  } catch (err: unknown) {
+    return {
+      data: null,
+      error: err instanceof Error ? err : new Error('Failed to activate trial in database'),
+    };
+  }
+}
+
+// ==============================================================================
+// Payment Requests Database API
+// ==============================================================================
+export interface RawPaymentRequestRow {
+  id: string;
+  user_id: string;
+  store_id?: string | null;
+  customer_name: string;
+  customer_phone: string;
+  customer_email: string;
+  service_type: 'website_subscription' | 'website_package' | 'dashboard_plan' | 'ai_automation';
+  service_id: string;
+  service_name: string;
+  plan_tier: string;
+  amount: number;
+  currency: string;
+  payment_method: 'bKash' | 'Nagad' | 'Bank Transfer';
+  transaction_id?: string | null;
+  sender_number?: string | null;
+  bank_name?: string | null;
+  bank_account_name?: string | null;
+  bank_reference?: string | null;
+  status: 'pending' | 'approved' | 'rejected';
+  admin_notes?: string | null;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function fetchUserPaymentRequests(userId?: string): Promise<{ data: RawPaymentRequestRow[] | null; error: Error | null }> {
+  if (!isSupabaseConfigured || !supabase) {
+    return { data: null, error: null };
+  }
+  try {
+    let query = supabase.from('payment_requests').select('*').order('created_at', { ascending: false });
+    if (userId) {
+      query = query.eq('user_id', userId);
+    }
+    const { data, error } = await query;
+    if (error) {
+      return { data: null, error };
+    }
+    return { data: (data as RawPaymentRequestRow[]) || [], error: null };
+  } catch (err: unknown) {
+    return {
+      data: null,
+      error: err instanceof Error ? err : new Error('Failed to fetch payment requests'),
+    };
+  }
+}
+
+export async function createPaymentRequestInDb(params: {
+  userId: string;
+  storeId?: string | null;
+  customerName: string;
+  customerPhone: string;
+  customerEmail: string;
+  serviceType: 'website_subscription' | 'website_package' | 'dashboard_plan' | 'ai_automation';
+  serviceId: string;
+  serviceName: string;
+  planTier: string;
+  amount: number;
+  paymentMethod: 'bKash' | 'Nagad' | 'Bank Transfer';
+  transactionId?: string;
+  senderNumber?: string;
+  bankName?: string;
+  bankAccountName?: string;
+  bankReference?: string;
+}): Promise<{ data: RawPaymentRequestRow | null; error: Error | null }> {
+  if (!isSupabaseConfigured || !supabase) {
+    return {
+      data: null,
+      error: new Error('Supabase is not configured.'),
+    };
+  }
+  try {
+    const { data, error } = await supabase
+      .from('payment_requests')
+      .insert({
+        user_id: params.userId,
+        store_id: params.storeId || null,
+        customer_name: params.customerName,
+        customer_phone: params.customerPhone,
+        customer_email: params.customerEmail,
+        service_type: params.serviceType,
+        service_id: params.serviceId,
+        service_name: params.serviceName,
+        plan_tier: params.planTier,
+        amount: params.amount,
+        currency: '৳',
+        payment_method: params.paymentMethod,
+        transaction_id: params.transactionId || null,
+        sender_number: params.senderNumber || null,
+        bank_name: params.bankName || null,
+        bank_account_name: params.bankAccountName || null,
+        bank_reference: params.bankReference || null,
+        status: 'pending',
+      })
+      .select('*')
+      .single();
+
+    if (error) {
+      return { data: null, error };
+    }
+    return { data: data as RawPaymentRequestRow, error: null };
+  } catch (err: unknown) {
+    return {
+      data: null,
+      error: err instanceof Error ? err : new Error('Failed to submit payment request'),
+    };
+  }
+}
+
+export async function adminApprovePaymentInDb(requestId: string, notes?: string): Promise<{ success: boolean; error: Error | null }> {
+  if (!isSupabaseConfigured || !supabase) {
+    return { success: false, error: new Error('Supabase not configured') };
+  }
+  try {
+    const { data, error } = await supabase.rpc('admin_approve_payment_request', {
+      p_request_id: requestId,
+      p_admin_notes: notes || null,
+    });
+    if (error) {
+      // Fallback direct update if RPC is missing
+      const { error: directErr } = await supabase
+        .from('payment_requests')
+        .update({ status: 'approved', admin_notes: notes, updated_at: new Date().toISOString() })
+        .eq('id', requestId);
+      if (directErr) return { success: false, error: directErr };
+      return { success: true, error: null };
+    }
+    const res = data as { success: boolean; message: string };
+    if (!res.success) {
+      return { success: false, error: new Error(res.message) };
+    }
+    return { success: true, error: null };
+  } catch (err: unknown) {
+    return { success: false, error: err instanceof Error ? err : new Error('Failed to approve payment') };
+  }
+}
+
+export async function adminRejectPaymentInDb(requestId: string, reason: string): Promise<{ success: boolean; error: Error | null }> {
+  if (!isSupabaseConfigured || !supabase) {
+    return { success: false, error: new Error('Supabase not configured') };
+  }
+  try {
+    const { data, error } = await supabase.rpc('admin_reject_payment_request', {
+      p_request_id: requestId,
+      p_reason: reason,
+    });
+    if (error) {
+      const { error: directErr } = await supabase
+        .from('payment_requests')
+        .update({ status: 'rejected', admin_notes: reason, updated_at: new Date().toISOString() })
+        .eq('id', requestId);
+      if (directErr) return { success: false, error: directErr };
+      return { success: true, error: null };
+    }
+    const res = data as { success: boolean; message: string };
+    if (!res.success) {
+      return { success: false, error: new Error(res.message) };
+    }
+    return { success: true, error: null };
+  } catch (err: unknown) {
+    return { success: false, error: err instanceof Error ? err : new Error('Failed to reject payment') };
+  }
+}
+
+// ==============================================================================
+// Public Multi-Tenant Subdomain Resolution API
+// ==============================================================================
+export async function fetchPublishedWebsiteBySubdomain(
+  subdomain: string
+): Promise<{ data: any | null; error: Error | null; notFound?: boolean }> {
+  if (!isSupabaseConfigured || !supabase) {
+    return { data: null, error: null };
+  }
+  try {
+    const cleanSubdomain = subdomain.toLowerCase().trim();
+
+    // 0. First check server-side resolver API endpoint if running in browser
+    if (typeof window !== 'undefined') {
+      try {
+        const res = await fetch(`/api/resolve-tenant?subdomain=${encodeURIComponent(cleanSubdomain)}`);
+        if (res.ok) {
+          const json = await res.json();
+          if (json.found && json.site) {
+            return { data: json.site, error: null };
+          }
+          if (json.found === false && res.status === 404) {
+            return { data: null, error: null, notFound: true };
+          }
+        }
+      } catch {
+        // Fall back to direct Supabase query
+      }
+    }
+
+    // 1. Try calling the dedicated stored procedure
+    const { data: rpcData, error: rpcError } = await supabase.rpc('get_published_website_by_subdomain', {
+      p_subdomain: cleanSubdomain,
+    });
+
+    if (!rpcError && rpcData) {
+      const res = rpcData as { found: boolean; site?: any; message?: string };
+      if (res.found && res.site) {
+        return { data: res.site, error: null };
+      }
+      return { data: null, error: null, notFound: true };
+    }
+
+    // 2. Direct table select fallback
+    const { data, error } = await supabase
+      .from('subscribed_websites')
+      .select('*')
+      .ilike('subdomain', cleanSubdomain)
+      .eq('deployment_status', 'live')
+      .maybeSingle();
+
+    if (error) {
+      // If error due to column or select '*', retry with minimal core columns
+      const { data: fallbackData, error: fallbackErr } = await supabase
+        .from('subscribed_websites')
+        .select('id, user_id, store_id, subdomain, business_name, niche, template_name, config, status, deployment_status, created_at')
+        .ilike('subdomain', cleanSubdomain)
+        .eq('deployment_status', 'live')
+        .maybeSingle();
+
+      if (fallbackErr) return { data: null, error: fallbackErr };
+      if (!fallbackData) return { data: null, error: null, notFound: true };
+      return { data: fallbackData, error: null };
+    }
+
+    if (!data) {
+      return { data: null, error: null, notFound: true };
+    }
+
+    return { data, error: null };
+  } catch (err: unknown) {
+    return {
+      data: null,
+      error: err instanceof Error ? err : new Error('Failed to resolve website subdomain from database'),
+    };
+  }
+}
+
+export async function publishClientWebsiteInDb(
+  websiteId: string
+): Promise<{ success: boolean; message: string; error: Error | null }> {
+  if (!isSupabaseConfigured || !supabase) {
+    return { success: true, message: 'Website published locally.', error: null };
+  }
+  try {
+    const { data: rpcData, error: rpcError } = await supabase.rpc('publish_client_website', {
+      p_website_id: websiteId,
+    });
+
+    if (!rpcError && rpcData) {
+      const res = rpcData as { success: boolean; message: string; code?: string };
+      if (!res.success) {
+        return { success: false, message: res.message, error: new Error(res.message) };
+      }
+      return { success: true, message: res.message, error: null };
+    }
+
+    // Fallback direct update (column-safe)
+    const { error: updateErr } = await supabase
+      .from('subscribed_websites')
+      .update({ deployment_status: 'live', status: 'active' })
+      .eq('id', websiteId);
+
+    if (updateErr) {
+      return { success: false, message: updateErr.message, error: updateErr };
+    }
+
+    return { success: true, message: 'Website published successfully!', error: null };
+  } catch (err: unknown) {
+    return {
+      success: false,
+      message: 'Failed to publish website',
+      error: err instanceof Error ? err : new Error('Publish operation failed'),
+    };
+  }
+}
+
+export async function updateClientWebsiteInDb(
+  websiteId: string,
+  updates: Record<string, any>
+): Promise<{ success: boolean; error: Error | null }> {
+  if (!isSupabaseConfigured || !supabase) {
+    return { success: true, error: null };
+  }
+  try {
+    const { data: current } = await supabase
+      .from('subscribed_websites')
+      .select('config, business_name')
+      .eq('id', websiteId)
+      .maybeSingle();
+
+    const currentConfig = (current?.config as Record<string, any>) || {};
+    const mergedConfig = {
+      ...currentConfig,
+      ...(updates.headline !== undefined && { headline: updates.headline }),
+      ...(updates.subheadline !== undefined && { subheadline: updates.subheadline }),
+      ...(updates.phone !== undefined && { phone: updates.phone }),
+      ...(updates.whatsappNumber !== undefined && { whatsappNumber: updates.whatsappNumber }),
+      ...(updates.address !== undefined && { address: updates.address }),
+      ...(updates.aboutText !== undefined && { aboutText: updates.aboutText }),
+      ...(updates.brandColor !== undefined && { brandColor: updates.brandColor }),
+      ...(updates.servicesOrProducts !== undefined && { servicesOrProducts: updates.servicesOrProducts }),
+    };
+
+    const payload: Record<string, any> = {
+      config: mergedConfig,
+    };
+    if (updates.businessName) {
+      payload.business_name = updates.businessName;
+    }
+
+    const { error } = await supabase
+      .from('subscribed_websites')
+      .update(payload)
+      .eq('id', websiteId);
+
+    if (error) {
+      return { success: false, error };
+    }
+    return { success: true, error: null };
+  } catch (err: unknown) {
+    return {
+      success: false,
+      error: err instanceof Error ? err : new Error('Failed to update website content in database'),
+    };
+  }
+}
+
+export async function unpublishClientWebsiteInDb(
+  websiteId: string
+): Promise<{ success: boolean; message: string; error: Error | null }> {
+  if (!isSupabaseConfigured || !supabase) {
+    return { success: true, message: 'Website unpublished locally.', error: null };
+  }
+  try {
+    const { data: rpcData, error: rpcError } = await supabase.rpc('unpublish_client_website', {
+      p_website_id: websiteId,
+    });
+
+    if (!rpcError && rpcData) {
+      const res = rpcData as { success: boolean; message: string };
+      if (!res.success) {
+        return { success: false, message: res.message, error: new Error(res.message) };
+      }
+      return { success: true, message: res.message, error: null };
+    }
+
+    // Direct fallback (snake_case column)
+    const { error: updateErr } = await supabase
+      .from('subscribed_websites')
+      .update({ deployment_status: 'suspended' })
+      .eq('id', websiteId);
+
+    if (updateErr) {
+      return { success: false, message: updateErr.message, error: updateErr };
+    }
+
+    return { success: true, message: 'Website unpublished successfully.', error: null };
+  } catch (err: unknown) {
+    return {
+      success: false,
+      message: 'Failed to unpublish website',
+      error: err instanceof Error ? err : new Error('Unpublish operation failed'),
+    };
+  }
+}
