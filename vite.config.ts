@@ -37,20 +37,20 @@ export default defineConfig(({ mode }) => {
     if (localUrl && localKey) break;
   }
 
-  // Strictly resolve configured public client credentials (never fall back to any hardcoded project URL)
-  const rawUrl = localUrl || env.VITE_SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
+  // Strictly resolve configured public client credentials (process.env > Vite mode env > local .env fallback)
+  const rawUrl = process.env.VITE_SUPABASE_URL || env.VITE_SUPABASE_URL || localUrl || '';
   const supabaseUrl =
     rawUrl.trim().startsWith('https://') && rawUrl.trim() !== 'https://your-project.supabase.co'
       ? rawUrl.trim()
       : '';
 
-  const rawKey = localKey || env.VITE_SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
+  const rawKey = process.env.VITE_SUPABASE_ANON_KEY || env.VITE_SUPABASE_ANON_KEY || localKey || '';
   const supabaseAnonKey =
     rawKey.trim() && !rawKey.trim().startsWith('sb_secret_')
       ? rawKey.trim()
       : '';
 
-  const supabaseEnv = (localEnv || env.VITE_SUPABASE_ENV || process.env.VITE_SUPABASE_ENV || '').trim();
+  const supabaseEnv = (process.env.VITE_SUPABASE_ENV || env.VITE_SUPABASE_ENV || localEnv || '').trim();
 
   const resolveTenantApiPlugin = {
     name: 'goamaas-resolve-tenant-api',

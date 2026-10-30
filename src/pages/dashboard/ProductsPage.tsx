@@ -791,7 +791,7 @@ export const ProductsPage: React.FC = () => {
                 <span>{formData.imageUrl ? 'Replace Image' : 'Upload Image'}</span>
                 <input
                   type="file"
-                  accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml"
+                  accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
                   onChange={handleImageFileUpload}
                   disabled={isUploadingImage}
                   className="hidden"

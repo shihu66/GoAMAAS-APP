@@ -259,10 +259,11 @@ async function runLiveStagingVerification() {
     }
   });
 
-  // Diagnostic read-only probe of 20261029 storage bucket & auth autoconfirm state on umiheyukaddfaupsyooh
-  const bucketProbe = await fetch(`${supabaseUrl}/storage/v1/bucket/website-assets`, {
+  // Diagnostic read-only probe of 20261029 public storage bucket & auth autoconfirm state on umiheyukaddfaupsyooh.
+  // Note: /storage/v1/bucket/:id enforces storage.buckets RLS (no client SELECT policy) and returns false NoSuchBucket for anon/authenticated.
+  // Probing /storage/v1/object/public/website-assets/__bucket_probe__ accurately distinguishes NoSuchKey (bucket exists & public) vs NoSuchBucket.
+  const bucketProbe = await fetch(`${supabaseUrl}/storage/v1/object/public/website-assets/__bucket_probe__`, {
     method: 'GET',
-    headers: anonHeaders,
   });
   const authSettingsProbe = await fetch(`${supabaseUrl}/auth/v1/settings`, {
     method: 'GET',
@@ -270,10 +271,14 @@ async function runLiveStagingVerification() {
   });
   const bucketJson = (await bucketProbe.json().catch(() => ({}))) as any;
   const authSettingsJson = (await authSettingsProbe.json().catch(() => ({}))) as any;
+  const bucketExistsOnStaging =
+    bucketProbe.ok ||
+    bucketJson?.code === 'NoSuchKey' ||
+    String(bucketJson?.message || '').toLowerCase() === 'object not found';
 
   console.log(
     `[INFO] Live GoAmaas-Staging (${AUTHORIZED_STAGING_REF}) post-20261029 state: website-assets bucket=${
-      bucketProbe.ok && bucketJson?.id === 'website-assets' ? 'PRESENT (20261029 APPLIED)' : 'NOT_FOUND (20261029 PENDING SQL APPLY)'
+      bucketExistsOnStaging ? 'PRESENT & PUBLIC (20261029 VERIFIED)' : 'NOT_FOUND'
     }, MailerAutoconfirm=${Boolean(authSettingsJson?.mailer_autoconfirm ?? authSettingsJson?.MailerAutoconfirm)}`
   );
 

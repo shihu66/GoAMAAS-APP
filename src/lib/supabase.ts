@@ -192,6 +192,18 @@ export function validateSupabaseClientCredentials(
   };
 }
 
+export function extractSupabaseProjectRef(url: string): string {
+  try {
+    const parsed = new URL((url || '').trim());
+    const match = parsed.hostname.match(/^([a-z0-9-]+)\.supabase\.co$/i);
+    return match ? match[1].toLowerCase() : parsed.hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+export const supabaseProjectRef: string = extractSupabaseProjectRef(supabaseUrl);
+
 const credentialCheck = validateSupabaseClientCredentials(supabaseUrl, supabaseAnonKey);
 
 // Check if credentials exist, are non-secret public values, and belong to the same Supabase project
@@ -200,6 +212,7 @@ export const isSupabaseConfigured: boolean = credentialCheck.valid;
 export interface SupabaseConfigStatus {
   isConfigured: boolean;
   environment?: string;
+  projectRef?: string;
   missingVariables: string[];
   setupInstructions: string[];
   redirectUrl: string;
@@ -224,6 +237,7 @@ export const getSupabaseConfigStatus = (): SupabaseConfigStatus => {
   return {
     isConfigured: isSupabaseConfigured,
     environment: supabaseEnv || undefined,
+    projectRef: supabaseProjectRef || undefined,
     missingVariables,
     setupInstructions,
     redirectUrl,
@@ -1202,6 +1216,128 @@ function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
+/**
+ * Verifies whether a public Supabase Storage bucket exists on the configured project.
+ *
+ * IMPORTANT: Never use `supabase.storage.getBucket()` or `listBuckets()` with an `anon`
+ * or `authenticated` key — `storage.buckets` enforces RLS with no client SELECT policy,
+ * causing `/storage/v1/bucket/:id` to return `404 Bucket not found (NoSuchBucket)` even
+ * when the bucket exists. Probing the public object endpoint resolves bucket existence
+ * accurately (`NoSuchKey` / `Object not found` = bucket exists; `NoSuchBucket` = missing).
+ */
+export async function checkPublicStorageBucketExists(
+  bucketId: string = WEBSITE_ASSETS_BUCKET
+): Promise<{ exists: boolean; indeterminate?: boolean; projectRef: string; code?: string }> {
+  const cleanBase = supabaseUrl.replace(/\/+$/, '');
+  if (!cleanBase) {
+    return { exists: false, indeterminate: true, projectRef: supabaseProjectRef };
+  }
+  try {
+    const probeUrl = `${cleanBase}/storage/v1/object/public/${encodeURIComponent(bucketId)}/__bucket_probe__`;
+    const resp = await fetch(probeUrl, { method: 'GET' });
+    if (resp.ok) {
+      return { exists: true, projectRef: supabaseProjectRef, code: 'OK' };
+    }
+    const body = (await resp.json().catch(() => null)) as
+      | { code?: string; error?: string; message?: string; statusCode?: string }
+      | null;
+    const errCode = (body?.code || '').trim();
+    const lowerMsg = (body?.message || body?.error || '').trim().toLowerCase();
+
+    if (errCode === 'NoSuchKey' || lowerMsg === 'object not found' || body?.error === 'not_found') {
+      return { exists: true, projectRef: supabaseProjectRef, code: errCode || 'NoSuchKey' };
+    }
+    if (errCode === 'NoSuchBucket' || lowerMsg === 'bucket not found') {
+      return { exists: false, projectRef: supabaseProjectRef, code: 'NoSuchBucket' };
+    }
+    return { exists: true, indeterminate: true, projectRef: supabaseProjectRef, code: errCode || undefined };
+  } catch {
+    return { exists: true, indeterminate: true, projectRef: supabaseProjectRef };
+  }
+}
+
+export function classifyWebsiteStorageUploadError(
+  uploadErr: unknown,
+  opts?: { bucketConfirmedMissing?: boolean; projectRef?: string }
+): Error {
+  const errObj =
+    typeof uploadErr === 'object' && uploadErr !== null
+      ? (uploadErr as {
+          message?: string;
+          code?: string;
+          statusCode?: string | number;
+          status?: number;
+        })
+      : {};
+
+  const rawMessage = typeof errObj.message === 'string' ? errObj.message.trim() : '';
+  const lowerMsg = rawMessage.toLowerCase();
+  const errCode = typeof errObj.code === 'string' ? errObj.code.trim() : '';
+  const statusCodeStr =
+    errObj.statusCode !== undefined && errObj.statusCode !== null ? String(errObj.statusCode).trim() : '';
+  const httpStatus = typeof errObj.status === 'number' ? errObj.status : NaN;
+
+  // 1. Permission, authentication, or Row-Level Security errors must NEVER be reported as a missing bucket
+  if (
+    statusCodeStr === '401' ||
+    statusCodeStr === '403' ||
+    httpStatus === 401 ||
+    httpStatus === 403 ||
+    errCode === 'AccessDenied' ||
+    errCode === 'Unauthorized' ||
+    errCode === 'InvalidJWT' ||
+    lowerMsg.includes('row-level security') ||
+    lowerMsg.includes('permission denied') ||
+    lowerMsg.includes('unauthorized') ||
+    lowerMsg.includes('not authorized') ||
+    lowerMsg.includes('access denied') ||
+    lowerMsg.includes('forbidden') ||
+    lowerMsg.includes('jwt')
+  ) {
+    return new Error(
+      'Upload permission denied by Storage security policy. Please ensure you are signed in with an active account and try again.'
+    );
+  }
+
+  // 2. File size & MIME type limits enforced by bucket configuration
+  if (
+    statusCodeStr === '413' ||
+    httpStatus === 413 ||
+    errCode === 'EntityTooLarge' ||
+    lowerMsg.includes('exceeded the maximum allowed size') ||
+    lowerMsg.includes('payload too large')
+  ) {
+    return new Error('Image exceeds the 5 MB maximum upload size. Please choose a smaller image.');
+  }
+
+  if (
+    statusCodeStr === '415' ||
+    httpStatus === 415 ||
+    errCode === 'InvalidMimeType' ||
+    lowerMsg.includes('mime type')
+  ) {
+    return new Error('Unsupported file type. Please upload PNG, JPG, WEBP, GIF, or AVIF images.');
+  }
+
+  // 3. Missing bucket — ONLY when structured NoSuchBucket / exact "bucket not found" AND confirmed absent via public probe
+  const looksLikeMissingBucket =
+    errCode === 'NoSuchBucket' || lowerMsg === 'bucket not found';
+
+  if (looksLikeMissingBucket) {
+    if (opts?.bucketConfirmedMissing) {
+      const refLabel = opts.projectRef || supabaseProjectRef || 'unknown-project';
+      return new Error(
+        `Supabase Storage bucket "${WEBSITE_ASSETS_BUCKET}" was not found on connected Supabase project "${refLabel}". Verify VITE_SUPABASE_URL points to GoAmaas-Staging (umiheyukaddfaupsyooh).`
+      );
+    }
+    return new Error(
+      'Unable to complete Storage upload under current session permissions. Please refresh your sign-in session and try again.'
+    );
+  }
+
+  return new Error(rawMessage || 'Failed to upload image to Supabase Storage');
+}
+
 export async function uploadWebsiteAssetToStorage(params: {
   file: File;
   folder: 'logos' | 'heroes' | 'banners' | 'products' | 'sections';
@@ -1241,15 +1377,22 @@ export async function uploadWebsiteAssetToStorage(params: {
 
   try {
     const {
+      data: { session },
+      error: sessionErr,
+    } = await supabase.auth.getSession();
+    const {
       data: { user },
       error: authErr,
     } = await supabase.auth.getUser();
-    if (authErr || !user) {
+
+    if (sessionErr || authErr || !session?.access_token || !user) {
       return {
         publicUrl: null,
         error: new Error('Authentication required: please sign in to upload website assets.'),
       };
     }
+
+    const ownerUid = session.user?.id || user.id;
 
     const rawName = (file.name || 'image.png').toLowerCase();
     const dotIdx = rawName.lastIndexOf('.');
@@ -1267,8 +1410,8 @@ export async function uploadWebsiteAssetToStorage(params: {
       (websiteId && UUID_REGEX.test(websiteId.trim()) ? websiteId.trim() : '') ||
       (storeId && UUID_REGEX.test(storeId.trim()) ? storeId.trim() : 'general');
     const rand = Math.random().toString(36).slice(2, 8);
-    // Strict owner-first folder structure: <user.id>/<scope>/<folder>/<timestamp>-<rand>-<name>.<ext>
-    const storagePath = `${user.id}/${cleanScope}/${folder}/${Date.now()}-${rand}-${safeBase}.${safeExt}`;
+    // Strict owner-first folder structure: <auth.uid()>/<scope>/<folder>/<timestamp>-<rand>-<name>.<ext>
+    const storagePath = `${ownerUid}/${cleanScope}/${folder}/${Date.now()}-${rand}-${safeBase}.${safeExt}`;
 
     const { error: uploadErr } = await supabase.storage
       .from(WEBSITE_ASSETS_BUCKET)
@@ -1279,18 +1422,21 @@ export async function uploadWebsiteAssetToStorage(params: {
       });
 
     if (uploadErr) {
-      const lowerMsg = (uploadErr.message || '').toLowerCase();
-      if (lowerMsg.includes('bucket not found') || lowerMsg.includes('does not exist')) {
-        return {
-          publicUrl: null,
-          error: new Error(
-            'Supabase Storage bucket "website-assets" is not provisioned yet. Apply migration 20261029_website_builder_storage_and_autopublish.sql on GoAmaas-Staging.'
-          ),
-        };
+      const errCode = (uploadErr as { code?: string }).code || '';
+      const lowerMsg = (uploadErr.message || '').trim().toLowerCase();
+      let bucketConfirmedMissing = false;
+
+      if (errCode === 'NoSuchBucket' || lowerMsg === 'bucket not found') {
+        const probe = await checkPublicStorageBucketExists(WEBSITE_ASSETS_BUCKET);
+        bucketConfirmedMissing = !probe.exists && !probe.indeterminate;
       }
+
       return {
         publicUrl: null,
-        error: new Error(uploadErr.message || 'Failed to upload image to Supabase Storage'),
+        error: classifyWebsiteStorageUploadError(uploadErr, {
+          bucketConfirmedMissing,
+          projectRef: supabaseProjectRef,
+        }),
       };
     }
 
