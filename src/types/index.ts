@@ -401,7 +401,15 @@ export interface SubscribedWebsite {
   monthlyFee: number; // 600
   subscriptionStatus: 'active' | 'grace_period' | 'past_due' | 'suspended' | 'cancelled' | 'draft';
   paymentStatus: 'paid' | 'pending' | 'failed' | 'pending_review';
-  deploymentStatus: 'live' | 'provisioning' | 'maintenance' | 'suspended' | 'draft';
+  deploymentStatus:
+    | 'live'
+    | 'deploying'
+    | 'ready'
+    | 'provisioning'
+    | 'maintenance'
+    | 'suspended'
+    | 'draft'
+    | 'failed';
   sslStatus: 'active' | 'pending';
   nextBillingDate: string;
   gracePeriodEndsAt?: string;
@@ -409,6 +417,42 @@ export interface SubscribedWebsite {
   lastUpdatedAt: string;
   resourceUsage: WebsiteResourceUsage;
   notes?: string;
+}
+
+export interface CreateSubscribedWebsiteInput {
+  storeId?: string;
+  businessName: string;
+  ownerName: string;
+  email: string;
+  phone: string;
+  niche: BusinessNiche;
+  nicheLabel: string;
+  templateId: string;
+  templateName: string;
+  subdomain: string;
+  customDomain?: string;
+  brandColor: string;
+  logoUrl?: string;
+  heroImageUrl?: string;
+  heroCtaText?: string;
+  heroCtaLink?: string;
+  secondaryCtaText?: string;
+  secondaryCtaLink?: string;
+  bannerImageUrl?: string;
+  bannerTitle?: string;
+  bannerSubtitle?: string;
+  bannerCtaText?: string;
+  bannerCtaLink?: string;
+  address: string;
+  headline: string;
+  subheadline: string;
+  aboutText: string;
+  servicesOrProducts: WebsiteProductItem[];
+  whatsappNumber: string;
+  socialLinks: SubscribedWebsite['socialLinks'];
+  customLinks?: WebsiteCustomLink[];
+  sections?: WebsiteSectionConfig[];
+  themeSettings?: WebsiteThemeSettings;
 }
 
 export interface WebsiteSubscriptionPlanConfig {

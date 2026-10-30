@@ -26,6 +26,7 @@ import {
   UserRole,
   OnboardingData,
   SubscribedWebsite,
+  CreateSubscribedWebsiteInput,
   WebsiteSubscriptionPlanConfig,
   ServicePricingCatalogEntry,
   WebsiteLifecycleAuditLog,
@@ -203,7 +204,7 @@ interface AppContextType {
   updateWebsiteSubscriptionPlanConfig: (updates: Partial<WebsiteSubscriptionPlanConfig>) => void;
   subscribedWebsites: SubscribedWebsite[];
   isWebsitesLoading: boolean;
-  createSubscribedWebsite: (data: Omit<SubscribedWebsite, 'id' | 'createdAt' | 'lastUpdatedAt' | 'resourceUsage'>) => Promise<SubscribedWebsite>;
+  createSubscribedWebsite: (data: CreateSubscribedWebsiteInput) => Promise<SubscribedWebsite>;
   updateSubscribedWebsite: (
     id: string,
     updates: Partial<SubscribedWebsite>,
@@ -929,19 +930,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const ensureMerchantStore = useCallback(
     async (preferredName?: string): Promise<string | undefined> => {
-      if (activeStoreId && UUID_REGEX.test(activeStoreId)) {
-        return activeStoreId;
-      }
-      if (activeStore?.id && UUID_REGEX.test(activeStore.id)) {
-        return activeStore.id;
-      }
       if (!isSupabaseConfigured || !supabase || !user?.id) {
         return activeStore?.id;
+      }
+      if (
+        activeStoreId &&
+        UUID_REGEX.test(activeStoreId) &&
+        stores.some((s) => s.id === activeStoreId)
+      ) {
+        return activeStoreId;
       }
       const existingValid = stores.find((s) => UUID_REGEX.test(s.id));
       if (existingValid) {
         setActiveStoreIdState(existingValid.id);
         return existingValid.id;
+      }
+      const { data: dbStores } = await fetchUserStoresFromDb();
+      if (dbStores && dbStores.length > 0) {
+        setStores(dbStores);
+        const preferredDbStore =
+          (user.storeId && dbStores.find((s) => s.id === user.storeId && UUID_REGEX.test(s.id))) ||
+          dbStores.find((s) => UUID_REGEX.test(s.id));
+        if (preferredDbStore) {
+          setActiveStoreIdState(preferredDbStore.id);
+          return preferredDbStore.id;
+        }
       }
       const { data: createdStore, error } = await createStoreInDb({
         name: (preferredName || '').trim() || `${user.name || 'Merchant'}'s Store`,
@@ -956,7 +969,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       void upsertUserProfile({ id: user.id, store_id: createdStore.id });
       return createdStore.id;
     },
-    [activeStore?.id, activeStoreId, stores, user?.id, user?.name]
+    [activeStore?.id, activeStoreId, stores, user?.id, user?.name, user?.storeId]
   );
 
   const addProduct = async (
@@ -1623,14 +1636,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const createSubscribedWebsite = async (
-    data: Omit<SubscribedWebsite, 'id' | 'createdAt' | 'lastUpdatedAt' | 'resourceUsage'>
+    data: CreateSubscribedWebsiteInput
   ): Promise<SubscribedWebsite> => {
-    const cleanSub = data.subdomain.toLowerCase().trim().replace(/[^a-z0-9-]/g, '');
+    const subCheck = validateSubdomainFormat(data.subdomain);
+    if (!subCheck.valid) {
+      const validationMsg = subCheck.reason || 'Please enter a valid subdomain.';
+      showToast(validationMsg, 'error');
+      const validationErr = new Error(validationMsg) as Error & { toastShown?: boolean };
+      validationErr.toastShown = true;
+      throw validationErr;
+    }
+    const cleanSub = subCheck.clean;
 
-    let resolvedStoreId =
-      data.storeId && UUID_REGEX.test(data.storeId) ? data.storeId : undefined;
-    if (!resolvedStoreId && isSupabaseConfigured && user?.id) {
-      resolvedStoreId = await ensureMerchantStore(data.businessName);
+    let resolvedStoreId: string | undefined;
+    if (isSupabaseConfigured && supabase) {
+      const requestedStoreId = data.storeId?.trim();
+      if (
+        requestedStoreId &&
+        UUID_REGEX.test(requestedStoreId) &&
+        stores.some((s) => s.id === requestedStoreId)
+      ) {
+        resolvedStoreId = requestedStoreId;
+      } else if (user?.id) {
+        resolvedStoreId = await ensureMerchantStore(data.businessName);
+      }
+    } else {
+      resolvedStoreId = data.storeId || activeStore?.id || 'store-1';
     }
 
     const websiteConfig: Record<string, any> = {
@@ -1660,6 +1691,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       customDomain: data.customDomain || '',
       ownerName: data.ownerName || user?.name || 'Store Owner',
       email: data.email || '',
+      nicheLabel: data.nicheLabel || data.templateName || 'Business Storefront',
       templateId: data.templateId || 'tpl-modern-business',
       templateName: data.templateName || 'Modern Executive',
     };
@@ -1674,22 +1706,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         storeId: resolvedStoreId,
         templateId: data.templateId,
         templateName: data.templateName,
-        planTier: data.planName || websiteSubscriptionPlan.name,
-        monthlyFee: data.monthlyFee || websiteSubscriptionPlan.priceMonthly,
         config: websiteConfig,
       });
 
       if (dbErr || !dbSite) {
         const errorMsg = dbErr?.message || 'Failed to save website to database.';
         showToast(errorMsg, 'error');
-        throw new Error(errorMsg);
+        const surfacedErr = new Error(errorMsg) as Error & { toastShown?: boolean };
+        surfacedErr.toastShown = true;
+        throw surfacedErr;
       }
 
       newSite = dbSite;
 
-      // Persist initial website products into public.products linked to this website & store
-      if (resolvedStoreId && Array.isArray(data.servicesOrProducts) && data.servicesOrProducts.length > 0) {
+      // Persist initial website products into public.products linked to the inserted website & store
+      const targetStoreId =
+        newSite.storeId && UUID_REGEX.test(newSite.storeId) ? newSite.storeId : resolvedStoreId;
+
+      if (
+        targetStoreId &&
+        UUID_REGEX.test(targetStoreId) &&
+        Array.isArray(data.servicesOrProducts) &&
+        data.servicesOrProducts.length > 0
+      ) {
         const createdProducts: Product[] = [];
+        let failedProductCount = 0;
+
         for (let idx = 0; idx < data.servicesOrProducts.length; idx++) {
           const item = data.servicesOrProducts[idx];
           if (!item.name?.trim()) continue;
@@ -1697,31 +1739,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             typeof item.priceNumeric === 'number' && Number.isFinite(item.priceNumeric)
               ? item.priceNumeric
               : Number(String(item.price || '0').replace(/[^0-9.]/g, '')) || 0;
-          const skuCode = `WEB-${cleanSub.slice(0, 6).toUpperCase()}-${idx + 1}-${Math.floor(100 + Math.random() * 900)}`;
-          const { data: dbProd } = await createProductInDb(resolvedStoreId, {
+          const skuCode = `WEB-${newSite.subdomain.slice(0, 6).toUpperCase()}-${idx + 1}-${Math.floor(100 + Math.random() * 900)}`;
+          const { data: dbProd, error: prodErr } = await createProductInDb(targetStoreId, {
             name: item.name.trim(),
             sku: skuCode,
-            category: item.category || data.nicheLabel || 'Website Catalog',
+            category: item.category || newSite.nicheLabel || 'Website Catalog',
             price: numericPrice,
             costPrice: 0,
             stock: 50,
             lowStockThreshold: 5,
-            status: 'active',
+            status: item.isVisible === false ? 'draft' : 'active',
             description: item.description || '',
             image: item.imageUrl || undefined,
             websiteId: newSite.id,
             isVisible: item.isVisible ?? true,
             sortOrder: idx,
           });
-          if (dbProd) {
+          if (prodErr || !dbProd) {
+            failedProductCount++;
+            console.warn(
+              `[GoAMAAS] Initial catalog product "${item.name}" could not be saved:`,
+              prodErr?.message
+            );
+          } else {
             createdProducts.push(dbProd);
           }
         }
+
         if (createdProducts.length > 0) {
           setProducts((prev) => [
             ...createdProducts,
             ...prev.filter((p) => !createdProducts.some((cp) => cp.id === p.id)),
           ]);
+        }
+
+        if (failedProductCount > 0) {
+          showToast(
+            `Website saved, but ${failedProductCount} initial catalog item(s) could not be synced. You can review them in the Website Editor.`,
+            'warning'
+          );
         }
       }
     } else {
@@ -1737,11 +1793,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         id: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `site-${Date.now()}`,
         subdomain: cleanSub,
         fullDomainUrl: `${cleanSub}.amaas.xyz`,
-        planName: data.planName || websiteSubscriptionPlan.name,
+        planName: websiteSubscriptionPlan.name,
         monthlyFee: websiteSubscriptionPlan.priceMonthly,
         subscriptionStatus: 'active',
         paymentStatus: 'pending',
-        deploymentStatus: 'provisioning',
+        deploymentStatus: 'deploying',
         sslStatus: 'pending',
         nextBillingDate,
         createdAt: today,
@@ -1761,13 +1817,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setSubscribedWebsites((prev) => [newSite, ...prev.filter((s) => s.id !== newSite.id)]);
 
+    const effectiveMonthlyFee = newSite.monthlyFee || websiteSubscriptionPlan.priceMonthly;
+    const effectivePlanLabel = newSite.planName || websiteSubscriptionPlan.name;
+
     const todayStr = new Date().toISOString().split('T')[0];
     const newInvoice: Invoice = {
       id: `inv-${Date.now()}`,
       invoiceNumber: `INV-AMAAS-SUB-${Math.floor(1000 + Math.random() * 9000)}`,
       date: todayStr,
-      planName: `GoAMAAS Website (${cleanSub}.amaas.xyz)`,
-      amount: websiteSubscriptionPlan.priceMonthly,
+      planName: `${effectivePlanLabel} (${newSite.fullDomainUrl})`,
+      amount: effectiveMonthlyFee,
       status: 'Pending',
     };
     setInvoices((prev) => [newInvoice, ...prev]);
@@ -1775,7 +1834,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const notif: AppNotification = {
       id: `notif-${Date.now()}`,
       title: 'Website Created — Payment Verification Required',
-      message: `Your website "${newSite.businessName}" was saved. Submit your ৳${websiteSubscriptionPlan.priceMonthly} payment so our team can verify and automatically publish ${newSite.fullDomainUrl}.`,
+      message: `Your website "${newSite.businessName}" was saved. Submit your ৳${effectiveMonthlyFee} payment so our team can verify and automatically publish ${newSite.fullDomainUrl}.`,
       type: 'billing',
       read: false,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),

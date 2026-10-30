@@ -9,6 +9,10 @@ import {
 } from '../src/data/pricingConfig';
 import {
   RESERVED_PLATFORM_SUBDOMAINS,
+  SUBSCRIBED_WEBSITES_MERCHANT_INSERT_COLUMNS,
+  SUBSCRIBED_WEBSITES_RESTRICTED_INSERT_COLUMNS,
+  buildMerchantWebsiteInsertPayload,
+  mapDatabaseRowToSubscribedWebsite,
   validateSubdomainFormat,
 } from '../src/lib/supabase';
 
@@ -1185,6 +1189,157 @@ async function runAcceptanceSuite20261029() {
     ).rows[0].val;
     if (!validApprove.success || validApprove.code !== 'APPROVED') {
       throw new Error(`Expected valid Starter approval to succeed once catalog entry restored, got: ${JSON.stringify(validApprove)}`);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // 9. Merchant INSERT Column-Grant Compliance & Restricted Column Exclusion
+  // ---------------------------------------------------------------------------
+  await test('9. Merchant website INSERT payload excludes all restricted columns, succeeds under strict column grants, and maps actual DB INSERT result', async (db) => {
+    const { userA, storeA } = await setupFixture(db);
+
+    const requiredRestricted = [
+      'currency',
+      'subscribed_at',
+      'current_period_end',
+      'grace_period_end',
+      'deployment_status',
+      'resource_usage',
+      'created_at',
+      'payment_status',
+      'updated_at',
+    ];
+    for (const col of requiredRestricted) {
+      if (!(SUBSCRIBED_WEBSITES_RESTRICTED_INSERT_COLUMNS as readonly string[]).includes(col)) {
+        throw new Error(`Missing "${col}" in SUBSCRIBED_WEBSITES_RESTRICTED_INSERT_COLUMNS`);
+      }
+      if ((SUBSCRIBED_WEBSITES_MERCHANT_INSERT_COLUMNS as readonly string[]).includes(col)) {
+        throw new Error(`Restricted column "${col}" must not appear in SUBSCRIBED_WEBSITES_MERCHANT_INSERT_COLUMNS`);
+      }
+    }
+
+    const built = buildMerchantWebsiteInsertPayload({
+      userId: userA,
+      storeId: storeA,
+      businessName: 'Dhaka Craft Studio',
+      niche: 'fashion',
+      subdomain: 'dhakacraft',
+      templateId: 'tpl-modern-business',
+      templateName: 'Fashion & Boutique',
+      config: {
+        headline: 'Handcrafted Apparel',
+        nicheLabel: 'Fashion & Boutique',
+        // Simulate accidental restricted keys in config; must be stripped cleanly
+        payment_status: 'paid',
+        deployment_status: 'live',
+        currency: 'USD',
+      },
+    });
+
+    if (built.error || !built.payload) {
+      throw new Error(`buildMerchantWebsiteInsertPayload failed unexpectedly: ${built.error?.message}`);
+    }
+
+    const payloadKeys = Object.keys(built.payload);
+    for (const key of payloadKeys) {
+      if (!(SUBSCRIBED_WEBSITES_MERCHANT_INSERT_COLUMNS as readonly string[]).includes(key)) {
+        throw new Error(`Unexpected column "${key}" in merchant INSERT payload`);
+      }
+      if ((SUBSCRIBED_WEBSITES_RESTRICTED_INSERT_COLUMNS as readonly string[]).includes(key)) {
+        throw new Error(`Restricted column "${key}" leaked into merchant INSERT payload`);
+      }
+    }
+    if ('payment_status' in built.payload.config || 'deployment_status' in built.payload.config || 'currency' in built.payload.config) {
+      throw new Error('Restricted column keys were not stripped from config JSONB');
+    }
+
+    // Verify every restricted column is blocked by existing PostgreSQL column-level INSERT grants for authenticated
+    await asUser(db, userA, 'urbanfashion@test.com', 'authenticated');
+    const restrictedSamples: Array<[string, string]> = [
+      ['currency', `'BDT'`],
+      ['subscribed_at', `NOW()`],
+      ['current_period_end', `NOW() + INTERVAL '30 days'`],
+      ['grace_period_end', `NOW() + INTERVAL '35 days'`],
+      ['deployment_status', `'deploying'`],
+      ['resource_usage', `'{}'::jsonb`],
+      ['created_at', `NOW()`],
+      ['payment_status', `'pending'`],
+      ['updated_at', `NOW()`],
+    ];
+
+    for (const [col, sqlVal] of restrictedSamples) {
+      let denied = false;
+      try {
+        await db.query(`
+          INSERT INTO public.subscribed_websites (user_id, store_id, business_name, niche, subdomain, full_domain, ${col})
+          VALUES ('${userA}', '${storeA}', 'Blocked Insert', 'fashion', 'blocked-${col.replace(/_/g, '')}', 'blocked.amaas.xyz', ${sqlVal});
+        `);
+      } catch (err: any) {
+        if (/permission denied for table subscribed_websites/i.test(err?.message || '')) {
+          denied = true;
+        }
+      }
+      if (!denied) {
+        throw new Error(`Expected permission denied when authenticated merchant inserts restricted column "${col}"`);
+      }
+    }
+
+    // Verify merchant INSERT payload succeeds under current schema grants AND under stricter 20261017 11-column grants
+    const colsSql = payloadKeys.join(', ');
+    const valsPlaceholders = payloadKeys.map((_, idx) => `$${idx + 1}`).join(', ');
+    const valsParams = payloadKeys.map((k) => {
+      const val = (built.payload as Record<string, any>)[k];
+      return k === 'config' ? JSON.stringify(val) : val;
+    });
+
+    const insertRes = await db.query<any>(
+      `INSERT INTO public.subscribed_websites (${colsSql}) VALUES (${valsPlaceholders}) RETURNING *;`,
+      valsParams
+    );
+    if (insertRes.rows.length !== 1) {
+      throw new Error('Expected 1 inserted subscribed_websites row');
+    }
+
+    const mappedSite = mapDatabaseRowToSubscribedWebsite(insertRes.rows[0]);
+    if (
+      !mappedSite.id ||
+      mappedSite.subdomain !== 'dhakacraft' ||
+      mappedSite.fullDomainUrl !== 'dhakacraft.amaas.xyz' ||
+      mappedSite.paymentStatus !== 'pending' ||
+      mappedSite.deploymentStatus !== 'deploying' ||
+      mappedSite.planName !== 'GoAMAAS Website' ||
+      mappedSite.monthlyFee !== 600 ||
+      mappedSite.nicheLabel !== 'Fashion & Boutique'
+    ) {
+      throw new Error(`Unexpected mapped INSERT result: ${JSON.stringify(mappedSite)}`);
+    }
+
+    // Tighten grants to exact 20261017 11-column INSERT grant (without plan_tier/monthly_fee) and confirm payload still succeeds
+    await asUser(db, null, null, 'service_role');
+    await db.exec(`
+      REVOKE INSERT ON TABLE public.subscribed_websites FROM authenticated;
+      GRANT INSERT (id, user_id, store_id, business_name, niche, subdomain, full_domain, template_id, template_name, status, config)
+        ON TABLE public.subscribed_websites TO authenticated;
+    `);
+
+    const builtSecond = buildMerchantWebsiteInsertPayload({
+      userId: userA,
+      storeId: storeA,
+      businessName: 'Dhaka Craft Second',
+      niche: 'fashion',
+      subdomain: 'dhakacrafttwo',
+      templateId: 'tpl-modern-business',
+      templateName: 'Fashion & Boutique',
+      config: { headline: 'Second Storefront' },
+    });
+    const keys2 = Object.keys(builtSecond.payload!);
+    await asUser(db, userA, 'urbanfashion@test.com', 'authenticated');
+    const insertRes2 = await db.query<any>(
+      `INSERT INTO public.subscribed_websites (${keys2.join(', ')}) VALUES (${keys2.map((_, i) => `$${i + 1}`).join(', ')}) RETURNING *;`,
+      keys2.map((k) => (k === 'config' ? JSON.stringify((builtSecond.payload as any)[k]) : (builtSecond.payload as any)[k]))
+    );
+    if (insertRes2.rows.length !== 1 || insertRes2.rows[0].payment_status !== 'pending') {
+      throw new Error('Merchant INSERT failed under 20261017 11-column INSERT grant');
     }
   });
 

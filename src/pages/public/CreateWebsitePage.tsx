@@ -40,6 +40,7 @@ export const CreateWebsitePage: React.FC = () => {
     updateProduct,
     deleteProduct,
     websiteSubscriptionPlan,
+    subscribedWebsites,
     createSubscribedWebsite,
     updateSubscribedWebsite,
     uploadWebsiteAsset,
@@ -144,11 +145,21 @@ export const CreateWebsitePage: React.FC = () => {
   // Preview Mode
   const [previewDevice, setPreviewDevice] = useState<'desktop' | 'mobile'>('desktop');
 
-  // Payment Modal & Draft Submission Lock
+  // Payment Modal, Persisted Site Result & Draft Submission Lock
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
   const [createdSiteId, setCreatedSiteId] = useState<string>('');
+  const [createdSite, setCreatedSite] = useState<SubscribedWebsite | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const submittingDraftRef = useRef<boolean>(false);
+
+  const persistedSite =
+    (createdSiteId ? subscribedWebsites.find((s) => s.id === createdSiteId) : undefined) ||
+    createdSite;
+  const effectiveSubdomain = persistedSite?.subdomain || subdomain;
+  const effectiveFullDomain = persistedSite?.fullDomainUrl || `${effectiveSubdomain}.amaas.xyz`;
+  const effectivePlanName = persistedSite?.planName || 'GoAMAAS Website';
+  const effectiveMonthlyFee = persistedSite?.monthlyFee || websiteSubscriptionPlan.priceMonthly;
 
   // Update defaults when category changes
   const handleSelectCategory = (cat: CategorySpec) => {
@@ -346,6 +357,8 @@ export const CreateWebsitePage: React.FC = () => {
   const handleCompleteDraft = async () => {
     if (submittingDraftRef.current) return;
 
+    setSubmitError(null);
+
     if (!isAuthenticated) {
       showToast('Please sign in to save and publish your website.', 'warning');
       navigate('/login?redirect=/create-website');
@@ -407,7 +420,10 @@ export const CreateWebsitePage: React.FC = () => {
           socialLinks: cleanSocialLinks,
           themeSettings,
         });
-        if (!updateRes.success) return;
+        if (!updateRes.success) {
+          setSubmitError(updateRes.error?.message || 'Failed to update website configuration.');
+          return;
+        }
 
         // Keep public.products rows in sync if the user returned to Step 3 to edit offerings
         const existingSiteProducts = products
@@ -435,7 +451,7 @@ export const CreateWebsitePage: React.FC = () => {
               sortOrder: idx,
             });
           } else {
-            const skuCode = `WEB-${subdomain.slice(0, 6).toUpperCase()}-${idx + 1}-${Math.floor(100 + Math.random() * 900)}`;
+            const skuCode = `WEB-${effectiveSubdomain.slice(0, 6).toUpperCase()}-${idx + 1}-${Math.floor(100 + Math.random() * 900)}`;
             await addProduct({
               name: item.name.trim(),
               sku: skuCode,
@@ -466,13 +482,14 @@ export const CreateWebsitePage: React.FC = () => {
       if (!subCheck.available) {
         const reason = subCheck.reason || 'This subdomain is already taken or reserved.';
         setSubdomainError(reason);
+        setSubmitError(reason);
         showToast(reason, 'error');
         setStep(2);
         return;
       }
 
-      const newSite = await createSubscribedWebsite({
-        storeId: activeStore?.id || '',
+      const savedSite = await createSubscribedWebsite({
+        storeId: activeStore?.id || undefined,
         businessName: businessName.trim(),
         ownerName: user?.name || businessName.trim(),
         email: email.trim(),
@@ -482,7 +499,6 @@ export const CreateWebsitePage: React.FC = () => {
         templateId: 'tpl-modern-business',
         templateName: `${selectedCategory.label}`,
         subdomain,
-        fullDomainUrl: `${subdomain}.amaas.xyz`,
         customDomain: normalizedCustomDomain || undefined,
         brandColor,
         logoUrl: logoUrl || undefined,
@@ -497,22 +513,31 @@ export const CreateWebsitePage: React.FC = () => {
         whatsappNumber: whatsappNumber.trim(),
         socialLinks: cleanSocialLinks,
         themeSettings,
-        planName: 'GoAMAAS Website',
-        monthlyFee: websiteSubscriptionPlan.priceMonthly,
-        subscriptionStatus: 'active',
-        paymentStatus: 'pending',
-        deploymentStatus: 'provisioning',
-        sslStatus: 'active',
-        nextBillingDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
-          .toISOString()
-          .split('T')[0],
       });
 
-      setCreatedSiteId(newSite.id);
+      if (!savedSite?.id) {
+        throw new Error('Website record could not be confirmed by the database. Please try again.');
+      }
+
+      setCreatedSite(savedSite);
+      setCreatedSiteId(savedSite.id);
+      if (savedSite.subdomain && savedSite.subdomain !== subdomain) {
+        setSubdomain(savedSite.subdomain);
+      }
       setStep(5);
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Failed to create website draft:', err);
-      showToast(err.message || 'Failed to save website. Please try again.', 'error');
+      const message =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Failed to save website. Please try again.';
+      setSubmitError(message);
+      const alreadyToasted = Boolean(
+        err && typeof err === 'object' && 'toastShown' in err && (err as { toastShown?: boolean }).toastShown
+      );
+      if (!alreadyToasted) {
+        showToast(message, 'error');
+      }
     } finally {
       setIsSubmitting(false);
       submittingDraftRef.current = false;
@@ -1310,11 +1335,24 @@ export const CreateWebsitePage: React.FC = () => {
               <WebsitePreviewRenderer site={draftSite} viewMode={previewDevice} />
             </div>
 
+            {submitError && (
+              <div className="p-3.5 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900 text-red-700 dark:text-red-300 text-xs flex items-start gap-2.5">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-600 dark:text-red-400" />
+                <div className="flex-1">
+                  <span className="font-bold block">Could not save website</span>
+                  <span>{submitError}</span>
+                </div>
+              </div>
+            )}
+
             <div className="flex items-center justify-between pt-4">
               <button
                 type="button"
                 disabled={isSubmitting}
-                onClick={() => setStep(3)}
+                onClick={() => {
+                  setSubmitError(null);
+                  setStep(3);
+                }}
                 className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
               >
                 <ArrowLeft className="w-3.5 h-3.5" />
@@ -1354,7 +1392,7 @@ export const CreateWebsitePage: React.FC = () => {
               </h2>
               <p className="text-xs text-slate-500">
                 Your website is saved at{' '}
-                <strong className="font-mono text-blue-600">https://{subdomain}.amaas.xyz</strong>.
+                <strong className="font-mono text-blue-600">https://{effectiveFullDomain}</strong>.
               </p>
             </div>
 
@@ -1362,10 +1400,10 @@ export const CreateWebsitePage: React.FC = () => {
             <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-900 dark:text-amber-200 text-xs space-y-2">
               <div className="flex items-center gap-2 font-bold">
                 <ShieldCheck className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
-                <span>GoAMAAS Website Subscription — Automatic Live Publishing</span>
+                <span>{effectivePlanName} Subscription — Automatic Live Publishing</span>
               </div>
               <p className="leading-relaxed text-[11px] text-amber-800 dark:text-amber-300">
-                Submit your <strong>৳{websiteSubscriptionPlan.priceMonthly} BDT</strong> monthly payment via bKash, Nagad, or Bank Transfer below. As soon as your payment is verified by our operations team, your website automatically goes live at <strong>https://{subdomain}.amaas.xyz</strong> for a full <strong>30-day billing period</strong>.
+                Submit your <strong>৳{effectiveMonthlyFee} BDT</strong> monthly payment via bKash, Nagad, or Bank Transfer below. As soon as your payment is verified by our operations team, your website automatically goes live at <strong>https://{effectiveFullDomain}</strong> for a full <strong>30-day billing period</strong>.
               </p>
             </div>
 
@@ -1374,15 +1412,15 @@ export const CreateWebsitePage: React.FC = () => {
               <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
                 <div>
                   <h3 className="font-bold text-sm text-slate-900 dark:text-white">
-                    GoAMAAS Website
+                    {effectivePlanName}
                   </h3>
                   <span className="text-[11px] text-slate-400 font-mono">
-                    https://{subdomain}.amaas.xyz · 30-day billing period
+                    https://{effectiveFullDomain} · 30-day billing period
                   </span>
                 </div>
                 <div className="text-right">
                   <span className="text-2xl font-black text-blue-600 font-mono tabular-nums">
-                    ৳{websiteSubscriptionPlan.priceMonthly}
+                    ৳{effectiveMonthlyFee}
                   </span>
                   <span className="text-xs text-slate-400"> / month</span>
                 </div>
@@ -1392,7 +1430,7 @@ export const CreateWebsitePage: React.FC = () => {
                 <div className="flex items-center gap-2">
                   <CheckCircle2 className="w-3.5 h-3.5 text-blue-600 shrink-0" />
                   <span>
-                    Free <code className="font-mono text-blue-600">{subdomain}.amaas.xyz</code> subdomain &amp; free hosting on GoAMAAS infrastructure
+                    Free <code className="font-mono text-blue-600">{effectiveFullDomain}</code> subdomain &amp; free hosting on GoAMAAS infrastructure
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
@@ -1418,11 +1456,12 @@ export const CreateWebsitePage: React.FC = () => {
               <div className="pt-4 border-t border-slate-100 dark:border-slate-800 flex flex-col sm:flex-row items-center gap-3">
                 <button
                   type="button"
+                  disabled={!persistedSite?.id && !createdSiteId}
                   onClick={() => setIsPaymentModalOpen(true)}
-                  className="w-full sm:flex-1 py-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
+                  className="w-full sm:flex-1 py-3 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-bold text-xs shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
                 >
                   <CreditCard className="w-4 h-4" />
-                  <span>Submit ৳{websiteSubscriptionPlan.priceMonthly} Payment (bKash / Nagad / Bank)</span>
+                  <span>Submit ৳{effectiveMonthlyFee} Payment (bKash / Nagad / Bank)</span>
                 </button>
                 <button
                   type="button"
@@ -1456,7 +1495,7 @@ export const CreateWebsitePage: React.FC = () => {
                   return (
                     <a
                       href={`https://wa.me/${cleanDigits}?text=${encodeURIComponent(
-                        `Hello GoAMAAS! I created a website for "${businessName}" (${subdomain}.amaas.xyz) and need assistance with custom domain DNS setup.`
+                        `Hello GoAMAAS! I created a website for "${persistedSite?.businessName || businessName}" (${effectiveFullDomain}) and need assistance with custom domain DNS setup.`
                       )}`}
                       target="_blank"
                       rel="noopener noreferrer"
@@ -1487,10 +1526,10 @@ export const CreateWebsitePage: React.FC = () => {
         isOpen={isPaymentModalOpen}
         onClose={() => setIsPaymentModalOpen(false)}
         serviceType="website_subscription"
-        serviceId={createdSiteId}
-        serviceName={`GoAMAAS Website (${subdomain}.amaas.xyz)`}
-        planTier="GoAMAAS Website"
-        amount={websiteSubscriptionPlan.priceMonthly}
+        serviceId={persistedSite?.id || createdSiteId}
+        serviceName={`${effectivePlanName} (${effectiveFullDomain})`}
+        planTier={effectivePlanName}
+        amount={effectiveMonthlyFee}
         onSuccess={() => {
           showToast(
             'Payment submitted! Your website will publish live automatically as soon as your payment is verified.',

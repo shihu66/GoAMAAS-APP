@@ -1497,6 +1497,130 @@ export async function deleteWebsiteAssetFromStorage(
 // Subscribed Websites Management API (Database-First Multi-Tenant Integration)
 // ==============================================================================
 
+// Columns restricted to database defaults, triggers, and SECURITY DEFINER RPCs.
+// Authenticated merchant INSERT payloads MUST NEVER include any of these columns.
+export const SUBSCRIBED_WEBSITES_RESTRICTED_INSERT_COLUMNS = [
+  'currency',
+  'subscribed_at',
+  'current_period_end',
+  'grace_period_end',
+  'deployment_status',
+  'resource_usage',
+  'created_at',
+  'payment_status',
+  'updated_at',
+  'notes',
+] as const;
+
+// Least-privilege columns permitted for authenticated merchant INSERT across all schema revisions.
+// Plan/billing fields (plan_tier, monthly_fee) and lifecycle/audit fields are intentionally omitted
+// so PostgreSQL column defaults and protect_subscribed_website_security() populate them safely.
+export const SUBSCRIBED_WEBSITES_MERCHANT_INSERT_COLUMNS = [
+  'user_id',
+  'store_id',
+  'business_name',
+  'niche',
+  'subdomain',
+  'full_domain',
+  'template_id',
+  'template_name',
+  'status',
+  'config',
+] as const;
+
+export type MerchantWebsiteInsertPayload = {
+  user_id: string;
+  store_id?: string;
+  business_name: string;
+  niche: string;
+  subdomain: string;
+  full_domain: string;
+  template_id: string;
+  template_name: string;
+  status: 'active';
+  config: Record<string, any>;
+};
+
+function sanitizeWebsiteConfigForInsert(rawConfig: Record<string, any> | undefined): Record<string, any> {
+  if (!rawConfig || typeof rawConfig !== 'object' || Array.isArray(rawConfig)) {
+    return {};
+  }
+  const restrictedSet = new Set<string>(SUBSCRIBED_WEBSITES_RESTRICTED_INSERT_COLUMNS);
+  const cleaned: Record<string, any> = {};
+  for (const [key, value] of Object.entries(rawConfig)) {
+    if (restrictedSet.has(key)) continue;
+    if (value !== undefined) {
+      cleaned[key] = value;
+    }
+  }
+  return cleaned;
+}
+
+export function buildMerchantWebsiteInsertPayload(params: {
+  userId: string;
+  businessName: string;
+  niche: string;
+  subdomain: string;
+  storeId?: string;
+  templateId?: string;
+  templateName?: string;
+  config?: Record<string, any>;
+}): { payload: MerchantWebsiteInsertPayload | null; cleanSubdomain: string; error: Error | null } {
+  const trimmedUserId = (params.userId || '').trim();
+  if (!UUID_REGEX.test(trimmedUserId)) {
+    return {
+      payload: null,
+      cleanSubdomain: '',
+      error: new Error('Authentication required: invalid user session identifier.'),
+    };
+  }
+
+  const trimmedBusinessName = (params.businessName || '').trim();
+  if (!trimmedBusinessName) {
+    return {
+      payload: null,
+      cleanSubdomain: '',
+      error: new Error('Business name is required to create a website.'),
+    };
+  }
+
+  const subValidation = validateSubdomainFormat(params.subdomain);
+  if (!subValidation.valid) {
+    return {
+      payload: null,
+      cleanSubdomain: subValidation.clean,
+      error: new Error(subValidation.reason || 'Invalid subdomain format'),
+    };
+  }
+  const cleanSubdomain = subValidation.clean;
+
+  const payload: MerchantWebsiteInsertPayload = {
+    user_id: trimmedUserId,
+    business_name: trimmedBusinessName,
+    niche: (params.niche || 'ecommerce').trim(),
+    subdomain: cleanSubdomain,
+    full_domain: `${cleanSubdomain}.amaas.xyz`,
+    template_id: (params.templateId || 'tpl-modern-business').trim() || 'tpl-modern-business',
+    template_name: (params.templateName || 'Modern Executive').trim() || 'Modern Executive',
+    status: 'active',
+    config: sanitizeWebsiteConfigForInsert(params.config),
+  };
+
+  if (params.storeId && UUID_REGEX.test(params.storeId.trim())) {
+    payload.store_id = params.storeId.trim();
+  }
+
+  // Runtime defense-in-depth: guarantee restricted columns can never leak into merchant INSERT
+  const allowedSet = new Set<string>(SUBSCRIBED_WEBSITES_MERCHANT_INSERT_COLUMNS);
+  for (const key of Object.keys(payload)) {
+    if (!allowedSet.has(key)) {
+      delete (payload as Record<string, unknown>)[key];
+    }
+  }
+
+  return { payload, cleanSubdomain, error: null };
+}
+
 export function mapDatabaseRowToSubscribedWebsite(row: any): SubscribedWebsite {
   const config = (row.config as Record<string, any>) || {};
   const draftRaw =
@@ -1516,7 +1640,7 @@ export function mapDatabaseRowToSubscribedWebsite(row: any): SubscribedWebsite {
     email: config.email || '',
     phone: config.phone || '',
     niche: (row.niche as any) || 'ecommerce',
-    nicheLabel: row.template_name || 'Business Storefront',
+    nicheLabel: config.nicheLabel || row.template_name || 'Business Storefront',
     templateId: row.template_id || config.templateId || 'tpl-modern-business',
     templateName: row.template_name || 'Modern Executive',
     subdomain: cleanSubdomain,
@@ -1555,9 +1679,10 @@ export function mapDatabaseRowToSubscribedWebsite(row: any): SubscribedWebsite {
     draftConfig: hasDraft ? draftRaw : undefined,
     planName: row.plan_tier || 'GoAMAAS Website',
     monthlyFee: Number(row.monthly_fee) || 600,
-    subscriptionStatus: (row.status as any) || 'active',
-    paymentStatus: (row.payment_status as any) || 'pending',
-    deploymentStatus: (row.deployment_status as any) || 'provisioning',
+    subscriptionStatus: (row.status as SubscribedWebsite['subscriptionStatus']) || 'active',
+    paymentStatus: (row.payment_status as SubscribedWebsite['paymentStatus']) || 'pending',
+    deploymentStatus:
+      (row.deployment_status as SubscribedWebsite['deploymentStatus']) || 'deploying',
     sslStatus: 'active',
     nextBillingDate:
       row.next_billing_date ||
@@ -1590,57 +1715,105 @@ export async function createSubscribedWebsiteInDb(params: {
   storeId?: string;
   templateId?: string;
   templateName?: string;
-  planTier?: string;
-  monthlyFee?: number;
   config: Record<string, any>;
 }): Promise<{ data: SubscribedWebsite | null; error: Error | null }> {
   if (!isSupabaseConfigured || !supabase) {
     return { data: null, error: new Error('Supabase client is not configured') };
   }
   try {
-    const { data: { user }, error: authErr } = await supabase.auth.getUser();
-    if (authErr || !user) {
-      return { data: null, error: new Error('Authentication required: please sign in to save your website') };
+    let {
+      data: { session },
+    } = await supabase.auth.getSession();
+    if (!session?.access_token) {
+      const refreshed = await supabase.auth.refreshSession();
+      session = refreshed.data.session;
     }
 
-    const subValidation = validateSubdomainFormat(params.subdomain);
-    if (!subValidation.valid) {
-      return { data: null, error: new Error(subValidation.reason || 'Invalid subdomain format') };
+    const {
+      data: { user },
+      error: authErr,
+    } = await supabase.auth.getUser();
+    if (authErr || !user || !session?.access_token) {
+      return {
+        data: null,
+        error: new Error('Authentication required: please sign in to save your website.'),
+      };
     }
-    const cleanSubdomain = subValidation.clean;
 
-    const payload: Record<string, any> = {
-      user_id: user.id,
-      business_name: params.businessName.trim(),
+    if (session.user?.id && session.user.id !== user.id) {
+      const refreshed = await supabase.auth.refreshSession();
+      session = refreshed.data.session;
+      if (!session?.access_token || session.user?.id !== user.id) {
+        return {
+          data: null,
+          error: new Error('Your login session changed. Please sign in again and retry.'),
+        };
+      }
+    }
+
+    const { payload, cleanSubdomain, error: buildErr } = buildMerchantWebsiteInsertPayload({
+      userId: user.id,
+      businessName: params.businessName,
       niche: params.niche,
-      subdomain: cleanSubdomain,
-      full_domain: `${cleanSubdomain}.amaas.xyz`,
-      template_id: params.templateId || 'tpl-modern-business',
-      template_name: params.templateName || 'Modern Executive',
-      plan_tier: params.planTier?.trim() || 'GoAMAAS Website',
-      monthly_fee:
-        typeof params.monthlyFee === 'number' && Number.isFinite(params.monthlyFee) && params.monthlyFee > 0
-          ? params.monthlyFee
-          : 600,
-      status: 'active',
-      config: params.config || {},
-    };
+      subdomain: params.subdomain,
+      storeId: params.storeId,
+      templateId: params.templateId,
+      templateName: params.templateName,
+      config: params.config,
+    });
 
-    if (params.storeId && UUID_REGEX.test(params.storeId.trim())) {
-      payload.store_id = params.storeId.trim();
+    if (buildErr || !payload) {
+      return { data: null, error: buildErr || new Error('Invalid website creation payload') };
     }
 
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from('subscribed_websites')
       .insert(payload)
       .select('*')
       .single();
 
+    // If an admin updated service_pricing_catalog.price_bdt away from the table's column default (600),
+    // passing NULL for plan_tier/monthly_fee lets protect_subscribed_website_security() auto-populate
+    // the authoritative catalog fee & label without ever touching restricted lifecycle/payment columns.
+    if (error && /invalid monthly_fee/i.test(error.message || '')) {
+      const catalogDeferredPayload: Record<string, any> = {
+        ...payload,
+        plan_tier: null,
+        monthly_fee: null,
+      };
+      const retryRes = await supabase
+        .from('subscribed_websites')
+        .insert(catalogDeferredPayload)
+        .select('*')
+        .single();
+      data = retryRes.data;
+      error = retryRes.error;
+    }
+
     if (error) {
-      if (error.code === '23505' || error.message.includes('unique') || error.message.includes('subdomain')) {
-        return { data: null, error: new Error(`The subdomain "${cleanSubdomain}" is already registered. Please choose another subdomain.`) };
+      const msg = error.message || 'Database error creating website';
+      if (
+        error.code === '23505' ||
+        /duplicate key|unique constraint|subscribed_websites_subdomain_key|idx_subscribed_websites_subdomain/i.test(
+          msg
+        )
+      ) {
+        return {
+          data: null,
+          error: new Error(
+            `The subdomain "${cleanSubdomain}" is already registered. Please choose another subdomain.`
+          ),
+        };
       }
-      return { data: null, error: new Error(error.message || 'Database error creating website') };
+      if (error.code === '42501' || /permission denied/i.test(msg)) {
+        return {
+          data: null,
+          error: new Error(
+            `Website creation was rejected by database permissions (${msg}). Please verify your account session and store permissions.`
+          ),
+        };
+      }
+      return { data: null, error: new Error(msg) };
     }
 
     if (!data) {
