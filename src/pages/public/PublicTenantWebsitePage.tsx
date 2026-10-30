@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
 import { SubscribedWebsite } from '../../types';
+import { validateSubdomainFormat } from '../../lib/supabase';
 import { WebsitePreviewRenderer } from '../../components/website/WebsitePreviewRenderer';
 import { Globe, ArrowLeft, Lock, Loader2, Sparkles, AlertCircle } from 'lucide-react';
 
@@ -11,13 +12,19 @@ export const PublicTenantWebsitePage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [site, setSite] = useState<SubscribedWebsite | null>(null);
 
-  // Determine subdomain from URL param or actual window hostname (e.g. clientname.amaas.xyz)
+  // Determine subdomain from URL param or actual window hostname (e.g. businessname.amaas.xyz or businessname.localhost)
   const resolvedSubdomain = (() => {
-    if (paramSubdomain) return paramSubdomain.toLowerCase();
+    if (paramSubdomain) return paramSubdomain.trim().toLowerCase();
     if (typeof window !== 'undefined') {
       const host = window.location.hostname.toLowerCase();
-      if (host.endsWith('.amaas.xyz') && host !== 'app.amaas.xyz' && host !== 'amaas.xyz') {
-        return host.replace('.amaas.xyz', '');
+      let candidate = '';
+      if (host.endsWith('.amaas.xyz') && host !== 'amaas.xyz') {
+        candidate = host.slice(0, -'.amaas.xyz'.length);
+      } else if (host.endsWith('.localhost') && host !== 'localhost') {
+        candidate = host.slice(0, -'.localhost'.length);
+      }
+      if (candidate && !candidate.includes('.') && validateSubdomainFormat(candidate).valid) {
+        return candidate;
       }
     }
     return null;
@@ -86,7 +93,11 @@ export const PublicTenantWebsitePage: React.FC = () => {
 
   // If website is draft or payment is pending, only authenticated owner or admin can view
   const isPaid = site.paymentStatus === 'paid';
-  const isSuspended = site.subscriptionStatus === 'suspended' || site.deploymentStatus === 'suspended';
+  const isUnavailable =
+    site.subscriptionStatus === 'suspended' ||
+    site.subscriptionStatus === 'cancelled' ||
+    site.subscriptionStatus === 'draft' ||
+    site.deploymentStatus !== 'live';
 
   if (!isPaid) {
     return (
@@ -118,10 +129,36 @@ export const PublicTenantWebsitePage: React.FC = () => {
     );
   }
 
+  if (isUnavailable) {
+    return (
+      <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex flex-col items-center justify-center p-6 text-center">
+        <div className="max-w-md w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-8 shadow-xl space-y-5">
+          <div className="w-14 h-14 rounded-2xl bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 flex items-center justify-center mx-auto">
+            <AlertCircle className="w-7 h-7" />
+          </div>
+          <div className="space-y-1">
+            <h1 className="text-xl font-bold text-slate-900 dark:text-white">{site.businessName}</h1>
+            <p className="text-xs text-slate-500 font-mono">
+              https://{site.fullDomainUrl}
+            </p>
+          </div>
+          <div className="p-3 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 text-xs">
+            This storefront is currently offline or undergoing scheduled maintenance.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // Full-Screen Public Website View
   return (
     <div className="min-h-screen bg-white">
-      <WebsitePreviewRenderer site={site} viewMode="desktop" isPublicView={true} />
+      <WebsitePreviewRenderer
+        site={site}
+        viewMode="desktop"
+        isPublicView={true}
+        showGraceBanner={site.subscriptionStatus === 'grace_period'}
+      />
     </div>
   );
 };

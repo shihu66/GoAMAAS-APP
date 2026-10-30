@@ -53,7 +53,7 @@ assert(
 assert(
   schemaContent.includes('CREATE OR REPLACE FUNCTION public.is_admin()') &&
   schemaContent.includes('SECURITY DEFINER') &&
-  schemaContent.includes('SET search_path = public, pg_temp') &&
+  (schemaContent.includes('SET search_path = pg_catalog, public, pg_temp') || schemaContent.includes('SET search_path = public, pg_temp')) &&
   !/FROM public\.profiles WHERE id = auth\.uid\(\) AND role = 'admin'/g.test(schemaContent),
   'Profiles RLS: Unsafe recursive admin policy eliminated via SECURITY DEFINER is_admin() helper'
 );

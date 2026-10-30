@@ -1,5 +1,5 @@
 import React from 'react';
-import { Navigate, useLocation } from 'react-router-dom';
+import { Navigate, Link, useLocation } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
 import { Loader2, ShieldAlert } from 'lucide-react';
 
@@ -37,12 +37,12 @@ export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children, requir
             This administrative area requires elevated platform credentials. Your account ({user.email}) does not have administrative permissions.
           </p>
           <div className="pt-2">
-            <a
-              href="/dashboard"
+            <Link
+              to="/dashboard"
               className="inline-flex items-center justify-center py-2 px-4 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs transition-colors"
             >
               Return to Store Dashboard
-            </a>
+            </Link>
           </div>
         </div>
       </div>

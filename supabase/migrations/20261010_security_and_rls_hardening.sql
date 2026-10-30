@@ -671,20 +671,34 @@ DROP POLICY IF EXISTS "Subscribed websites insert policy" ON public.subscribed_w
 CREATE POLICY "Subscribed websites insert policy"
   ON public.subscribed_websites FOR INSERT
   TO authenticated
-  WITH CHECK (auth.uid() = user_id);
+  WITH CHECK (
+    (
+      auth.uid() = user_id
+      AND (store_id IS NULL OR public.can_manage_store(store_id))
+    )
+    OR public.is_admin()
+  );
 
 DROP POLICY IF EXISTS "Subscribed websites update policy" ON public.subscribed_websites;
 CREATE POLICY "Subscribed websites update policy"
   ON public.subscribed_websites FOR UPDATE
   TO authenticated
-  USING (auth.uid() = user_id OR public.is_admin())
-  WITH CHECK (auth.uid() = user_id OR public.is_admin());
+  USING (
+    auth.uid() = user_id 
+    OR public.is_admin()
+    OR (store_id IS NOT NULL AND public.can_manage_store(store_id))
+  )
+  WITH CHECK (
+    auth.uid() = user_id 
+    OR public.is_admin()
+    OR (store_id IS NOT NULL AND public.can_manage_store(store_id))
+  );
 
 DROP POLICY IF EXISTS "Subscribed websites delete policy" ON public.subscribed_websites;
 CREATE POLICY "Subscribed websites delete policy"
   ON public.subscribed_websites FOR DELETE
   TO authenticated
-  USING (auth.uid() = user_id OR public.is_admin());
+  USING (public.is_admin());
 
 DROP TRIGGER IF EXISTS trg_protect_subscribed_websites_user_id ON public.subscribed_websites;
 CREATE TRIGGER trg_protect_subscribed_websites_user_id

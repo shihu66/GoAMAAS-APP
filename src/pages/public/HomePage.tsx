@@ -140,7 +140,7 @@ export const HomePage: React.FC = () => {
               <p className="text-xl sm:text-2xl font-extrabold text-purple-600 dark:text-purple-400 font-mono">
                 ৳600 / Mo
               </p>
-              <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Website Lite Subscription</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">GoAMAAS Website Plan</p>
             </div>
           </div>
         </div>
@@ -444,20 +444,20 @@ export const HomePage: React.FC = () => {
             ))}
           </div>
 
-          {/* Spotlight: AMAAS Website Lite Plan */}
+          {/* Spotlight: GoAMAAS Website Subscription */}
           <div className="mt-8 p-6 sm:p-8 rounded-2xl bg-gradient-to-r from-blue-950 via-slate-900 to-indigo-950 border-2 border-blue-500 text-white shadow-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
             <div className="space-y-2 max-w-2xl">
               <div className="flex items-center gap-2">
                 <span className="px-3 py-0.5 rounded-full bg-blue-600 text-white font-extrabold text-[11px] uppercase tracking-wider">
-                  ★ Best for Small Businesses
+                  ★ All-Inclusive Website Builder
                 </span>
-                <span className="text-xs text-blue-300 font-semibold">New Website Subscription Plan</span>
+                <span className="text-xs text-blue-300 font-semibold">30-Day Subscription • Free Hosting</span>
               </div>
               <h3 className="text-xl sm:text-2xl font-black text-white">
-                AMAAS Website Lite — ৳600 / month
+                GoAMAAS Website — ৳600 BDT / month
               </h3>
               <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
-                Custom-designed, mobile-responsive business website for any niche with hosting included and your free subdomain (<code className="font-mono text-emerald-400">yourbusiness.amaas.xyz</code>). Zero upfront development fee.
+                Build, customize, and publish your mobile-responsive business website with visual editing, product catalog, free GoAMAAS hosting, and your free subdomain (<code className="font-mono text-emerald-400">businessname.amaas.xyz</code>) or optional custom domain.
               </p>
             </div>
 

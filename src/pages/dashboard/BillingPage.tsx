@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useEffect } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
 import {
   CreditCard,
@@ -16,6 +16,7 @@ import {
   Bot,
   Info,
   Layers,
+  RefreshCw,
 } from 'lucide-react';
 import {
   DASHBOARD_SUBSCRIPTION_PLANS,
@@ -24,10 +25,14 @@ import {
   DashboardPlanConfig,
   AutomationPackageConfig,
   WebsitePackageConfig,
+  normalizeDashboardPlanId,
+  resolveCatalogPlanState,
 } from '../../data/pricingConfig';
+import { isSupabaseConfigured } from '../../lib/supabase';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { TrialStatusBadge } from '../../components/ui/TrialStatusBadge';
+import { ManualPaymentModal } from '../../components/payment/ManualPaymentModal';
 
 export const BillingPage: React.FC = () => {
   const navigate = useNavigate();
@@ -44,33 +49,144 @@ export const BillingPage: React.FC = () => {
     serviceTrials,
     getServiceAccess,
     activateServiceTrial,
+    paymentGatewayConfigs,
+    servicePricingCatalog,
+    isPricingCatalogLoading,
+    isPricingCatalogLoaded,
+    pricingCatalogError,
+    refreshServicePricingCatalog,
   } = useApp();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [activeTab, setActiveTab] = useState<'dashboard' | 'automations' | 'websites' | 'webSubscription'>('dashboard');
 
   const myWebsite = subscribedWebsites.find((w) => w.storeId === activeStore?.id) || subscribedWebsites[0];
 
-  // Confirmation dialogs
+  // Confirmation dialogs & verified payment modal payload
   const [selectedDashboardPlan, setSelectedDashboardPlan] = useState<DashboardPlanConfig | null>(null);
   const [selectedAutoPackage, setSelectedAutoPackage] = useState<AutomationPackageConfig | null>(null);
-  const [selectedWebPackage, setSelectedWebPackage] = useState<WebsitePackageConfig | null>(null);
   const [isCancelDialogOpen, setIsCancelDialogOpen] = useState(false);
+  const [checkoutPayload, setCheckoutPayload] = useState<{
+    serviceType: 'dashboard_plan' | 'ai_automation';
+    serviceId: string;
+    serviceName: string;
+    planTier: string;
+    amount: number;
+  } | null>(null);
 
-  // Payment method
-  const [paymentMethod, setPaymentMethod] = useState<'bKash' | 'Nagad' | 'Card'>('bKash');
+  const isCatalogPending = isSupabaseConfigured && isPricingCatalogLoading && !isPricingCatalogLoaded;
+
+  const getDashboardPlanState = (plan: DashboardPlanConfig) =>
+    resolveCatalogPlanState({
+      serviceType: 'dashboard_plan',
+      serviceId: plan.id,
+      fallbackLabel: plan.name,
+      fallbackPriceBdt: plan.priceMonthly,
+      catalog: isSupabaseConfigured ? servicePricingCatalog : undefined,
+      requireCatalog: isSupabaseConfigured,
+    });
+
+  const getAutomationPackageState = (pkg: AutomationPackageConfig) =>
+    resolveCatalogPlanState({
+      serviceType: 'ai_automation',
+      serviceId: pkg.id,
+      fallbackLabel: pkg.name,
+      fallbackPriceBdt: pkg.priceMonthly,
+      fallbackSetupFeeBdt: typeof pkg.setupFee === 'number' ? pkg.setupFee : 0,
+      catalog: isSupabaseConfigured ? servicePricingCatalog : undefined,
+      requireCatalog: isSupabaseConfigured,
+    });
+
+  const getWebsitePackageState = (web: WebsitePackageConfig) =>
+    resolveCatalogPlanState({
+      serviceType: 'website_package',
+      serviceId: web.id,
+      fallbackLabel: web.name,
+      fallbackPriceBdt: web.priceOneTime,
+      catalog: isSupabaseConfigured ? servicePricingCatalog : undefined,
+      requireCatalog: isSupabaseConfigured,
+    });
+
+  const businessPlanConfig = DASHBOARD_SUBSCRIPTION_PLANS.find((p) => p.id === 'business')!;
+  const businessPlanState = getDashboardPlanState(businessPlanConfig);
+  const basicAutoConfig = AI_AUTOMATION_PACKAGES.find((a) => a.id === 'basic_auto')!;
+  const basicAutoState = getAutomationPackageState(basicAutoConfig);
+
+  // Pre-open dashboard plan confirmation when routed from /pricing?plan=...
+  useEffect(() => {
+    const rawRequestedPlan = (searchParams.get('plan') || '').trim();
+    if (!rawRequestedPlan) return;
+    if (isCatalogPending) return;
+
+    const canonicalPlanId = normalizeDashboardPlanId(rawRequestedPlan);
+    const matched = canonicalPlanId
+      ? DASHBOARD_SUBSCRIPTION_PLANS.find((p) => p.id === canonicalPlanId)
+      : undefined;
+
+    if (matched) {
+      const state = resolveCatalogPlanState({
+        serviceType: 'dashboard_plan',
+        serviceId: matched.id,
+        fallbackLabel: matched.name,
+        fallbackPriceBdt: matched.priceMonthly,
+        catalog: isSupabaseConfigured ? servicePricingCatalog : undefined,
+        requireCatalog: isSupabaseConfigured,
+      });
+      setActiveTab('dashboard');
+      if (state.isAvailable && state.priceBdt !== null) {
+        setSelectedDashboardPlan(matched);
+      } else {
+        showToast('The selected dashboard plan is currently unavailable or inactive.', 'warning');
+      }
+    } else {
+      showToast('Unrecognized dashboard plan requested.', 'warning');
+    }
+
+    const next = new URLSearchParams(searchParams);
+    next.delete('plan');
+    setSearchParams(next, { replace: true });
+  }, [
+    searchParams,
+    setSearchParams,
+    isCatalogPending,
+    servicePricingCatalog,
+    showToast,
+  ]);
 
   const handleConfirmPlanChange = () => {
-    if (selectedDashboardPlan) {
-      updatePlan(selectedDashboardPlan.id);
+    if (!selectedDashboardPlan) return;
+    const planState = getDashboardPlanState(selectedDashboardPlan);
+    if (!planState.isAvailable || planState.priceBdt === null || planState.priceBdt <= 0) {
+      showToast('This dashboard plan is currently unavailable or inactive.', 'error');
       setSelectedDashboardPlan(null);
+      return;
     }
+    setSelectedDashboardPlan(null);
+    setCheckoutPayload({
+      serviceType: 'dashboard_plan',
+      serviceId: planState.serviceCode,
+      serviceName: `GoAMAAS Dashboard — ${planState.planTierLabel} Plan`,
+      planTier: planState.planTierLabel,
+      amount: planState.priceBdt,
+    });
   };
 
   const handleConfirmAutomation = () => {
-    if (selectedAutoPackage) {
-      showToast(`Automation request recorded for ${selectedAutoPackage.name}. Monthly service fee: ৳${selectedAutoPackage.priceMonthly.toLocaleString()}/mo.`, 'success');
+    if (!selectedAutoPackage) return;
+    const autoState = getAutomationPackageState(selectedAutoPackage);
+    if (!autoState.isAvailable || autoState.priceBdt === null || autoState.priceBdt <= 0) {
+      showToast('This automation package is currently unavailable or inactive.', 'error');
       setSelectedAutoPackage(null);
+      return;
     }
+    setSelectedAutoPackage(null);
+    setCheckoutPayload({
+      serviceType: 'ai_automation',
+      serviceId: autoState.serviceCode,
+      serviceName: autoState.planTierLabel,
+      planTier: autoState.planTierLabel,
+      amount: autoState.priceBdt,
+    });
   };
 
   const handleDownloadInvoice = (invNum: string) => {
@@ -121,7 +237,13 @@ export const BillingPage: React.FC = () => {
             <div>
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Core SaaS</span>
-                <span className="text-xs font-bold text-blue-600">৳599/mo</span>
+                <span className="text-xs font-bold text-blue-600">
+                  {isCatalogPending
+                    ? 'Loading...'
+                    : businessPlanState.priceBdt !== null
+                    ? `৳${businessPlanState.priceBdt.toLocaleString()}/mo`
+                    : 'Unavailable'}
+                </span>
               </div>
               <h3 className="font-bold text-sm text-slate-900 dark:text-white mt-1">Dashboard & Commerce</h3>
               <p className="text-[11px] text-slate-500 mt-1 leading-snug">
@@ -143,7 +265,13 @@ export const BillingPage: React.FC = () => {
             <div>
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">AI Messaging</span>
-                <span className="text-xs font-bold text-purple-600">৳999/mo</span>
+                <span className="text-xs font-bold text-purple-600">
+                  {isCatalogPending
+                    ? 'Loading...'
+                    : basicAutoState.priceBdt !== null
+                    ? `৳${basicAutoState.priceBdt.toLocaleString()}/mo`
+                    : 'Unavailable'}
+                </span>
               </div>
               <h3 className="font-bold text-sm text-slate-900 dark:text-white mt-1">AI Automation Suite</h3>
               <p className="text-[11px] text-slate-500 mt-1 leading-snug">
@@ -182,16 +310,16 @@ export const BillingPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Service 4: Business Website Lite */}
+          {/* Service 4: GoAMAAS Website */}
           <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/60 flex flex-col justify-between space-y-3">
             <div>
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Managed Web</span>
-                <span className="text-xs font-bold text-emerald-600">৳600/mo</span>
+                <span className="text-xs font-bold text-emerald-600">৳{websiteSubscriptionPlan.priceMonthly.toLocaleString()}/mo</span>
               </div>
-              <h3 className="font-bold text-sm text-slate-900 dark:text-white mt-1">Business Website Lite</h3>
+              <h3 className="font-bold text-sm text-slate-900 dark:text-white mt-1">GoAMAAS Website</h3>
               <p className="text-[11px] text-slate-500 mt-1 leading-snug">
-                Custom branded website with hosting, subdomain & monthly update requests.
+                Visual website builder, free GoAMAAS hosting, free *.amaas.xyz subdomain & 30-day cycle.
               </p>
             </div>
             <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60">
@@ -201,7 +329,7 @@ export const BillingPage: React.FC = () => {
                 className="w-full py-1.5 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
               >
                 <Globe className="w-3.5 h-3.5" />
-                <span>Build Website (No Free Trial)</span>
+                <span>Build Website (৳600/mo)</span>
               </button>
             </div>
           </div>
@@ -255,9 +383,31 @@ export const BillingPage: React.FC = () => {
           }`}
         >
           <Globe className="w-3.5 h-3.5" />
-          <span>Website Subscription (৳600/mo Lite)</span>
+          <span>GoAMAAS Website (৳{websiteSubscriptionPlan.priceMonthly.toLocaleString()}/mo)</span>
         </button>
       </div>
+
+      {isSupabaseConfigured && pricingCatalogError && (
+        <div
+          role="alert"
+          className="p-4 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-800 dark:text-rose-200 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+        >
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+            <span>
+              <strong>Unable to verify live plan pricing:</strong> {pricingCatalogError} Plan selection is disabled until verified database pricing is loaded.
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void refreshServicePricingCatalog()}
+            className="px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-semibold text-xs flex items-center gap-1.5 shrink-0 cursor-pointer"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>Retry Pricing Sync</span>
+          </button>
+        </div>
+      )}
 
       {/* TAB 1: Dashboard Plans */}
       {activeTab === 'dashboard' && (
@@ -265,6 +415,8 @@ export const BillingPage: React.FC = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
             {DASHBOARD_SUBSCRIPTION_PLANS.map((p) => {
               const isCurrent = currentPlan === p.id;
+              const planState = getDashboardPlanState(p);
+              const isUnavailable = !isCatalogPending && (!planState.isAvailable || planState.priceBdt === null);
 
               return (
                 <div
@@ -272,6 +424,8 @@ export const BillingPage: React.FC = () => {
                   className={`p-6 rounded-2xl flex flex-col justify-between transition-all ${
                     isCurrent
                       ? 'bg-slate-900 text-white border-2 border-emerald-500 shadow-lg relative'
+                      : isUnavailable
+                      ? 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white opacity-70 relative'
                       : p.isPopular
                       ? 'bg-white dark:bg-slate-900 border-2 border-blue-500 text-slate-900 dark:text-white shadow-md relative'
                       : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white shadow-xs'
@@ -281,6 +435,10 @@ export const BillingPage: React.FC = () => {
                     <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full bg-emerald-600 text-white font-semibold text-[10px] uppercase tracking-wider">
                       Current Active Plan
                     </div>
+                  ) : isUnavailable ? (
+                    <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full bg-slate-500 text-white font-semibold text-[10px] uppercase tracking-wider">
+                      Unavailable
+                    </div>
                   ) : p.isPopular ? (
                     <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full bg-blue-600 text-white font-semibold text-[10px] uppercase tracking-wider">
                       Most Popular
@@ -289,15 +447,23 @@ export const BillingPage: React.FC = () => {
 
                   <div className="space-y-4">
                     <div>
-                      <h4 className="font-bold text-base">{p.name}</h4>
+                      <h4 className="font-bold text-base">{planState.planTierLabel}</h4>
                       <p className="text-[11px] text-slate-500 mt-0.5">{p.subtitle}</p>
                     </div>
 
                     <div className="flex items-baseline gap-1">
-                      <span className="text-3xl font-extrabold font-mono tabular-nums">
-                        ৳{p.priceMonthly.toLocaleString()}
-                      </span>
-                      <span className="text-xs text-slate-400">/ month</span>
+                      {isCatalogPending ? (
+                        <span className="text-lg font-bold text-slate-400">Verifying price...</span>
+                      ) : planState.priceBdt !== null ? (
+                        <>
+                          <span className="text-3xl font-extrabold font-mono tabular-nums">
+                            ৳{planState.priceBdt.toLocaleString()}
+                          </span>
+                          <span className="text-xs text-slate-400">/ month</span>
+                        </>
+                      ) : (
+                        <span className="text-lg font-bold text-slate-400">Currently unavailable</span>
+                      )}
                     </div>
 
                     <div className="space-y-2 pt-3 border-t border-slate-100 dark:border-slate-800 text-xs">
@@ -318,15 +484,27 @@ export const BillingPage: React.FC = () => {
 
                   <div className="pt-6">
                     <button
-                      disabled={isCurrent}
-                      onClick={() => setSelectedDashboardPlan(p)}
+                      disabled={isCurrent || isCatalogPending || isUnavailable}
+                      onClick={() => {
+                        if (planState.isAvailable && planState.priceBdt !== null) {
+                          setSelectedDashboardPlan(p);
+                        }
+                      }}
                       className={`w-full py-2.5 rounded-lg text-xs font-semibold transition-colors ${
                         isCurrent
                           ? 'bg-emerald-600 text-white cursor-default'
-                          : 'bg-slate-100 dark:bg-slate-800 hover:bg-blue-600 hover:text-white text-slate-900 dark:text-white'
+                          : isCatalogPending || isUnavailable
+                          ? 'bg-slate-200 dark:bg-slate-800 text-slate-400 cursor-not-allowed'
+                          : 'bg-slate-100 dark:bg-slate-800 hover:bg-blue-600 hover:text-white text-slate-900 dark:text-white cursor-pointer'
                       }`}
                     >
-                      {isCurrent ? 'Active Plan' : `Switch to ${p.name}`}
+                      {isCurrent
+                        ? 'Active Plan'
+                        : isCatalogPending
+                        ? 'Loading...'
+                        : isUnavailable
+                        ? 'Currently Unavailable'
+                        : `Switch to ${planState.planTierLabel}`}
                     </button>
                   </div>
                 </div>
@@ -347,73 +525,97 @@ export const BillingPage: React.FC = () => {
       {activeTab === 'automations' && (
         <div className="space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-            {AI_AUTOMATION_PACKAGES.map((auto) => (
-              <div
-                key={auto.id}
-                className={`p-6 rounded-2xl flex flex-col justify-between transition-all ${
-                  auto.isPopular
-                    ? 'bg-slate-900 text-white border-2 border-purple-500 shadow-md relative'
-                    : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white shadow-xs'
-                }`}
-              >
-                {auto.isPopular && (
-                  <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full bg-purple-600 text-white font-semibold text-[10px] uppercase tracking-wider">
-                    Recommended
-                  </div>
-                )}
+            {AI_AUTOMATION_PACKAGES.map((auto) => {
+              const autoState = getAutomationPackageState(auto);
+              const isUnavailable = !isCatalogPending && (!autoState.isAvailable || autoState.priceBdt === null);
 
-                <div className="space-y-4">
-                  <div>
-                    <h4 className="font-bold text-base">{auto.name}</h4>
-                    <p className={`text-xs mt-1 ${auto.isPopular ? 'text-slate-300' : 'text-slate-500'}`}>
-                      {auto.description}
-                    </p>
-                  </div>
+              return (
+                <div
+                  key={auto.id}
+                  className={`p-6 rounded-2xl flex flex-col justify-between transition-all ${
+                    isUnavailable
+                      ? 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white opacity-70 relative'
+                      : auto.isPopular
+                      ? 'bg-slate-900 text-white border-2 border-purple-500 shadow-md relative'
+                      : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white shadow-xs'
+                  }`}
+                >
+                  {auto.isPopular && !isUnavailable && (
+                    <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full bg-purple-600 text-white font-semibold text-[10px] uppercase tracking-wider">
+                      Recommended
+                    </div>
+                  )}
 
-                  <div>
-                    <div className="flex items-baseline gap-1">
-                      <span className="text-3xl font-extrabold font-mono tabular-nums">
-                        ৳{auto.priceMonthly.toLocaleString()}
-                      </span>
-                      <span className={`text-xs ${auto.isPopular ? 'text-slate-400' : 'text-slate-500'}`}>
-                        / month
+                  <div className="space-y-4">
+                    <div>
+                      <h4 className="font-bold text-base">{autoState.planTierLabel}</h4>
+                      <p className={`text-xs mt-1 ${auto.isPopular && !isUnavailable ? 'text-slate-300' : 'text-slate-500'}`}>
+                        {auto.description}
+                      </p>
+                    </div>
+
+                    <div>
+                      <div className="flex items-baseline gap-1">
+                        {isCatalogPending ? (
+                          <span className="text-lg font-bold text-slate-400">Verifying price...</span>
+                        ) : autoState.priceBdt !== null ? (
+                          <>
+                            <span className="text-3xl font-extrabold font-mono tabular-nums">
+                              ৳{autoState.priceBdt.toLocaleString()}
+                            </span>
+                            <span className={`text-xs ${auto.isPopular && !isUnavailable ? 'text-slate-400' : 'text-slate-500'}`}>
+                              / month
+                            </span>
+                          </>
+                        ) : (
+                          <span className="text-lg font-bold text-slate-400">Currently unavailable</span>
+                        )}
+                      </div>
+                      <span className={`block text-[11px] font-mono mt-1 ${auto.isPopular && !isUnavailable ? 'text-purple-300' : 'text-slate-500'}`}>
+                        {autoState.isAvailable && autoState.setupFeeBdt > 0
+                          ? `৳${autoState.setupFeeBdt.toLocaleString()} one-time setup fee`
+                          : auto.setupFeeLabel}
                       </span>
                     </div>
-                    <span className={`block text-[11px] font-mono mt-1 ${auto.isPopular ? 'text-purple-300' : 'text-slate-500'}`}>
-                      {auto.setupFeeLabel}
-                    </span>
+
+                    <div className={`space-y-2 pt-3 border-t text-xs ${auto.isPopular && !isUnavailable ? 'border-slate-800' : 'border-slate-100 dark:border-slate-800'}`}>
+                      {auto.features.map((f, idx) => (
+                        <div key={idx} className="flex items-start gap-2">
+                          <CheckCircle2
+                            className={`w-3.5 h-3.5 shrink-0 mt-0.5 ${
+                              auto.isPopular && !isUnavailable ? 'text-purple-400' : 'text-blue-600'
+                            }`}
+                          />
+                          <span className={auto.isPopular && !isUnavailable ? 'text-slate-200' : 'text-slate-700 dark:text-slate-300'}>
+                            {f}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
 
-                  <div className={`space-y-2 pt-3 border-t text-xs ${auto.isPopular ? 'border-slate-800' : 'border-slate-100 dark:border-slate-800'}`}>
-                    {auto.features.map((f, idx) => (
-                      <div key={idx} className="flex items-start gap-2">
-                        <CheckCircle2
-                          className={`w-3.5 h-3.5 shrink-0 mt-0.5 ${
-                            auto.isPopular ? 'text-purple-400' : 'text-blue-600'
-                          }`}
-                        />
-                        <span className={auto.isPopular ? 'text-slate-200' : 'text-slate-700 dark:text-slate-300'}>
-                          {f}
-                        </span>
-                      </div>
-                    ))}
+                  <div className="pt-6">
+                    <button
+                      disabled={isCatalogPending || isUnavailable}
+                      onClick={() => {
+                        if (autoState.isAvailable && autoState.priceBdt !== null) {
+                          setSelectedAutoPackage(auto);
+                        }
+                      }}
+                      className={`w-full py-2.5 rounded-lg text-xs font-semibold transition-colors ${
+                        isCatalogPending || isUnavailable
+                          ? 'bg-slate-200 dark:bg-slate-800 text-slate-400 cursor-not-allowed'
+                          : auto.isPopular
+                          ? 'bg-purple-600 hover:bg-purple-500 text-white cursor-pointer'
+                          : 'bg-slate-100 dark:bg-slate-800 hover:bg-blue-600 hover:text-white text-slate-900 dark:text-white cursor-pointer'
+                      }`}
+                    >
+                      {isCatalogPending ? 'Loading...' : isUnavailable ? 'Currently Unavailable' : auto.ctaLabel}
+                    </button>
                   </div>
                 </div>
-
-                <div className="pt-6">
-                  <button
-                    onClick={() => setSelectedAutoPackage(auto)}
-                    className={`w-full py-2.5 rounded-lg text-xs font-semibold transition-colors ${
-                      auto.isPopular
-                        ? 'bg-purple-600 hover:bg-purple-500 text-white'
-                        : 'bg-slate-100 dark:bg-slate-800 hover:bg-blue-600 hover:text-white text-slate-900 dark:text-white'
-                    }`}
-                  >
-                    {auto.ctaLabel}
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-xs text-amber-900 dark:text-amber-200 space-y-1">
@@ -432,90 +634,102 @@ export const BillingPage: React.FC = () => {
       {activeTab === 'websites' && (
         <div className="space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            {WEBSITE_DEVELOPMENT_PACKAGES.map((web) => (
-              <div
-                key={web.id}
-                className={`p-6 rounded-2xl flex flex-col justify-between transition-all ${
-                  web.isPopular
-                    ? 'bg-slate-900 text-white border-2 border-blue-500 shadow-md relative'
-                    : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white shadow-xs'
-                }`}
-              >
-                {web.isPopular && (
-                  <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full bg-blue-600 text-white font-semibold text-[10px] uppercase tracking-wider">
-                    Most Popular
-                  </div>
-                )}
+            {WEBSITE_DEVELOPMENT_PACKAGES.map((web) => {
+              const webState = getWebsitePackageState(web);
+              return (
+                <div
+                  key={web.id}
+                  className={`p-6 rounded-2xl flex flex-col justify-between transition-all ${
+                    web.isPopular
+                      ? 'bg-slate-900 text-white border-2 border-blue-500 shadow-md relative'
+                      : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white shadow-xs'
+                  }`}
+                >
+                  {web.isPopular && (
+                    <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full bg-blue-600 text-white font-semibold text-[10px] uppercase tracking-wider">
+                      Most Popular
+                    </div>
+                  )}
 
-                <div className="space-y-4">
-                  <div>
-                    <h4 className="font-bold text-base">{web.name}</h4>
-                    <p className={`text-xs mt-1 ${web.isPopular ? 'text-slate-300' : 'text-slate-500'}`}>
-                      {web.description}
-                    </p>
-                  </div>
+                  <div className="space-y-4">
+                    <div>
+                      <h4 className="font-bold text-base">{webState.planTierLabel}</h4>
+                      <p className={`text-xs mt-1 ${web.isPopular ? 'text-slate-300' : 'text-slate-500'}`}>
+                        {web.description}
+                      </p>
+                    </div>
 
-                  <div>
-                    <div className="flex items-baseline gap-1">
-                      <span className="text-3xl font-extrabold font-mono tabular-nums">
-                        ৳{web.priceOneTime.toLocaleString()}
-                      </span>
-                      <span className={`text-xs ${web.isPopular ? 'text-slate-400' : 'text-slate-500'}`}>
-                        one-time project fee
+                    <div>
+                      <div className="flex items-baseline gap-1">
+                        {isCatalogPending ? (
+                          <span className="text-lg font-bold text-slate-400">Verifying price...</span>
+                        ) : webState.priceBdt !== null ? (
+                          <>
+                            <span className="text-3xl font-extrabold font-mono tabular-nums">
+                              ৳{webState.priceBdt.toLocaleString()}
+                            </span>
+                            <span className={`text-xs ${web.isPopular ? 'text-slate-400' : 'text-slate-500'}`}>
+                              one-time project fee
+                            </span>
+                          </>
+                        ) : (
+                          <span className="text-lg font-bold text-slate-400">Custom Quote Required</span>
+                        )}
+                      </div>
+                      <span className={`block text-[11px] font-mono mt-1 ${web.isPopular ? 'text-blue-300' : 'text-slate-500'}`}>
+                        {web.estimatedTimeline}
                       </span>
                     </div>
-                    <span className={`block text-[11px] font-mono mt-1 ${web.isPopular ? 'text-blue-300' : 'text-slate-500'}`}>
-                      {web.estimatedTimeline}
-                    </span>
-                  </div>
 
-                  <div className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
-                    web.isPopular
-                      ? 'bg-blue-950/80 border-blue-700 text-blue-200'
-                      : 'bg-blue-50 dark:bg-blue-950/40 border-blue-200 dark:border-blue-900 text-blue-900 dark:text-blue-300'
-                  }`}>
-                    <Sparkles className="w-3.5 h-3.5 text-blue-500 shrink-0" />
-                    <span>{web.domainHostingBenefit}</span>
-                  </div>
-
-                  <div className={`space-y-2 pt-3 border-t text-xs ${web.isPopular ? 'border-slate-800' : 'border-slate-100 dark:border-slate-800'}`}>
-                    {web.features.map((f, idx) => (
-                      <div key={idx} className="flex items-start gap-2">
-                        <CheckCircle2
-                          className={`w-3.5 h-3.5 shrink-0 mt-0.5 ${
-                            web.isPopular ? 'text-blue-400' : 'text-blue-600'
-                          }`}
-                        />
-                        <span className={web.isPopular ? 'text-slate-200' : 'text-slate-700 dark:text-slate-300'}>
-                          {f}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-
-                  {web.scopeNote && (
-                    <p className={`text-[10px] leading-relaxed pt-2 border-t ${
-                      web.isPopular ? 'text-slate-400 border-slate-800' : 'text-slate-500 border-slate-100 dark:border-slate-800'
-                    }`}>
-                      {web.scopeNote}
-                    </p>
-                  )}
-                </div>
-
-                <div className="pt-6">
-                  <a
-                    href="/dashboard/website-requests"
-                    className={`block w-full py-2.5 text-center rounded-lg text-xs font-semibold transition-colors ${
+                    <div className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
                       web.isPopular
-                        ? 'bg-blue-600 hover:bg-blue-500 text-white'
-                        : 'bg-slate-100 dark:bg-slate-800 hover:bg-blue-600 hover:text-white text-slate-900 dark:text-white'
-                    }`}
-                  >
-                    {web.ctaLabel}
-                  </a>
+                        ? 'bg-blue-950/80 border-blue-700 text-blue-200'
+                        : 'bg-blue-50 dark:bg-blue-950/40 border-blue-200 dark:border-blue-900 text-blue-900 dark:text-blue-300'
+                    }`}>
+                      <Sparkles className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                      <span>{web.domainHostingBenefit}</span>
+                    </div>
+
+                    <div className={`space-y-2 pt-3 border-t text-xs ${web.isPopular ? 'border-slate-800' : 'border-slate-100 dark:border-slate-800'}`}>
+                      {web.features.map((f, idx) => (
+                        <div key={idx} className="flex items-start gap-2">
+                          <CheckCircle2
+                            className={`w-3.5 h-3.5 shrink-0 mt-0.5 ${
+                              web.isPopular ? 'text-blue-400' : 'text-blue-600'
+                            }`}
+                          />
+                          <span className={web.isPopular ? 'text-slate-200' : 'text-slate-700 dark:text-slate-300'}>
+                            {f}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+
+                    {web.scopeNote && (
+                      <p className={`text-[10px] leading-relaxed pt-2 border-t ${
+                        web.isPopular ? 'text-slate-400 border-slate-800' : 'text-slate-500 border-slate-100 dark:border-slate-800'
+                      }`}>
+                        {web.scopeNote}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="pt-6">
+                    <button
+                      type="button"
+                      onClick={() => navigate('/dashboard/website-requests')}
+                      className={`block w-full py-2.5 text-center rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                        web.isPopular
+                          ? 'bg-blue-600 hover:bg-blue-500 text-white'
+                          : 'bg-slate-100 dark:bg-slate-800 hover:bg-blue-600 hover:text-white text-slate-900 dark:text-white'
+                      }`}
+                    >
+                      {web.ctaLabel}
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -529,17 +743,27 @@ export const BillingPage: React.FC = () => {
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
                   <div className="flex items-center gap-2">
-                    <span className="px-2.5 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-400/30 text-[10px] font-bold uppercase tracking-wider">
-                      Active Website Subscription
+                    <span
+                      className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                        myWebsite.paymentStatus === 'paid'
+                          ? 'bg-blue-500/20 text-blue-300 border border-blue-400/30'
+                          : 'bg-amber-500/20 text-amber-300 border border-amber-400/30'
+                      }`}
+                    >
+                      {myWebsite.paymentStatus === 'paid'
+                        ? 'Active Website Subscription'
+                        : 'Pending Payment Verification'}
                     </span>
                     <span
                       className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                        myWebsite.subscriptionStatus === 'active'
+                        myWebsite.paymentStatus === 'paid' && myWebsite.subscriptionStatus === 'active'
                           ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
                           : 'bg-amber-500/20 text-amber-300 border border-amber-500/30 animate-pulse'
                       }`}
                     >
-                      {myWebsite.subscriptionStatus.replace('_', ' ')}
+                      {myWebsite.paymentStatus === 'paid'
+                        ? myWebsite.subscriptionStatus.replace('_', ' ')
+                        : myWebsite.paymentStatus.replace('_', ' ')}
                     </span>
                   </div>
                   <h3 className="text-xl font-bold text-white mt-1">
@@ -595,7 +819,7 @@ export const BillingPage: React.FC = () => {
                   className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs flex items-center gap-1.5 transition-colors border border-slate-700"
                 >
                   <Sparkles className="w-3.5 h-3.5 text-amber-300" />
-                  <span>Build Another Website (৳600/mo)</span>
+                  <span>Build Another Website (৳{websiteSubscriptionPlan.priceMonthly.toLocaleString()}/mo)</span>
                 </button>
               </div>
             </div>
@@ -638,18 +862,18 @@ export const BillingPage: React.FC = () => {
               <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300">
                 <Globe className="w-4 h-4 text-emerald-500 shrink-0" />
                 <span>
-                  Free Subdomain Included: <code className="font-mono text-emerald-600 dark:text-emerald-400 font-bold bg-white dark:bg-slate-900 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-800">yourbusiness.amaas.xyz</code>
+                  Free Subdomain Included: <code className="font-mono text-emerald-600 dark:text-emerald-400 font-bold bg-white dark:bg-slate-900 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-800">businessname.amaas.xyz</code>
                 </span>
               </div>
               <span className="text-[11px] text-slate-500 dark:text-slate-400">
-                Custom domain (.com) not included
+                Optional custom domain supported (paid separately)
               </span>
             </div>
 
             {/* Features List */}
             <div className="space-y-3 pt-2 border-t border-slate-100 dark:border-slate-800">
               <h4 className="text-xs font-bold text-slate-900 dark:text-white uppercase tracking-wider">
-                Included with Your ৳600/Month Subscription:
+                Included with Your ৳{websiteSubscriptionPlan.priceMonthly.toLocaleString()}/Month Subscription:
               </h4>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-700 dark:text-slate-300">
                 {websiteSubscriptionPlan.features.map((feat, idx) => (
@@ -692,7 +916,7 @@ export const BillingPage: React.FC = () => {
                 className="w-full sm:w-auto px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center justify-center gap-2 transition-colors shadow-sm"
               >
                 <Sparkles className="w-4 h-4 text-amber-200" />
-                <span>Start Your Website Now (৳600/month)</span>
+                <span>Start Your Website Now (৳{websiteSubscriptionPlan.priceMonthly.toLocaleString()}/month)</span>
                 <ArrowRight className="w-4 h-4" />
               </button>
             </div>
@@ -700,65 +924,58 @@ export const BillingPage: React.FC = () => {
         </div>
       )}
 
-      {/* Payment Method Preferences */}
+      {/* Active Verified Payment Channels */}
       <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
-        <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-          Payment Method for Renewal
-        </h3>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+            Verified Payment Channels
+          </h3>
+          <span className="text-[11px] text-slate-500">
+            Admin-verified settlement for subscriptions & packages
+          </span>
+        </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-          <label
-            className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer ${
-              paymentMethod === 'bKash'
-                ? 'border-rose-500 bg-rose-50/50 dark:bg-rose-950/20 text-rose-900 dark:text-rose-200 font-semibold'
-                : 'border-slate-200 dark:border-slate-800'
-            }`}
-          >
-            <input
-              type="radio"
-              name="payMethod"
-              checked={paymentMethod === 'bKash'}
-              onChange={() => setPaymentMethod('bKash')}
-            />
-            <span>bKash Auto-Debit / Merchant</span>
-          </label>
-
-          <label
-            className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer ${
-              paymentMethod === 'Nagad'
-                ? 'border-amber-500 bg-amber-50/50 dark:bg-amber-950/20 text-amber-900 dark:text-amber-200 font-semibold'
-                : 'border-slate-200 dark:border-slate-800'
-            }`}
-          >
-            <input
-              type="radio"
-              name="payMethod"
-              checked={paymentMethod === 'Nagad'}
-              onChange={() => setPaymentMethod('Nagad')}
-            />
-            <span>Nagad Direct Wallet</span>
-          </label>
-
-          <label
-            className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer ${
-              paymentMethod === 'Card'
-                ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 text-blue-900 dark:text-blue-200 font-semibold'
-                : 'border-slate-200 dark:border-slate-800'
-            }`}
-          >
-            <input
-              type="radio"
-              name="payMethod"
-              checked={paymentMethod === 'Card'}
-              onChange={() => setPaymentMethod('Card')}
-            />
-            <span>Visa / Mastercard / Amex</span>
-          </label>
+          {paymentGatewayConfigs
+            .filter((g) => g.id === 'bkash' || g.id === 'nagad' || g.id === 'bank_transfer')
+            .map((gateway) => {
+              const isConfigured = gateway.isEnabled && Boolean((gateway.accountNumber || '').trim());
+              return (
+                <div
+                  key={gateway.id}
+                  className={`flex items-center justify-between gap-3 p-3.5 rounded-xl border ${
+                    isConfigured
+                      ? 'border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/40 dark:bg-emerald-950/20'
+                      : 'border-slate-200 dark:border-slate-800 opacity-70'
+                  }`}
+                >
+                  <div>
+                    <span className="font-semibold text-slate-900 dark:text-white block">
+                      {gateway.displayName}
+                    </span>
+                    <span className="text-[11px] text-slate-500">
+                      {isConfigured ? 'Available at checkout' : 'Currently unavailable'}
+                    </span>
+                  </div>
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                      isConfigured
+                        ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300'
+                        : 'bg-slate-100 dark:bg-slate-800 text-slate-500'
+                    }`}
+                  >
+                    {isConfigured ? 'Active' : 'Disabled'}
+                  </span>
+                </div>
+              );
+            })}
         </div>
 
         <div className="flex items-center gap-2 pt-2 text-xs text-slate-500">
-          <Shield className="w-3.5 h-3.5 text-emerald-500" />
-          <span>Demo billing flow. No actual charges will be deducted from your wallet.</span>
+          <Shield className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+          <span>
+            Paid subscriptions and upgrades activate only after your transaction reference is verified and approved by a platform administrator.
+          </span>
         </div>
       </div>
 
@@ -799,7 +1016,15 @@ export const BillingPage: React.FC = () => {
                     ৳{inv.amount.toLocaleString()}
                   </td>
                   <td className="py-3.5 px-4 font-sans">
-                    <span className="inline-block px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                    <span
+                      className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold ${
+                        inv.status === 'Paid'
+                          ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                          : inv.status === 'Pending'
+                          ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                          : 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300'
+                      }`}
+                    >
                       {inv.status}
                     </span>
                   </td>
@@ -820,117 +1045,157 @@ export const BillingPage: React.FC = () => {
       </div>
 
       {/* Upgrade / Plan Change Confirmation Dialog */}
-      {selectedDashboardPlan && (
-        <Modal
-          isOpen={!!selectedDashboardPlan}
-          onClose={() => setSelectedDashboardPlan(null)}
-          title={`Confirm Subscription Change — ${selectedDashboardPlan.name}`}
-          maxWidth="md"
-        >
-          <div className="space-y-4 text-xs">
-            <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800 space-y-2">
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Billing Type:</span>
-                <span className="font-semibold text-slate-900 dark:text-white">Monthly Subscription</span>
+      {selectedDashboardPlan && (() => {
+        const selectedPlanState = getDashboardPlanState(selectedDashboardPlan);
+        const canProceed = selectedPlanState.isAvailable && selectedPlanState.priceBdt !== null && selectedPlanState.priceBdt > 0;
+        return (
+          <Modal
+            isOpen={!!selectedDashboardPlan}
+            onClose={() => setSelectedDashboardPlan(null)}
+            title={`Confirm Subscription Change — ${selectedPlanState.planTierLabel}`}
+            maxWidth="md"
+          >
+            <div className="space-y-4 text-xs">
+              <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800 space-y-2">
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-500">Billing Type:</span>
+                  <span className="font-semibold text-slate-900 dark:text-white">Monthly Subscription</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-500">Subscription Fee:</span>
+                  <span className="font-bold text-base font-mono text-blue-600">
+                    {canProceed && selectedPlanState.priceBdt !== null
+                      ? `৳${selectedPlanState.priceBdt.toLocaleString()} / month`
+                      : 'Currently Unavailable'}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-500">Included Limits:</span>
+                  <span className="font-semibold text-slate-700 dark:text-slate-300">
+                    {selectedDashboardPlan.subtitle}
+                  </span>
+                </div>
               </div>
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Subscription Fee:</span>
-                <span className="font-bold text-base font-mono text-blue-600">
-                  ৳{selectedDashboardPlan.priceMonthly.toLocaleString()} / month
-                </span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Included Limits:</span>
-                <span className="font-semibold text-slate-700 dark:text-slate-300">
-                  {selectedDashboardPlan.subtitle}
-                </span>
-              </div>
-            </div>
 
-            <div>
-              <span className="font-bold text-slate-900 dark:text-white block mb-1">
-                Included Features:
-              </span>
-              <ul className="space-y-1 text-slate-600 dark:text-slate-300">
-                {selectedDashboardPlan.features.map((f, i) => (
-                  <li key={i} className="flex items-center gap-1.5">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-                    <span>{f}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
+              <div>
+                <span className="font-bold text-slate-900 dark:text-white block mb-1">
+                  Included Features:
+                </span>
+                <ul className="space-y-1 text-slate-600 dark:text-slate-300">
+                  {selectedDashboardPlan.features.map((f, i) => (
+                    <li key={i} className="flex items-center gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                      <span>{f}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
 
-            <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setSelectedDashboardPlan(null)}
-                className="px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmPlanChange}
-                className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold"
-              >
-                Switch to {selectedDashboardPlan.name}
-              </button>
+              <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedDashboardPlan(null)}
+                  className="px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={!canProceed}
+                  onClick={handleConfirmPlanChange}
+                  className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-semibold cursor-pointer"
+                >
+                  {canProceed && selectedPlanState.priceBdt !== null
+                    ? `Proceed to Payment (৳${selectedPlanState.priceBdt.toLocaleString()})`
+                    : 'Plan Unavailable'}
+                </button>
+              </div>
             </div>
-          </div>
-        </Modal>
-      )}
+          </Modal>
+        );
+      })()}
 
       {/* Confirmation Modal for AI Automation */}
-      {selectedAutoPackage && (
-        <Modal
-          isOpen={!!selectedAutoPackage}
-          onClose={() => setSelectedAutoPackage(null)}
-          title={`Confirm Automation Service — ${selectedAutoPackage.name}`}
-          maxWidth="md"
-        >
-          <div className="space-y-4 text-xs">
-            <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800 space-y-2">
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Billing Type:</span>
-                <span className="font-semibold text-purple-600">Monthly Managed Service Fee</span>
+      {selectedAutoPackage && (() => {
+        const selectedAutoState = getAutomationPackageState(selectedAutoPackage);
+        const canProceedAuto = selectedAutoState.isAvailable && selectedAutoState.priceBdt !== null && selectedAutoState.priceBdt > 0;
+        return (
+          <Modal
+            isOpen={!!selectedAutoPackage}
+            onClose={() => setSelectedAutoPackage(null)}
+            title={`Confirm Automation Service — ${selectedAutoState.planTierLabel}`}
+            maxWidth="md"
+          >
+            <div className="space-y-4 text-xs">
+              <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800 space-y-2">
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-500">Billing Type:</span>
+                  <span className="font-semibold text-purple-600">Monthly Managed Service Fee</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-500">Service Fee:</span>
+                  <span className="font-bold text-base font-mono text-slate-900 dark:text-white">
+                    {canProceedAuto && selectedAutoState.priceBdt !== null
+                      ? `৳${selectedAutoState.priceBdt.toLocaleString()} / month`
+                      : 'Currently Unavailable'}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-500">Setup Fee:</span>
+                  <span className="font-semibold text-slate-700 dark:text-slate-300 font-mono">
+                    {selectedAutoState.isAvailable && selectedAutoState.setupFeeBdt > 0
+                      ? `৳${selectedAutoState.setupFeeBdt.toLocaleString()} one-time setup fee`
+                      : selectedAutoPackage.setupFeeLabel}
+                  </span>
+                </div>
               </div>
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Service Fee:</span>
-                <span className="font-bold text-base font-mono text-slate-900 dark:text-white">
-                  ৳{selectedAutoPackage.priceMonthly.toLocaleString()} / month
-                </span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Setup Fee:</span>
-                <span className="font-semibold text-slate-700 dark:text-slate-300 font-mono">
-                  {selectedAutoPackage.setupFeeLabel}
-                </span>
-              </div>
-            </div>
 
-            <div className="p-3 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-900 dark:text-amber-200 text-[11px]">
-              Note: WhatsApp Cloud API messaging and Meta platform fees are billed separately by Meta based on conversation volume.
-            </div>
+              <div className="p-3 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-900 dark:text-amber-200 text-[11px]">
+                Note: WhatsApp Cloud API messaging and Meta platform fees are billed separately by Meta based on conversation volume.
+              </div>
 
-            <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setSelectedAutoPackage(null)}
-                className="px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmAutomation}
-                className="px-5 py-2 rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-semibold"
-              >
-                Activate Service
-              </button>
+              <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedAutoPackage(null)}
+                  className="px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={!canProceedAuto}
+                  onClick={handleConfirmAutomation}
+                  className="px-5 py-2 rounded-lg bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white font-semibold cursor-pointer"
+                >
+                  {canProceedAuto && selectedAutoState.priceBdt !== null
+                    ? `Proceed to Payment (৳${selectedAutoState.priceBdt.toLocaleString()})`
+                    : 'Package Unavailable'}
+                </button>
+              </div>
             </div>
-          </div>
-        </Modal>
+          </Modal>
+        );
+      })()}
+
+      {/* Manual Payment Verification Modal for Dashboard Plans & AI Automations */}
+      {checkoutPayload && (
+        <ManualPaymentModal
+          isOpen={!!checkoutPayload}
+          onClose={() => setCheckoutPayload(null)}
+          serviceType={checkoutPayload.serviceType}
+          serviceId={checkoutPayload.serviceId}
+          serviceName={checkoutPayload.serviceName}
+          planTier={checkoutPayload.planTier}
+          amount={checkoutPayload.amount}
+          onSuccess={() => {
+            showToast(
+              `Payment submitted for ${checkoutPayload.serviceName}! Your plan will activate once verified by AMAAS Admin.`,
+              'success'
+            );
+            setCheckoutPayload(null);
+          }}
+        />
       )}
 
       {/* Cancellation Dialog */}

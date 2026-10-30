@@ -1,6 +1,10 @@
+export type DashboardPlanId = 'starter' | 'business' | 'pro' | 'enterprise';
+export type AutomationPackageId = 'basic_auto' | 'growth_auto' | 'ai_chatbot' | 'biz_auto_pro';
+export type WebsitePackageId = 'starter_web' | 'business_web' | 'advanced_web';
+
 export interface DashboardPlanConfig {
-  id: 'STARTER' | 'BUSINESS' | 'PRO' | 'ENTERPRISE';
-  name: string;
+  id: DashboardPlanId;
+  name: 'Starter' | 'Business' | 'Pro' | 'Enterprise';
   priceMonthly: number;
   subtitle: string;
   description: string;
@@ -11,7 +15,7 @@ export interface DashboardPlanConfig {
 }
 
 export interface AutomationPackageConfig {
-  id: 'BASIC_AUTO' | 'GROWTH_AUTO' | 'AI_CHATBOT' | 'BIZ_AUTO_PRO';
+  id: AutomationPackageId;
   name: string;
   priceMonthly: number;
   setupFee: number | 'Included';
@@ -23,7 +27,7 @@ export interface AutomationPackageConfig {
 }
 
 export interface WebsitePackageConfig {
-  id: 'STARTER_WEB' | 'BUSINESS_WEB' | 'ADVANCED_WEB';
+  id: WebsitePackageId;
   name: string;
   priceOneTime: number;
   description: string;
@@ -36,10 +40,38 @@ export interface WebsitePackageConfig {
   ctaLabel: string;
 }
 
+/**
+ * Safely migrates legacy or prefixed dashboard plan identifiers to canonical
+ * public.service_pricing_catalog service_code values ('starter' | 'business' | 'pro' | 'enterprise').
+ * Legacy 500/1500/2500 aliases (plan_starter, plan_growth, plan_pro, plan_enterprise) are mapped
+ * to their canonical active plan IDs and never resolve to legacy amounts.
+ */
+export const LEGACY_DASHBOARD_PLAN_ALIASES: Readonly<Record<string, DashboardPlanId>> = {
+  starter: 'starter',
+  dashboard_starter: 'starter',
+  plan_starter: 'starter',
+  business: 'business',
+  dashboard_business: 'business',
+  plan_growth: 'business',
+  growth: 'business',
+  pro: 'pro',
+  dashboard_pro: 'pro',
+  plan_pro: 'pro',
+  enterprise: 'enterprise',
+  dashboard_enterprise: 'enterprise',
+  plan_enterprise: 'enterprise',
+};
+
+export function normalizeDashboardPlanId(raw: string | null | undefined): DashboardPlanId | null {
+  const cleaned = (raw || '').trim().toLowerCase();
+  if (!cleaned) return null;
+  return LEGACY_DASHBOARD_PLAN_ALIASES[cleaned] ?? null;
+}
+
 export const DASHBOARD_SUBSCRIPTION_PLANS: DashboardPlanConfig[] = [
   {
-    id: 'STARTER',
-    name: 'STARTER',
+    id: 'starter',
+    name: 'Starter',
     priceMonthly: 299,
     subtitle: 'For small online sellers',
     description: 'Essential operating tools to manage products, orders, and sales performance.',
@@ -57,12 +89,12 @@ export const DASHBOARD_SUBSCRIPTION_PLANS: DashboardPlanConfig[] = [
     ctaLabel: 'Start Free Trial',
   },
   {
-    id: 'BUSINESS',
-    name: 'BUSINESS',
+    id: 'business',
+    name: 'Business',
     priceMonthly: 599,
     subtitle: 'For growing online businesses',
     description: 'Complete operational control with inventory tracking, reports, and courier dispatch.',
-    isPopular: true, // Marked as "Most Popular" as requested
+    isPopular: true,
     trialDays: 7,
     features: [
       'Everything in Starter',
@@ -78,8 +110,8 @@ export const DASHBOARD_SUBSCRIPTION_PLANS: DashboardPlanConfig[] = [
     ctaLabel: 'Start Free Trial',
   },
   {
-    id: 'PRO',
-    name: 'PRO',
+    id: 'pro',
+    name: 'Pro',
     priceMonthly: 999,
     subtitle: 'For established businesses',
     description: 'Multi-store control with profit/loss metrics and automated communication integrations.',
@@ -98,8 +130,8 @@ export const DASHBOARD_SUBSCRIPTION_PLANS: DashboardPlanConfig[] = [
     ctaLabel: 'Start Free Trial',
   },
   {
-    id: 'ENTERPRISE',
-    name: 'ENTERPRISE',
+    id: 'enterprise',
+    name: 'Enterprise',
     priceMonthly: 1999,
     subtitle: 'For larger businesses',
     description: 'Multi-branch operations with custom business intelligence, AI assistant, and full API.',
@@ -119,10 +151,16 @@ export const DASHBOARD_SUBSCRIPTION_PLANS: DashboardPlanConfig[] = [
   },
 ];
 
+export function getDashboardPlanById(raw: string | null | undefined): DashboardPlanConfig | undefined {
+  const canonicalId = normalizeDashboardPlanId(raw);
+  if (!canonicalId) return undefined;
+  return DASHBOARD_SUBSCRIPTION_PLANS.find((plan) => plan.id === canonicalId);
+}
+
 export const AI_AUTOMATION_PACKAGES: AutomationPackageConfig[] = [
   {
-    id: 'BASIC_AUTO',
-    name: 'BASIC AUTOMATION',
+    id: 'basic_auto',
+    name: 'Basic Automation',
     priceMonthly: 999,
     setupFee: 1000,
     setupFeeLabel: '৳1,000 one-time setup fee',
@@ -137,8 +175,8 @@ export const AI_AUTOMATION_PACKAGES: AutomationPackageConfig[] = [
     ctaLabel: 'Choose Automation',
   },
   {
-    id: 'GROWTH_AUTO',
-    name: 'GROWTH AUTOMATION',
+    id: 'growth_auto',
+    name: 'Growth Automation',
     priceMonthly: 2499,
     setupFee: 1500,
     setupFeeLabel: '৳1,500 one-time setup fee',
@@ -155,8 +193,8 @@ export const AI_AUTOMATION_PACKAGES: AutomationPackageConfig[] = [
     ctaLabel: 'Choose Automation',
   },
   {
-    id: 'AI_CHATBOT',
-    name: 'AI CHATBOT',
+    id: 'ai_chatbot',
+    name: 'AI Chatbot',
     priceMonthly: 3999,
     setupFee: 'Included',
     setupFeeLabel: 'Initial setup included',
@@ -172,8 +210,8 @@ export const AI_AUTOMATION_PACKAGES: AutomationPackageConfig[] = [
     ctaLabel: 'Request Setup',
   },
   {
-    id: 'BIZ_AUTO_PRO',
-    name: 'BUSINESS AUTOMATION PRO',
+    id: 'biz_auto_pro',
+    name: 'Business Automation Pro',
     priceMonthly: 7999,
     setupFee: 'Included',
     setupFeeLabel: 'Priority onboarding included',
@@ -193,8 +231,8 @@ export const AI_AUTOMATION_PACKAGES: AutomationPackageConfig[] = [
 
 export const WEBSITE_DEVELOPMENT_PACKAGES: WebsitePackageConfig[] = [
   {
-    id: 'STARTER_WEB',
-    name: 'STARTER WEBSITE',
+    id: 'starter_web',
+    name: 'Starter Website',
     priceOneTime: 8000,
     description: 'Clean modern website engineered for startups, boutique shops, and emerging brands.',
     pagesLimit: 'Up to 5 pages',
@@ -214,10 +252,10 @@ export const WEBSITE_DEVELOPMENT_PACKAGES: WebsitePackageConfig[] = [
     ctaLabel: 'Request a Website',
   },
   {
-    id: 'BUSINESS_WEB',
-    name: 'BUSINESS WEBSITE',
+    id: 'business_web',
+    name: 'Business Website',
     priceOneTime: 15000,
-    isPopular: true, // Marked as "Most Popular" as requested
+    isPopular: true,
     description: 'Premium custom design with content management system and interactive integrations.',
     pagesLimit: 'Up to 10 pages',
     estimatedTimeline: 'Estimated: 7–10 business days',
@@ -237,8 +275,8 @@ export const WEBSITE_DEVELOPMENT_PACKAGES: WebsitePackageConfig[] = [
     ctaLabel: 'Request a Website',
   },
   {
-    id: 'ADVANCED_WEB',
-    name: 'ADVANCED WEBSITE',
+    id: 'advanced_web',
+    name: 'Advanced Website',
     priceOneTime: 25000,
     description: 'High-performance web architecture with advanced lead capture, analytics, and technical SEO.',
     pagesLimit: 'Up to 15 pages',
@@ -268,42 +306,39 @@ export const THIRD_PARTY_DISCLOSURES = [
 ];
 
 export const DEFAULT_WEBSITE_SUBSCRIPTION_PLAN: import('../types').WebsiteSubscriptionPlanConfig = {
-  id: 'AMAAS_WEBSITE_LITE',
-  name: 'AMAAS Website Lite',
+  id: 'website_lite',
+  name: 'GoAMAAS Website',
   priceMonthly: 600,
-  badge: 'Best for Small Businesses',
-  subtitle: 'Custom-designed business website for any industry or niche',
-  description: 'Turnkey mobile-responsive online presence with included hosting and your own AMAAS subdomain. Zero upfront development fees.',
-  subdomainFormat: 'yourbusiness.amaas.xyz',
+  badge: 'Single All-Inclusive Plan',
+  subtitle: 'Build and host your own business website — one simple 30-day subscription',
+  description: 'Self-service visual website builder with free hosting on GoAMAAS infrastructure, free businessname.amaas.xyz subdomain, product catalog management, and zero upfront development fees.',
+  subdomainFormat: 'businessname.amaas.xyz',
   features: [
-    'Custom-designed, mobile-responsive business website',
-    'Free subdomain: yourbusiness.amaas.xyz',
-    'Website hosting included',
-    'Any business niche supported (restaurant, café, e-commerce catalog, gym, salon, real estate, agency, portfolio, and more)',
-    'Business-specific layout, colors, and branding',
-    'Home, About, Services/Products, Contact sections',
-    'WhatsApp contact button',
-    'Google Maps integration when relevant',
-    'Contact or inquiry form',
-    'Basic on-page SEO',
-    'SSL/HTTPS where supported',
-    'Hosting and basic technical maintenance',
-    'Website content and business information update requests through GoAMAAS',
-    'Easy upgrade to a custom domain or a higher-tier website plan',
+    'Self-service visual website builder (logo, hero, banners, sections & theme)',
+    'Free customer subdomain: businessname.amaas.xyz',
+    'Free cloud hosting on GoAMAAS infrastructure included',
+    'Optional custom domain support (domain registration paid separately by customer)',
+    'Full product catalog manager with image uploads & visibility controls',
+    'Any business niche supported (restaurant, fashion, e-commerce, clinic, salon, agency, and more)',
+    'Custom brand colors, typography presets, and responsive Desktop & Mobile layouts',
+    'Business contact info, social links, custom footer links & WhatsApp ordering',
+    'Save Draft & Publish Updates anytime with instant live storefront updates',
+    '30-day billing period with verified manual bKash, Nagad, or Bank Transfer renewal',
+    'SSL/HTTPS enabled on supported domains',
   ],
   limits: {
-    maxPages: 5,
+    maxPages: 10,
     maxStorageMb: 1024,
     maxBandwidthGb: 25,
-    monthlyUpdateRequests: 2,
+    monthlyUpdateRequests: 999,
     gracePeriodDays: 7,
   },
   disclosures: [
-    'Charge ৳600 monthly, billed as a recurring subscription with zero upfront development fee.',
-    'The free subdomain uses format businessname.amaas.xyz under AMAAS infrastructure. A custom domain (.com) is NOT included.',
-    'Storage is capped at 1GB media storage, 25GB monthly bandwidth, and up to 2 content updates per month.',
-    'If a subscription expires, website enters a 7-day grace period. Customer data and website configurations are preserved and NOT deleted immediately.',
-    'Subdomain provisioning, SSL issuance, and live routing operate in sandbox mode until production DNS infrastructure is configured.',
+    'Single plan pricing: ৳600 BDT per 30-day billing period with zero upfront development fee and no hidden website-builder tiers.',
+    'Free hosting on GoAMAAS infrastructure and free subdomain (businessname.amaas.xyz) are included. Optional custom domain registration is paid separately by the customer.',
+    'Verified payment approval automatically publishes valid websites and renews active subscriptions for 30 days.',
+    'If a subscription reaches its billing end date, the website enters a 7-day grace period before going offline. Customer data and website configurations are preserved.',
+    'Wildcard custom subdomains (*.amaas.xyz) require wildcard DNS and hosting TLS configuration at deployment time.',
   ],
   isVisible: true,
 };
@@ -316,43 +351,253 @@ export interface SubscriptionVsOneTimeComparisonItem {
 
 export const SUBSCRIPTION_VS_ONETIME_COMPARISON: SubscriptionVsOneTimeComparisonItem[] = [
   {
-    feature: 'Pricing Model',
-    subscriptionPlan: '৳600 / month (recurring subscription)',
-    oneTimePackages: '৳8,000 to ৳25,000 (one-time project fee)',
+    feature: 'Plan & Pricing Model',
+    subscriptionPlan: 'GoAMAAS Website — ৳600 / 30 days (one simple plan)',
+    oneTimePackages: '৳8,000 to ৳25,000 (one-time bespoke engineering project)',
   },
   {
     feature: 'Upfront Development Cost',
-    subscriptionPlan: '৳0 (Zero development fee)',
+    subscriptionPlan: '৳0 (Self-service visual website builder)',
     oneTimePackages: 'Full project fee (৳8k – ৳25k)',
   },
   {
-    feature: 'Domain Included',
-    subscriptionPlan: 'Free subdomain (businessname.amaas.xyz)',
+    feature: 'Domain & Subdomain',
+    subscriptionPlan: 'Free businessname.amaas.xyz + optional custom domain (registration paid separately)',
     oneTimePackages: 'Free 1st-year custom top-level domain (.com)',
   },
   {
-    feature: 'Hosting & Maintenance',
-    subscriptionPlan: 'Hosting & maintenance included in ৳600/mo',
+    feature: 'Hosting & Infrastructure',
+    subscriptionPlan: 'Free GoAMAAS cloud hosting included in ৳600/mo',
     oneTimePackages: '1st year free, client renews annually thereafter',
   },
   {
-    feature: 'Update & Content Requests',
-    subscriptionPlan: 'Included via GoAMAAS (2 update requests/mo)',
-    oneTimePackages: 'Self-managed CMS; agency requests billed separately',
+    feature: 'Editing & Product Updates',
+    subscriptionPlan: 'Unlimited self-service visual edits, Save Draft & Publish Updates',
+    oneTimePackages: 'Delivered turnkey; agency change requests billed separately',
   },
   {
-    feature: 'Resource Limits',
-    subscriptionPlan: '5 pages, 1GB media storage, 25GB bandwidth',
+    feature: 'Resource Allowance',
+    subscriptionPlan: 'Up to 10 sections/pages, 1GB media storage, 25GB monthly bandwidth',
     oneTimePackages: 'Up to 15+ custom pages, standard hosting limits',
   },
   {
-    feature: 'Custom Domain Upgrade',
-    subscriptionPlan: 'Seamless upgrade available anytime',
-    oneTimePackages: 'Custom domain integrated from Day 1',
+    feature: 'Activation & Publishing',
+    subscriptionPlan: 'Automatically published live upon payment verification',
+    oneTimePackages: 'Custom engineering delivery in 5–21 business days',
   },
   {
     feature: 'Cancellation & Grace Period',
-    subscriptionPlan: 'Cancel anytime. 7-day grace period; data never deleted immediately',
+    subscriptionPlan: 'Cancel anytime. 7-day grace period; data preserved on expiry',
     oneTimePackages: 'One-time investment; client owns final website code',
   },
 ];
+
+export interface ResolvedCatalogPlanState {
+  serviceCode: string;
+  planTierLabel: string;
+  priceBdt: number | null;
+  setupFeeBdt: number;
+  isAvailable: boolean;
+}
+
+/**
+ * Resolves display & checkout metadata for a plan/package against public.service_pricing_catalog.
+ * When `requireCatalog` is true (or `catalog` is provided), missing or inactive catalog entries
+ * return `isAvailable: false` and `priceBdt: null` without falling back to static frontend prices.
+ */
+export function resolveCatalogPlanState(params: {
+  serviceType: 'website_subscription' | 'website_package' | 'dashboard_plan' | 'ai_automation';
+  serviceId: string;
+  fallbackLabel: string;
+  fallbackPriceBdt: number;
+  fallbackSetupFeeBdt?: number;
+  catalog?: Array<import('../types').ServicePricingCatalogEntry>;
+  requireCatalog?: boolean;
+}): ResolvedCatalogPlanState {
+  const rawCode = (params.serviceId || '').trim().toLowerCase();
+  const canonicalCode =
+    params.serviceType === 'dashboard_plan'
+      ? normalizeDashboardPlanId(rawCode) || ''
+      : rawCode;
+
+  const enforceCatalogOnly = Boolean(params.requireCatalog || params.catalog !== undefined);
+
+  if (!canonicalCode) {
+    return {
+      serviceCode: rawCode,
+      planTierLabel: params.fallbackLabel,
+      priceBdt: null,
+      setupFeeBdt: 0,
+      isAvailable: false,
+    };
+  }
+
+  if (enforceCatalogOnly) {
+    const match = (params.catalog || []).find(
+      (entry) =>
+        entry.serviceType === params.serviceType &&
+        entry.serviceCode.trim().toLowerCase() === canonicalCode &&
+        entry.isActive &&
+        Number.isFinite(entry.priceBdt) &&
+        entry.priceBdt > 0
+    );
+    if (!match) {
+      return {
+        serviceCode: canonicalCode,
+        planTierLabel: params.fallbackLabel,
+        priceBdt: null,
+        setupFeeBdt: 0,
+        isAvailable: false,
+      };
+    }
+    const dbLabel = (match.planTierLabel || '').trim();
+    const cleanFallback = (params.fallbackLabel || '').trim();
+    const resolvedLabel =
+      dbLabel && cleanFallback && dbLabel.toLowerCase() === cleanFallback.toLowerCase()
+        ? cleanFallback
+        : dbLabel || cleanFallback;
+    return {
+      serviceCode: canonicalCode,
+      planTierLabel: resolvedLabel,
+      priceBdt: match.priceBdt,
+      setupFeeBdt: Number(match.setupFeeBdt) || 0,
+      isAvailable: true,
+    };
+  }
+
+  return {
+    serviceCode: canonicalCode,
+    planTierLabel: params.fallbackLabel,
+    priceBdt: params.fallbackPriceBdt,
+    setupFeeBdt: params.fallbackSetupFeeBdt || 0,
+    isAvailable: true,
+  };
+}
+
+/**
+ * Resolves the authoritative BDT price for a given service type and service code,
+ * matching public.service_pricing_catalog enforced by PostgreSQL triggers.
+ *
+ * Security rule: Whenever `catalog` is provided or `requireCatalog` is true,
+ * static frontend fallback maps are NEVER used — inactive or missing plans return `null`.
+ */
+export function resolveAuthoritativeServicePrice(params: {
+  serviceType: 'website_subscription' | 'website_package' | 'dashboard_plan' | 'ai_automation';
+  serviceId: string;
+  planTier?: string;
+  serviceName?: string;
+  websiteMonthlyFee?: number;
+  includeSetupFee?: boolean;
+  catalog?: Array<import('../types').ServicePricingCatalogEntry>;
+  requireCatalog?: boolean;
+}): number | null {
+  const code = (params.serviceId || '').trim().toLowerCase();
+  const tier = (params.planTier || '').trim().toLowerCase();
+  const name = (params.serviceName || '').trim().toLowerCase();
+  const enforceCatalogOnly = Boolean(params.requireCatalog || params.catalog !== undefined);
+  const activeCatalog = (params.catalog || []).filter(
+    (entry) => entry.isActive && entry.serviceType === params.serviceType
+  );
+
+  if (params.serviceType === 'website_subscription') {
+    const liteEntry = activeCatalog.find(
+      (entry) => entry.serviceCode.trim().toLowerCase() === 'website_lite'
+    );
+    if (enforceCatalogOnly) {
+      if (!liteEntry || !Number.isFinite(liteEntry.priceBdt) || liteEntry.priceBdt <= 0) {
+        return null;
+      }
+      const fee = Number(params.websiteMonthlyFee);
+      return Number.isFinite(fee) && fee > 0 ? fee : liteEntry.priceBdt;
+    }
+    const fee = Number(params.websiteMonthlyFee);
+    if (Number.isFinite(fee) && fee > 0) return fee;
+    if (liteEntry && Number.isFinite(liteEntry.priceBdt) && liteEntry.priceBdt > 0) {
+      return liteEntry.priceBdt;
+    }
+    return DEFAULT_WEBSITE_SUBSCRIPTION_PLAN.priceMonthly;
+  }
+
+  if (params.serviceType === 'website_package') {
+    const matchedCode =
+      code === 'starter_web' || tier.includes('starter') || name.includes('starter')
+        ? 'starter_web'
+        : code === 'business_web' || tier.includes('business') || name.includes('business')
+        ? 'business_web'
+        : code === 'advanced_web' || tier.includes('advanced') || name.includes('advanced')
+        ? 'advanced_web'
+        : code === 'custom_setup' || name.includes('custom setup') || tier === 'one-time'
+        ? 'custom_setup'
+        : code;
+    const catMatch = activeCatalog.find(
+      (entry) =>
+        entry.serviceCode.trim().toLowerCase() === matchedCode ||
+        entry.planTierLabel.trim().toLowerCase() === tier ||
+        entry.planTierLabel.trim().toLowerCase() === name
+    );
+    if (catMatch && Number.isFinite(catMatch.priceBdt) && catMatch.priceBdt > 0) {
+      return catMatch.priceBdt;
+    }
+    if (enforceCatalogOnly) return null;
+    if (matchedCode === 'starter_web') return 8000;
+    if (matchedCode === 'business_web') return 15000;
+    if (matchedCode === 'advanced_web') return 25000;
+    if (matchedCode === 'custom_setup') return 5000;
+    return null;
+  }
+
+  if (params.serviceType === 'dashboard_plan') {
+    const canonicalPlanId = normalizeDashboardPlanId(code);
+    if (!canonicalPlanId) return null;
+
+    const catMatch = activeCatalog.find(
+      (entry) => entry.serviceCode.trim().toLowerCase() === canonicalPlanId
+    );
+    if (catMatch && Number.isFinite(catMatch.priceBdt) && catMatch.priceBdt > 0) {
+      return catMatch.priceBdt;
+    }
+    if (enforceCatalogOnly) return null;
+
+    const offlineDashboardMap: Record<DashboardPlanId, number> = {
+      starter: 299,
+      business: 599,
+      pro: 999,
+      enterprise: 1999,
+    };
+    return offlineDashboardMap[canonicalPlanId] ?? null;
+  }
+
+  if (params.serviceType === 'ai_automation') {
+    if (!code) return null;
+    const catMatch = activeCatalog.find(
+      (entry) => entry.serviceCode.trim().toLowerCase() === code
+    );
+    if (catMatch && Number.isFinite(catMatch.priceBdt) && catMatch.priceBdt > 0) {
+      return params.includeSetupFee
+        ? catMatch.priceBdt + (Number(catMatch.setupFeeBdt) || 0)
+        : catMatch.priceBdt;
+    }
+    if (enforceCatalogOnly) return null;
+
+    const offlineAutoMap: Record<string, { monthly: number; setup: number }> = {
+      basic_auto: { monthly: 999, setup: 1000 },
+      growth_auto: { monthly: 2499, setup: 1500 },
+      ai_chatbot: { monthly: 3999, setup: 0 },
+      biz_auto_pro: { monthly: 7999, setup: 0 },
+      messenger_starter: { monthly: 999, setup: 1000 },
+      whatsapp_sales: { monthly: 2499, setup: 2500 },
+      order_suite: { monthly: 3999, setup: 3500 },
+      full_ai_pack: { monthly: 7999, setup: 5000 },
+      ai_automations: { monthly: 999, setup: 1000 },
+      ai_order_assistant: { monthly: 2000, setup: 0 },
+      ai_bot: { monthly: 1200, setup: 0 },
+    };
+    const entry = offlineAutoMap[code];
+    if (!entry) return null;
+    return params.includeSetupFee ? entry.monthly + entry.setup : entry.monthly;
+  }
+
+  return null;
+}
+
+

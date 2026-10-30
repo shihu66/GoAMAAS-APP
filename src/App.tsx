@@ -1,6 +1,7 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AppProvider } from './context/AppContext';
+import { validateSubdomainFormat } from './lib/supabase';
 
 // Layouts
 import { PublicLayout } from './components/layout/PublicLayout';
@@ -49,11 +50,19 @@ import { SupportPage } from './pages/dashboard/SupportPage';
 import { AdminDashboardPage } from './pages/admin/AdminDashboardPage';
 
 export default function App() {
-  // Check if current request is dispatched to a tenant subdomain (e.g. urbanfashion.amaas.xyz)
-  const isTenantSubdomain = typeof window !== 'undefined' &&
-    window.location.hostname.endsWith('.amaas.xyz') &&
-    window.location.hostname !== 'app.amaas.xyz' &&
-    window.location.hostname !== 'amaas.xyz';
+  // Check if current request is dispatched to a tenant subdomain (e.g. urbanfashion.amaas.xyz or urbanfashion.localhost)
+  const isTenantSubdomain = (() => {
+    if (typeof window === 'undefined') return false;
+    const host = window.location.hostname.toLowerCase();
+    let candidate = '';
+    if (host.endsWith('.amaas.xyz') && host !== 'amaas.xyz') {
+      candidate = host.slice(0, -'.amaas.xyz'.length);
+    } else if (host.endsWith('.localhost') && host !== 'localhost') {
+      candidate = host.slice(0, -'.localhost'.length);
+    }
+    if (!candidate || candidate.includes('.')) return false;
+    return validateSubdomainFormat(candidate).valid;
+  })();
 
   return (
     <AppProvider>
@@ -78,6 +87,7 @@ export default function App() {
 
           {/* Multi-Tenant Public Website Routes */}
           <Route path="/sites/:subdomain" element={<PublicTenantWebsitePage />} />
+          <Route path="/site/:subdomain" element={<PublicTenantWebsitePage />} />
 
           {/* Authentication & OAuth Callback Routes */}
           <Route path="/login" element={<LoginPage />} />

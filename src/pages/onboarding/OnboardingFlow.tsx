@@ -14,10 +14,11 @@ import {
 } from 'lucide-react';
 
 export const OnboardingFlow: React.FC = () => {
-  const { onboarding, updateOnboarding, completeOnboarding, activeStore, updateActiveStore } = useApp();
+  const { onboarding, updateOnboarding, completeOnboarding, activeStore, showToast } = useApp();
   const navigate = useNavigate();
 
   const [step, setStep] = useState(1);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [formData, setFormData] = useState({
     businessName: onboarding.businessName || activeStore?.name || '',
     businessType: onboarding.businessType || 'Retail & E-Commerce Store',
@@ -53,18 +54,25 @@ export const OnboardingFlow: React.FC = () => {
     'Get a custom modern e-commerce website built by AMAAS',
   ];
 
-  const handleNext = () => {
+  const handleNext = async () => {
+    if (isSubmitting) return;
+    if (step === 1 && !formData.businessName.trim()) {
+      showToast('Please enter your Brand / Store Name to continue.', 'warning');
+      return;
+    }
+
     updateOnboarding(formData);
     if (step < 5) {
       setStep(step + 1);
-    } else {
-      updateActiveStore({
-        name: formData.businessName,
-        category: formData.category,
-        phone: formData.phone,
-      });
-      completeOnboarding();
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      await completeOnboarding(formData);
       navigate('/dashboard');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -333,7 +341,7 @@ export const OnboardingFlow: React.FC = () => {
 
               <div className="flex items-center gap-2 p-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 text-xs">
                 <ShieldCheck className="w-4 h-4 shrink-0" />
-                <span>7-Day Free Trial Activated · Sample demo catalog and orders are pre-loaded.</span>
+                <span>Independent 7-Day Free Trials available for eligible services · Clean workspace ready.</span>
               </div>
             </div>
           )}
@@ -343,8 +351,9 @@ export const OnboardingFlow: React.FC = () => {
             {step > 1 ? (
               <button
                 type="button"
+                disabled={isSubmitting}
                 onClick={handlePrev}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-700 dark:text-slate-200 transition-colors"
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 disabled:opacity-50 text-slate-700 dark:text-slate-200 transition-colors"
               >
                 <ArrowLeft className="w-3.5 h-3.5" />
                 <span>Back</span>
@@ -353,10 +362,11 @@ export const OnboardingFlow: React.FC = () => {
 
             <button
               type="button"
-              onClick={handleNext}
-              className="inline-flex items-center gap-1.5 px-6 py-2 text-xs font-semibold rounded-lg bg-blue-600 hover:bg-blue-700 text-white shadow-xs transition-colors"
+              disabled={isSubmitting}
+              onClick={() => void handleNext()}
+              className="inline-flex items-center gap-1.5 px-6 py-2 text-xs font-semibold rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white shadow-xs transition-colors"
             >
-              <span>{step === 5 ? 'Finish & Launch Dashboard' : 'Next Step'}</span>
+              <span>{step === 5 ? (isSubmitting ? 'Launching Workspace...' : 'Finish & Launch Dashboard') : 'Next Step'}</span>
               <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>

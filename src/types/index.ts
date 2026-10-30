@@ -35,6 +35,9 @@ export interface Product {
   rating: number;
   salesCount: number;
   image?: string;
+  websiteId?: string;
+  isVisible?: boolean;
+  sortOrder?: number;
 }
 
 export interface OrderItem {
@@ -185,7 +188,7 @@ export interface SupportTicket {
   subject: string;
   category: 'Billing' | 'Technical' | 'Integration' | 'Website Service' | 'General';
   priority: 'low' | 'medium' | 'high';
-  status: 'open' | 'in_progress' | 'resolved';
+  status: 'open' | 'in_progress' | 'resolved' | 'closed';
   messages: SupportTicketMessage[];
   createdAt: string;
   updatedAt: string;
@@ -215,6 +218,7 @@ export interface OnboardingData {
   businessName: string;
   businessType: string;
   category: string;
+  currency?: string;
   phone: string;
   city: string;
   productsOffered: string;
@@ -247,8 +251,110 @@ export interface WebsiteResourceUsage {
   monthlyUpdatesLimit: number;
 }
 
+export type WebsiteSectionType =
+  | 'hero'
+  | 'banner'
+  | 'about'
+  | 'highlights'
+  | 'products'
+  | 'testimonials'
+  | 'faq'
+  | 'contact';
+
+export interface WebsiteSectionItem {
+  id: string;
+  title: string;
+  subtitle?: string;
+  description?: string;
+  author?: string;
+  role?: string;
+  imageUrl?: string;
+}
+
+export interface WebsiteSectionConfig {
+  id: string;
+  type: WebsiteSectionType;
+  title: string;
+  subtitle?: string;
+  content?: string;
+  imageUrl?: string;
+  ctaText?: string;
+  ctaLink?: string;
+  enabled: boolean;
+  order: number;
+  items?: WebsiteSectionItem[];
+}
+
+export interface WebsiteThemeSettings {
+  paletteId?: string;
+  primaryColor?: string;
+  accentColor?: string;
+  backgroundColor?: string;
+  surfaceColor?: string;
+  textColor?: string;
+  fontStyle?: 'modern' | 'editorial' | 'bold' | 'minimal';
+  buttonStyle?: 'rounded' | 'pill' | 'sharp';
+  heroLayout?: 'split' | 'centered' | 'cover';
+}
+
+export interface WebsiteCustomLink {
+  id: string;
+  label: string;
+  url: string;
+}
+
+export interface WebsiteProductItem {
+  id: string;
+  productId?: string;
+  name: string;
+  price?: string;
+  priceNumeric?: number;
+  description: string;
+  imageUrl?: string;
+  category?: string;
+  isVisible?: boolean;
+}
+
+export interface WebsiteEditableFields {
+  businessName?: string;
+  logoUrl?: string;
+  heroImageUrl?: string;
+  headline?: string;
+  subheadline?: string;
+  heroCtaText?: string;
+  heroCtaLink?: string;
+  secondaryCtaText?: string;
+  secondaryCtaLink?: string;
+  bannerImageUrl?: string;
+  bannerTitle?: string;
+  bannerSubtitle?: string;
+  bannerCtaText?: string;
+  bannerCtaLink?: string;
+  aboutText?: string;
+  phone?: string;
+  email?: string;
+  address?: string;
+  whatsappNumber?: string;
+  brandColor?: string;
+  templateId?: string;
+  templateName?: string;
+  servicesOrProducts?: WebsiteProductItem[];
+  socialLinks?: {
+    facebook?: string;
+    instagram?: string;
+    twitter?: string;
+    linkedin?: string;
+    youtube?: string;
+  };
+  customLinks?: WebsiteCustomLink[];
+  sections?: WebsiteSectionConfig[];
+  themeSettings?: WebsiteThemeSettings;
+  customDomain?: string;
+}
+
 export interface SubscribedWebsite {
   id: string;
+  userId?: string;
   storeId: string;
   businessName: string;
   ownerName: string;
@@ -258,31 +364,44 @@ export interface SubscribedWebsite {
   nicheLabel: string;
   templateId: string;
   templateName: string;
-  subdomain: string; // e.g. "dhakabistro"
-  fullDomainUrl: string; // "dhakabistro.amaas.xyz"
+  subdomain: string; // e.g. "urbanfashion"
+  fullDomainUrl: string; // "urbanfashion.amaas.xyz"
+  customDomain?: string;
   brandColor: string;
   logoUrl?: string;
+  heroImageUrl?: string;
+  heroCtaText?: string;
+  heroCtaLink?: string;
+  secondaryCtaText?: string;
+  secondaryCtaLink?: string;
+  bannerImageUrl?: string;
+  bannerTitle?: string;
+  bannerSubtitle?: string;
+  bannerCtaText?: string;
+  bannerCtaLink?: string;
   address: string;
   headline: string;
   subheadline: string;
   aboutText: string;
-  servicesOrProducts: Array<{
-    id: string;
-    name: string;
-    price?: string;
-    description: string;
-    imageUrl?: string;
-  }>;
+  servicesOrProducts: WebsiteProductItem[];
   whatsappNumber: string;
   socialLinks: {
     facebook?: string;
     instagram?: string;
+    twitter?: string;
+    linkedin?: string;
+    youtube?: string;
   };
-  planName: string; // 'AMAAS Website Lite'
+  customLinks?: WebsiteCustomLink[];
+  sections?: WebsiteSectionConfig[];
+  themeSettings?: WebsiteThemeSettings;
+  hasUnpublishedDraft?: boolean;
+  draftConfig?: WebsiteEditableFields;
+  planName: string; // 'GoAMAAS Website'
   monthlyFee: number; // 600
-  subscriptionStatus: 'active' | 'grace_period' | 'past_due' | 'suspended';
+  subscriptionStatus: 'active' | 'grace_period' | 'past_due' | 'suspended' | 'cancelled' | 'draft';
   paymentStatus: 'paid' | 'pending' | 'failed' | 'pending_review';
-  deploymentStatus: 'live' | 'provisioning' | 'maintenance' | 'suspended';
+  deploymentStatus: 'live' | 'provisioning' | 'maintenance' | 'suspended' | 'draft';
   sslStatus: 'active' | 'pending';
   nextBillingDate: string;
   gracePeriodEndsAt?: string;
@@ -391,3 +510,31 @@ export interface PaymentGatewayConfig {
   routingNumber?: string;
   instructions: string;
 }
+
+export interface ServicePricingCatalogEntry {
+  serviceType: 'website_subscription' | 'website_package' | 'dashboard_plan' | 'ai_automation';
+  serviceCode: string;
+  planTierLabel: string;
+  priceBdt: number;
+  setupFeeBdt: number;
+  isActive: boolean;
+  updatedAt?: string;
+}
+
+export interface WebsiteLifecycleAuditLog {
+  id: string;
+  websiteId: string;
+  adminId: string;
+  action: 'suspend' | 'reactivate' | 'renew';
+  reason: string;
+  verifiedPaymentRequestId?: string | null;
+  previousStatus?: string | null;
+  newStatus?: string | null;
+  previousDeploymentStatus?: string | null;
+  newDeploymentStatus?: string | null;
+  paymentStatusSnapshot?: string | null;
+  previousPeriodEnd?: string | null;
+  newPeriodEnd?: string | null;
+  createdAt: string;
+}
+

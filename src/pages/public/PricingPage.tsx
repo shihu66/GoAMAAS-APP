@@ -25,12 +25,32 @@ import {
   DashboardPlanConfig,
   AutomationPackageConfig,
   WebsitePackageConfig,
+  resolveCatalogPlanState,
 } from '../../data/pricingConfig';
+import { isSupabaseConfigured } from '../../lib/supabase';
 import { Modal } from '../../components/ui/Modal';
 
 export const PricingPage: React.FC = () => {
-  const { currentPlan, updatePlan, isAuthenticated, showToast, websiteSubscriptionPlan } = useApp();
+  const {
+    currentPlan,
+    isAuthenticated,
+    showToast,
+    websiteSubscriptionPlan,
+    servicePricingCatalog,
+    isPricingCatalogLoaded,
+  } = useApp();
   const navigate = useNavigate();
+
+  const useLiveCatalog = isAuthenticated && isSupabaseConfigured && isPricingCatalogLoaded;
+  const getPlanDisplayState = (plan: DashboardPlanConfig) =>
+    resolveCatalogPlanState({
+      serviceType: 'dashboard_plan',
+      serviceId: plan.id,
+      fallbackLabel: plan.name,
+      fallbackPriceBdt: plan.priceMonthly,
+      catalog: useLiveCatalog ? servicePricingCatalog : undefined,
+      requireCatalog: useLiveCatalog,
+    });
 
   const [activeCategory, setActiveCategory] = useState<'dashboard' | 'automations' | 'webSubscription' | 'website'>('dashboard');
 
@@ -67,12 +87,11 @@ export const PricingPage: React.FC = () => {
 
   const handleConfirmDashboardPlan = () => {
     if (!selectedDashboardPlan) return;
+    const targetPlanId = selectedDashboardPlan.id;
+    setSelectedDashboardPlan(null);
     if (isAuthenticated) {
-      updatePlan(selectedDashboardPlan.id);
-      setSelectedDashboardPlan(null);
-      navigate('/dashboard/billing');
+      navigate(`/dashboard/billing?plan=${encodeURIComponent(targetPlanId)}`);
     } else {
-      setSelectedDashboardPlan(null);
       navigate('/register');
     }
   };
@@ -179,18 +198,20 @@ export const PricingPage: React.FC = () => {
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               {DASHBOARD_SUBSCRIPTION_PLANS.map((plan) => {
-                const isCurrent = currentPlan === plan.id;
+                const isCurrent = isAuthenticated && currentPlan === plan.id;
+                const planState = getPlanDisplayState(plan);
+                const isUnavailable = useLiveCatalog && (!planState.isAvailable || planState.priceBdt === null);
 
                 return (
                   <div
                     key={plan.id}
                     className={`p-6 rounded-2xl flex flex-col justify-between transition-all ${
-                      plan.isPopular
+                      plan.isPopular && !isUnavailable
                         ? 'bg-slate-900 text-white border-2 border-blue-500 shadow-xl relative'
                         : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white shadow-xs'
-                    }`}
+                    } ${isUnavailable ? 'opacity-70' : ''}`}
                   >
-                    {plan.isPopular && (
+                    {plan.isPopular && !isUnavailable && (
                       <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full bg-blue-600 text-white font-semibold text-[10px] uppercase tracking-wider shadow-sm">
                         Most Popular
                       </div>
@@ -199,10 +220,10 @@ export const PricingPage: React.FC = () => {
                     <div className="space-y-4">
                       <div>
                         <div className="flex items-center justify-between">
-                          <h3 className="text-base font-bold tracking-tight">{plan.name}</h3>
+                          <h3 className="text-base font-bold tracking-tight">{planState.planTierLabel}</h3>
                           <span
                             className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                              plan.isPopular
+                              plan.isPopular && !isUnavailable
                                 ? 'bg-blue-900/60 text-blue-300 border border-blue-700'
                                 : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
                             }`}
@@ -210,32 +231,38 @@ export const PricingPage: React.FC = () => {
                             7-Day Free Trial
                           </span>
                         </div>
-                        <p className={`text-xs mt-1 ${plan.isPopular ? 'text-blue-300 font-medium' : 'text-slate-500 font-medium'}`}>
+                        <p className={`text-xs mt-1 ${plan.isPopular && !isUnavailable ? 'text-blue-300 font-medium' : 'text-slate-500 font-medium'}`}>
                           {plan.subtitle}
                         </p>
-                        <p className={`text-[11px] mt-1 ${plan.isPopular ? 'text-slate-400' : 'text-slate-500'}`}>
+                        <p className={`text-[11px] mt-1 ${plan.isPopular && !isUnavailable ? 'text-slate-400' : 'text-slate-500'}`}>
                           {plan.description}
                         </p>
                       </div>
 
                       <div className="flex items-baseline gap-1 pt-1">
-                        <span className="text-3xl sm:text-4xl font-extrabold font-mono tabular-nums">
-                          ৳{plan.priceMonthly.toLocaleString()}
-                        </span>
-                        <span className={`text-xs ${plan.isPopular ? 'text-slate-400' : 'text-slate-500'}`}>
-                          / month
-                        </span>
+                        {planState.priceBdt !== null ? (
+                          <>
+                            <span className="text-3xl sm:text-4xl font-extrabold font-mono tabular-nums">
+                              ৳{planState.priceBdt.toLocaleString()}
+                            </span>
+                            <span className={`text-xs ${plan.isPopular && !isUnavailable ? 'text-slate-400' : 'text-slate-500'}`}>
+                              / month
+                            </span>
+                          </>
+                        ) : (
+                          <span className="text-lg font-bold text-slate-400">Currently unavailable</span>
+                        )}
                       </div>
 
-                      <div className={`pt-4 space-y-2 text-xs border-t ${plan.isPopular ? 'border-slate-800' : 'border-slate-100 dark:border-slate-800'}`}>
+                      <div className={`pt-4 space-y-2 text-xs border-t ${plan.isPopular && !isUnavailable ? 'border-slate-800' : 'border-slate-100 dark:border-slate-800'}`}>
                         {plan.features.map((feat, fIdx) => (
                           <div key={fIdx} className="flex items-start gap-2">
                             <CheckCircle2
                               className={`w-3.5 h-3.5 shrink-0 mt-0.5 ${
-                                plan.isPopular ? 'text-blue-400' : 'text-blue-600'
+                                plan.isPopular && !isUnavailable ? 'text-blue-400' : 'text-blue-600'
                               }`}
                             />
-                            <span className={plan.isPopular ? 'text-slate-200' : 'text-slate-700 dark:text-slate-300'}>
+                            <span className={plan.isPopular && !isUnavailable ? 'text-slate-200' : 'text-slate-700 dark:text-slate-300'}>
                               {feat}
                             </span>
                           </div>
@@ -245,16 +272,25 @@ export const PricingPage: React.FC = () => {
 
                     <div className="pt-6">
                       <button
-                        onClick={() => setSelectedDashboardPlan(plan)}
+                        disabled={isCurrent || isUnavailable}
+                        onClick={() => {
+                          if (!isUnavailable) setSelectedDashboardPlan(plan);
+                        }}
                         className={`w-full py-2.5 rounded-lg text-xs font-semibold transition-colors shadow-xs ${
                           isCurrent
                             ? 'bg-emerald-600 text-white cursor-default'
+                            : isUnavailable
+                            ? 'bg-slate-200 dark:bg-slate-800 text-slate-400 cursor-not-allowed'
                             : plan.isPopular
-                            ? 'bg-blue-600 hover:bg-blue-500 text-white'
-                            : 'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-900 dark:text-white'
+                            ? 'bg-blue-600 hover:bg-blue-500 text-white cursor-pointer'
+                            : 'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-900 dark:text-white cursor-pointer'
                         }`}
                       >
-                        {isCurrent ? 'Current Active Plan' : plan.ctaLabel}
+                        {isCurrent
+                          ? 'Current Active Plan'
+                          : isUnavailable
+                          ? 'Currently Unavailable'
+                          : plan.ctaLabel}
                       </button>
                     </div>
                   </div>
@@ -369,20 +405,21 @@ export const PricingPage: React.FC = () => {
         )}
 
         {/* =========================================================================
-            CATEGORY 3: WEBSITE SUBSCRIPTION PLAN (AMAAS Website Lite - ৳600/month)
+            CATEGORY 3: WEBSITE SUBSCRIPTION PLAN (GoAMAAS Website - ৳600/month)
            ========================================================================= */}
         {activeCategory === 'webSubscription' && (
           <div className="space-y-16">
             {/* Category Header */}
             <div className="text-center space-y-2 max-w-2xl mx-auto">
               <span className="text-xs font-bold text-blue-600 dark:text-blue-400 tracking-wider uppercase">
-                Recurring Turnkey Website Subscription
+                One All-Inclusive Website Subscription
               </span>
               <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">
-                Get a Complete Business Website for ৳600 / Month
+                GoAMAAS Website — ৳600 BDT / Month
               </h2>
               <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
-                No separate website development fee. Custom-designed, mobile-responsive online presence with hosting included on your own <code className="font-mono text-blue-600 font-semibold">*.amaas.xyz</code> subdomain.
+                One transparent 30-day plan with free hosting on GoAMAAS infrastructure, your free{' '}
+                <code className="font-mono text-blue-600 font-semibold">businessname.amaas.xyz</code> subdomain, and optional custom domain support.
               </p>
             </div>
 
@@ -428,12 +465,12 @@ export const PricingPage: React.FC = () => {
                       <span>
                         Free Subdomain Included:{' '}
                         <code className="font-mono text-emerald-400 font-bold bg-slate-900 px-2 py-0.5 rounded">
-                          yourbusiness.amaas.xyz
+                          businessname.amaas.xyz
                         </code>
                       </span>
                     </div>
                     <span className="text-[11px] text-slate-400">
-                      Managed under AMAAS network
+                      Optional custom domain supported (paid separately)
                     </span>
                   </div>
 
@@ -512,10 +549,10 @@ export const PricingPage: React.FC = () => {
                     1
                   </div>
                   <h4 className="font-bold text-sm text-slate-900 dark:text-white">
-                    Choose Your Plan
+                    Activate GoAMAAS Website
                   </h4>
                   <p className="text-xs text-slate-500 leading-relaxed">
-                    Select the AMAAS Website Lite subscription at ৳600/month with zero upfront development fees and managed SSD cloud hosting included.
+                    Subscribe to the single GoAMAAS Website plan at ৳600 BDT/month (30-day cycle) with free hosting on GoAMAAS infrastructure included.
                   </p>
                 </div>
 
@@ -565,7 +602,7 @@ export const PricingPage: React.FC = () => {
                     <tr>
                       <th className="py-3 px-4">Feature / Aspect</th>
                       <th className="py-3 px-4 text-blue-600 dark:text-blue-400 font-bold bg-blue-50/50 dark:bg-blue-950/30">
-                        AMAAS Website Lite (৳600/mo)
+                        GoAMAAS Website (৳600/mo)
                       </th>
                       <th className="py-3 px-4">One-Time Web Development (৳8,000+)</th>
                     </tr>
@@ -852,64 +889,70 @@ export const PricingPage: React.FC = () => {
       </div>
 
       {/* Confirmation Modal for Dashboard Plan */}
-      {selectedDashboardPlan && (
-        <Modal
-          isOpen={!!selectedDashboardPlan}
-          onClose={() => setSelectedDashboardPlan(null)}
-          title={`Confirm Plan Selection — ${selectedDashboardPlan.name}`}
-          maxWidth="md"
-        >
-          <div className="space-y-4 text-xs">
-            <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800 space-y-2">
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Billing Type:</span>
-                <span className="font-semibold text-slate-900 dark:text-white">Monthly Subscription</span>
+      {selectedDashboardPlan && (() => {
+        const selectedState = getPlanDisplayState(selectedDashboardPlan);
+        return (
+          <Modal
+            isOpen={!!selectedDashboardPlan}
+            onClose={() => setSelectedDashboardPlan(null)}
+            title={`Confirm Plan Selection — ${selectedState.planTierLabel}`}
+            maxWidth="md"
+          >
+            <div className="space-y-4 text-xs">
+              <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800 space-y-2">
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-500">Billing Type:</span>
+                  <span className="font-semibold text-slate-900 dark:text-white">Monthly Subscription</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-500">Subscription Price:</span>
+                  <span className="font-bold text-base font-mono text-blue-600">
+                    {selectedState.priceBdt !== null
+                      ? `৳${selectedState.priceBdt.toLocaleString()} / month`
+                      : 'Currently Unavailable'}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-500">Trial Period:</span>
+                  <span className="font-semibold text-emerald-600">7-Day Free Trial</span>
+                </div>
               </div>
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Subscription Price:</span>
-                <span className="font-bold text-base font-mono text-blue-600">
-                  ৳{selectedDashboardPlan.priceMonthly.toLocaleString()} / month
+
+              <div>
+                <span className="font-bold text-slate-900 dark:text-white block mb-1">
+                  Included Features:
                 </span>
+                <ul className="space-y-1 text-slate-600 dark:text-slate-300">
+                  {selectedDashboardPlan.features.map((f, i) => (
+                    <li key={i} className="flex items-center gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                      <span>{f}</span>
+                    </li>
+                  ))}
+                </ul>
               </div>
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Trial Period:</span>
-                <span className="font-semibold text-emerald-600">7-Day Free Trial</span>
+
+              <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedDashboardPlan(null)}
+                  className="px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={useLiveCatalog && (!selectedState.isAvailable || selectedState.priceBdt === null)}
+                  onClick={handleConfirmDashboardPlan}
+                  className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-semibold"
+                >
+                  {isAuthenticated ? 'Confirm & Apply Plan' : 'Proceed to Free Trial Sign Up'}
+                </button>
               </div>
             </div>
-
-            <div>
-              <span className="font-bold text-slate-900 dark:text-white block mb-1">
-                Included Features:
-              </span>
-              <ul className="space-y-1 text-slate-600 dark:text-slate-300">
-                {selectedDashboardPlan.features.map((f, i) => (
-                  <li key={i} className="flex items-center gap-1.5">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-                    <span>{f}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-
-            <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setSelectedDashboardPlan(null)}
-                className="px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmDashboardPlan}
-                className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold"
-              >
-                {isAuthenticated ? 'Confirm & Apply Plan' : 'Proceed to Free Trial Sign Up'}
-              </button>
-            </div>
-          </div>
-        </Modal>
-      )}
+          </Modal>
+        );
+      })()}
 
       {/* Confirmation Modal for AI Automation */}
       {selectedAutoPackage && (

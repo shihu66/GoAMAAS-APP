@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
-import { WebsiteRequest, SubscribedWebsite } from '../../types';
+import { WebsiteRequest, SubscribedWebsite, PaymentGatewayConfig } from '../../types';
 import { Modal } from '../../components/ui/Modal';
+import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { WebsitePreviewRenderer } from '../../components/website/WebsitePreviewRenderer';
 import {
   ShieldAlert,
@@ -28,6 +29,10 @@ import {
   Layers,
   Smartphone,
   Monitor,
+  Loader2,
+  Trash2,
+  FileText,
+  Save,
 } from 'lucide-react';
 
 export const AdminDashboardPage: React.FC = () => {
@@ -41,6 +46,9 @@ export const AdminDashboardPage: React.FC = () => {
     suspendSubscribedWebsite,
     reactivateSubscribedWebsite,
     renewSubscribedWebsite,
+    adminDeleteSubscribedWebsite,
+    websiteLifecycleAuditLogs,
+    refreshWebsiteLifecycleAuditLogs,
     automations,
     invoices,
     paymentRequests,
@@ -55,12 +63,19 @@ export const AdminDashboardPage: React.FC = () => {
   const [paymentFilter, setPaymentFilter] = useState<'all' | 'pending' | 'approved' | 'rejected'>('pending');
   const [rejectionModalId, setRejectionModalId] = useState<string | null>(null);
   const [rejectionReason, setRejectionReason] = useState('');
+  const [processingPaymentId, setProcessingPaymentId] = useState<string | null>(null);
   const [requestSearch, setRequestSearch] = useState('');
   const [websiteSearch, setWebsiteSearch] = useState('');
 
-  // Website Preview State in Admin
+  // Website Preview & Audited Lifecycle Action State in Admin
   const [previewingWebsite, setPreviewingWebsite] = useState<SubscribedWebsite | null>(null);
   const [adminPreviewDevice, setAdminPreviewDevice] = useState<'desktop' | 'mobile'>('desktop');
+  const [lifecycleModal, setLifecycleModal] = useState<{
+    site: SubscribedWebsite;
+    action: 'suspend' | 'reactivate' | 'renew';
+  } | null>(null);
+  const [lifecycleReason, setLifecycleReason] = useState('');
+  const [websiteToDelete, setWebsiteToDelete] = useState<SubscribedWebsite | null>(null);
 
   // Plan Settings Form State
   const [isPlanSettingsModalOpen, setIsPlanSettingsModalOpen] = useState(false);
@@ -72,14 +87,44 @@ export const AdminDashboardPage: React.FC = () => {
   const [planMaxUpdates, setPlanMaxUpdates] = useState(websiteSubscriptionPlan.limits.monthlyUpdateRequests);
   const [planIsVisible, setPlanIsVisible] = useState(websiteSubscriptionPlan.isVisible);
 
-  // Real platform aggregates
+  // Controlled drafts for Gateway Accounts & WhatsApp Config (prevents per-keystroke RPC spam)
+  const [gatewayDrafts, setGatewayDrafts] = useState<Record<string, PaymentGatewayConfig>>(() =>
+    Object.fromEntries(paymentGatewayConfigs.map((gw) => [gw.id, { ...gw }]))
+  );
+  const [savingGatewayId, setSavingGatewayId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setGatewayDrafts(Object.fromEntries(paymentGatewayConfigs.map((gw) => [gw.id, { ...gw }])));
+  }, [paymentGatewayConfigs]);
+
+  const updateGatewayDraft = (gatewayId: string, patch: Partial<PaymentGatewayConfig>) => {
+    setGatewayDrafts((prev) => {
+      const base = prev[gatewayId] || paymentGatewayConfigs.find((g) => g.id === gatewayId);
+      if (!base) return prev;
+      return {
+        ...prev,
+        [gatewayId]: { ...base, ...patch },
+      };
+    });
+  };
+
+  // Real platform aggregates (strictly verified paid subscriptions for revenue/paying counts)
+  const payingWebsites = subscribedWebsites.filter(
+    (s) =>
+      s.paymentStatus === 'paid' &&
+      (s.subscriptionStatus === 'active' || s.subscriptionStatus === 'grace_period')
+  );
+  const liveWebsitesCount = subscribedWebsites.filter(
+    (s) =>
+      s.paymentStatus === 'paid' &&
+      s.subscriptionStatus === 'active' &&
+      s.deploymentStatus === 'live'
+  ).length;
+
   const platformStats = {
     totalTenants: stores.length,
-    activeSubscribers: subscribedWebsites.filter((s) => s.subscriptionStatus === 'active').length,
-    monthlyRecurringRevenue: subscribedWebsites.reduce(
-      (sum, s) => sum + (s.subscriptionStatus === 'active' ? s.monthlyFee : 0),
-      0
-    ),
+    activeSubscribers: payingWebsites.length,
+    monthlyRecurringRevenue: payingWebsites.reduce((sum, s) => sum + s.monthlyFee, 0),
     activeAutomations: automations.filter((a) => a.status === 'active').length,
   };
 
@@ -122,7 +167,9 @@ export const AdminDashboardPage: React.FC = () => {
           <p className="mt-2 text-2xl font-bold text-white font-mono tabular-nums">
             {platformStats.totalTenants}
           </p>
-          <span className="text-[11px] text-emerald-400 mt-1 block">+12 this month</span>
+          <span className="text-[11px] text-emerald-400 mt-1 block">
+            {subscribedWebsites.length} websites registered
+          </span>
         </div>
 
         <div className="p-5 rounded-xl bg-slate-900 border border-slate-800">
@@ -130,7 +177,9 @@ export const AdminDashboardPage: React.FC = () => {
           <p className="mt-2 text-2xl font-bold text-blue-400 font-mono tabular-nums">
             {platformStats.activeSubscribers}
           </p>
-          <span className="text-[11px] text-slate-400 mt-1 block">83% conversion from trial</span>
+          <span className="text-[11px] text-slate-400 mt-1 block">
+            {liveWebsitesCount} live on .amaas.xyz
+          </span>
         </div>
 
         <div className="p-5 rounded-xl bg-slate-900 border border-slate-800">
@@ -138,7 +187,7 @@ export const AdminDashboardPage: React.FC = () => {
           <p className="mt-2 text-2xl font-bold text-emerald-400 font-mono tabular-nums">
             ৳{platformStats.monthlyRecurringRevenue.toLocaleString()}
           </p>
-          <span className="text-[11px] text-slate-400 mt-1 block">Excluding website project fees</span>
+          <span className="text-[11px] text-slate-400 mt-1 block">Verified paid subscriptions</span>
         </div>
 
         <div className="p-5 rounded-xl bg-slate-900 border border-slate-800">
@@ -172,7 +221,7 @@ export const AdminDashboardPage: React.FC = () => {
           }`}
         >
           <Globe className="w-3.5 h-3.5" />
-          <span>Website Subscriptions (৳600/mo) ({subscribedWebsites.length}) ★</span>
+          <span>Website Subscriptions (৳{websiteSubscriptionPlan.priceMonthly}/mo) ({subscribedWebsites.length}) ★</span>
         </button>
 
         <button
@@ -311,14 +360,28 @@ export const AdminDashboardPage: React.FC = () => {
                           {req.status === 'pending' ? (
                             <div className="flex items-center justify-end gap-2">
                               <button
-                                onClick={() => adminApprovePayment(req.id, 'Verified via SMS & bank statement.')}
-                                className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition-colors cursor-pointer"
+                                disabled={processingPaymentId !== null}
+                                onClick={async () => {
+                                  if (processingPaymentId) return;
+                                  setProcessingPaymentId(req.id);
+                                  try {
+                                    await adminApprovePayment(req.id, 'Verified via SMS & bank statement.');
+                                  } finally {
+                                    setProcessingPaymentId(null);
+                                  }
+                                }}
+                                className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold text-xs transition-colors cursor-pointer flex items-center gap-1.5"
                               >
-                                Approve
+                                {processingPaymentId === req.id && <Loader2 className="w-3 h-3 animate-spin" />}
+                                <span>Approve</span>
                               </button>
                               <button
-                                onClick={() => setRejectionModalId(req.id)}
-                                className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/60 text-slate-300 hover:text-rose-200 font-semibold text-xs transition-colors cursor-pointer"
+                                disabled={processingPaymentId !== null}
+                                onClick={() => {
+                                  if (processingPaymentId) return;
+                                  setRejectionModalId(req.id);
+                                }}
+                                className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/60 disabled:opacity-50 text-slate-300 hover:text-rose-200 font-semibold text-xs transition-colors cursor-pointer"
                               >
                                 Reject
                               </button>
@@ -349,68 +412,155 @@ export const AdminDashboardPage: React.FC = () => {
           <div>
             <h2 className="text-lg font-bold text-white">Payment Gateways & Contact Configuration</h2>
             <p className="text-xs text-slate-400 mt-0.5">
-              Configure receiving numbers and bank details displayed to customers during manual checkout.
+              Configure receiving numbers and bank details displayed to customers during manual checkout, then save each gateway atomically.
             </p>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {paymentGatewayConfigs.map((gw) => (
-              <div key={gw.id} className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-white text-sm">{gw.displayName}</span>
-                  <button
-                    onClick={() => updatePaymentGatewayConfig(gw.id, { isEnabled: !gw.isEnabled })}
-                    className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase transition-colors cursor-pointer ${
-                      gw.isEnabled
-                        ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
-                        : 'bg-slate-800 text-slate-400 border border-slate-700'
-                    }`}
-                  >
-                    {gw.isEnabled ? 'Enabled' : 'Disabled'}
-                  </button>
-                </div>
+            {paymentGatewayConfigs.map((gw) => {
+              const draft = gatewayDrafts[gw.id] || gw;
+              const isDirty =
+                Boolean(draft.isEnabled) !== Boolean(gw.isEnabled) ||
+                (draft.accountNumber ?? '') !== (gw.accountNumber ?? '') ||
+                (draft.accountName ?? '') !== (gw.accountName ?? '') ||
+                (draft.bankName ?? '') !== (gw.bankName ?? '') ||
+                (draft.branchName ?? '') !== (gw.branchName ?? '') ||
+                (draft.routingNumber ?? '') !== (gw.routingNumber ?? '') ||
+                (draft.instructions ?? '') !== (gw.instructions ?? '');
+              const isSaving = savingGatewayId === gw.id;
 
-                <div className="space-y-3 text-xs">
-                  {gw.accountNumber !== undefined && (
+              const handleSaveGateway = async () => {
+                if (savingGatewayId) return;
+                if (draft.isEnabled && gw.id !== 'whatsapp_support' && !(draft.accountNumber || '').trim()) {
+                  showToast('Please enter a receiving account number before saving an enabled gateway.', 'warning');
+                  return;
+                }
+                setSavingGatewayId(gw.id);
+                try {
+                  await updatePaymentGatewayConfig(gw.id, {
+                    displayName: draft.displayName,
+                    isEnabled: draft.isEnabled,
+                    accountNumber: (draft.accountNumber ?? '').trim(),
+                    accountName: (draft.accountName ?? '').trim(),
+                    bankName: (draft.bankName ?? '').trim(),
+                    branchName: (draft.branchName ?? '').trim(),
+                    routingNumber: (draft.routingNumber ?? '').trim(),
+                    instructions: (draft.instructions ?? '').trim(),
+                  });
+                } finally {
+                  setSavingGatewayId(null);
+                }
+              };
+
+              return (
+                <div key={gw.id} className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-bold text-white text-sm">{gw.displayName}</span>
+                    <button
+                      type="button"
+                      onClick={() => updateGatewayDraft(gw.id, { isEnabled: !draft.isEnabled })}
+                      className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase transition-colors cursor-pointer ${
+                        draft.isEnabled
+                          ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                          : 'bg-slate-800 text-slate-400 border border-slate-700'
+                      }`}
+                    >
+                      {draft.isEnabled ? 'Enabled' : 'Disabled'}
+                    </button>
+                  </div>
+
+                  <div className="space-y-3 text-xs">
                     <div>
                       <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">
                         Account / WhatsApp Number
                       </label>
                       <input
                         type="text"
-                        value={gw.accountNumber}
-                        onChange={(e) => updatePaymentGatewayConfig(gw.id, { accountNumber: e.target.value })}
+                        value={draft.accountNumber ?? ''}
+                        onChange={(e) => updateGatewayDraft(gw.id, { accountNumber: e.target.value })}
+                        placeholder={gw.id === 'whatsapp_support' ? '+8801XXXXXXXXX' : 'Enter receiving number'}
                         className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-white font-mono"
                       />
                     </div>
-                  )}
 
-                  {gw.bankName !== undefined && (
+                    {gw.id !== 'whatsapp_support' && (
+                      <div>
+                        <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">
+                          Account Holder / Merchant Name
+                        </label>
+                        <input
+                          type="text"
+                          value={draft.accountName ?? ''}
+                          onChange={(e) => updateGatewayDraft(gw.id, { accountName: e.target.value })}
+                          className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-white"
+                        />
+                      </div>
+                    )}
+
+                    {gw.id === 'bank_transfer' && (
+                      <>
+                        <div>
+                          <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Bank Name</label>
+                          <input
+                            type="text"
+                            value={draft.bankName ?? ''}
+                            onChange={(e) => updateGatewayDraft(gw.id, { bankName: e.target.value })}
+                            className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-white"
+                          />
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Branch Name</label>
+                            <input
+                              type="text"
+                              value={draft.branchName ?? ''}
+                              onChange={(e) => updateGatewayDraft(gw.id, { branchName: e.target.value })}
+                              className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-white"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Routing Number</label>
+                            <input
+                              type="text"
+                              value={draft.routingNumber ?? ''}
+                              onChange={(e) => updateGatewayDraft(gw.id, { routingNumber: e.target.value })}
+                              className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-white font-mono"
+                            />
+                          </div>
+                        </div>
+                      </>
+                    )}
+
                     <div>
-                      <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Bank Name</label>
-                      <input
-                        type="text"
-                        value={gw.bankName}
-                        onChange={(e) => updatePaymentGatewayConfig(gw.id, { bankName: e.target.value })}
-                        className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-white"
+                      <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">
+                        Customer Instructions
+                      </label>
+                      <textarea
+                        rows={2}
+                        value={draft.instructions ?? ''}
+                        onChange={(e) => updateGatewayDraft(gw.id, { instructions: e.target.value })}
+                        className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-white leading-relaxed"
                       />
                     </div>
-                  )}
 
-                  <div>
-                    <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">
-                      Customer Instructions
-                    </label>
-                    <textarea
-                      rows={2}
-                      value={gw.instructions}
-                      onChange={(e) => updatePaymentGatewayConfig(gw.id, { instructions: e.target.value })}
-                      className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-white leading-relaxed"
-                    />
+                    <div className="pt-2 flex items-center justify-between gap-3 border-t border-slate-800/70">
+                      <span className="text-[11px] text-slate-400">
+                        {isDirty ? 'Unsaved changes' : 'Synced with gateway config'}
+                      </span>
+                      <button
+                        type="button"
+                        disabled={isSaving || !isDirty}
+                        onClick={() => void handleSaveGateway()}
+                        className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+                      >
+                        {isSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                        <span>Save Gateway Settings</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -418,7 +568,11 @@ export const AdminDashboardPage: React.FC = () => {
       {/* Rejection Reason Modal */}
       <Modal
         isOpen={!!rejectionModalId}
-        onClose={() => setRejectionModalId(null)}
+        onClose={() => {
+          if (!processingPaymentId) {
+            setRejectionModalId(null);
+          }
+        }}
         title="Reject Payment Request"
         maxWidth="md"
       >
@@ -435,22 +589,39 @@ export const AdminDashboardPage: React.FC = () => {
           />
           <div className="flex justify-end gap-2 pt-2">
             <button
-              onClick={() => setRejectionModalId(null)}
-              className="px-4 py-2 rounded-lg bg-slate-800 text-slate-300 font-semibold text-xs"
+              disabled={processingPaymentId === rejectionModalId}
+              onClick={() => {
+                if (!processingPaymentId) {
+                  setRejectionModalId(null);
+                }
+              }}
+              className="px-4 py-2 rounded-lg bg-slate-800 disabled:opacity-50 text-slate-300 font-semibold text-xs cursor-pointer"
             >
               Cancel
             </button>
             <button
-              onClick={() => {
-                if (rejectionModalId) {
-                  adminRejectPayment(rejectionModalId, rejectionReason || 'Transaction ID not verified.');
-                  setRejectionModalId(null);
-                  setRejectionReason('');
+              disabled={processingPaymentId === rejectionModalId}
+              onClick={async () => {
+                if (rejectionModalId && !processingPaymentId) {
+                  setProcessingPaymentId(rejectionModalId);
+                  try {
+                    const res = await adminRejectPayment(
+                      rejectionModalId,
+                      rejectionReason.trim() || 'Transaction ID not verified.'
+                    );
+                    if (res.success) {
+                      setRejectionModalId(null);
+                      setRejectionReason('');
+                    }
+                  } finally {
+                    setProcessingPaymentId(null);
+                  }
                 }
               }}
-              className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-semibold text-xs cursor-pointer"
+              className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white font-semibold text-xs cursor-pointer flex items-center gap-1.5"
             >
-              Confirm Rejection
+              {processingPaymentId === rejectionModalId && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              <span>Confirm Rejection</span>
             </button>
           </div>
         </div>
@@ -507,9 +678,9 @@ export const AdminDashboardPage: React.FC = () => {
             <div className="p-4 rounded-xl bg-slate-900 border border-slate-800">
               <span className="text-xs text-slate-400 font-medium">Active & Live</span>
               <p className="mt-1 text-2xl font-bold text-emerald-400 font-mono tabular-nums">
-                {subscribedWebsites.filter((s) => s.subscriptionStatus === 'active').length}
+                {liveWebsitesCount}
               </p>
-              <span className="text-[11px] text-emerald-400 mt-0.5 block">100% DNS routed</span>
+              <span className="text-[11px] text-emerald-400 mt-0.5 block">Paid & published live</span>
             </div>
 
             <div className="p-4 rounded-xl bg-slate-900 border border-slate-800">
@@ -523,9 +694,9 @@ export const AdminDashboardPage: React.FC = () => {
             <div className="p-4 rounded-xl bg-slate-900 border border-slate-800">
               <span className="text-xs text-slate-400 font-medium">Subscription MRR</span>
               <p className="mt-1 text-2xl font-bold text-blue-400 font-mono tabular-nums">
-                ৳{(subscribedWebsites.length * websiteSubscriptionPlan.priceMonthly).toLocaleString()}
+                ৳{platformStats.monthlyRecurringRevenue.toLocaleString()}
               </p>
-              <span className="text-[11px] text-slate-400 mt-0.5 block">৳{websiteSubscriptionPlan.priceMonthly}/mo per site</span>
+              <span className="text-[11px] text-slate-400 mt-0.5 block">Verified paid subscriptions</span>
             </div>
           </div>
 
@@ -555,6 +726,13 @@ export const AdminDashboardPage: React.FC = () => {
                   .map((site) => {
                     const isGrace = site.subscriptionStatus === 'grace_period';
                     const isSuspended = site.subscriptionStatus === 'suspended';
+                    const isCancelledOrDraft =
+                      site.subscriptionStatus === 'cancelled' || site.subscriptionStatus === 'draft';
+                    const hasPaymentHistory = paymentRequests.some(
+                      (r) =>
+                        (r.serviceType === 'website_subscription' || r.serviceType === 'website_package') &&
+                        r.serviceId === site.id
+                    );
 
                     return (
                       <tr key={site.id} className="hover:bg-slate-800/40 transition-colors">
@@ -570,12 +748,17 @@ export const AdminDashboardPage: React.FC = () => {
                             <span className="text-blue-400 font-bold">{site.fullDomainUrl}</span>
                             <button
                               onClick={() => setPreviewingWebsite(site)}
-                              className="text-slate-400 hover:text-white"
+                              className="text-slate-400 hover:text-white cursor-pointer"
                               title="Preview website"
                             >
                               <ExternalLink className="w-3.5 h-3.5" />
                             </button>
                           </div>
+                          {site.customDomain && (
+                            <span className="block text-[10px] text-slate-400 mt-0.5">
+                              Custom: {site.customDomain}
+                            </span>
+                          )}
                         </td>
 
                         <td className="py-3.5 px-4 text-slate-300">
@@ -590,6 +773,8 @@ export const AdminDashboardPage: React.FC = () => {
                                 ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
                                 : isGrace
                                 ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                                : isCancelledOrDraft
+                                ? 'bg-slate-800 text-slate-300 border border-slate-700'
                                 : 'bg-red-950 text-red-300 border border-red-800'
                             }`}
                           >
@@ -598,15 +783,51 @@ export const AdminDashboardPage: React.FC = () => {
                         </td>
 
                         <td className="py-3.5 px-4">
-                          <span
-                            className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
-                              site.deploymentStatus === 'live'
-                                ? 'bg-blue-950 text-blue-300'
-                                : 'bg-slate-800 text-slate-400'
-                            }`}
-                          >
-                            {site.deploymentStatus.toUpperCase()}
-                          </span>
+                          {(() => {
+                            const hasPendingReq = paymentRequests.some(
+                              (r) =>
+                                r.serviceType === 'website_subscription' &&
+                                r.serviceId === site.id &&
+                                r.status === 'pending'
+                            );
+                            const diagnostic =
+                              site.deploymentStatus === 'live' &&
+                              site.paymentStatus === 'paid' &&
+                              site.subscriptionStatus === 'active'
+                                ? { label: 'Live on *.amaas.xyz', tone: 'text-emerald-400' }
+                                : site.deploymentStatus === 'live' &&
+                                  site.paymentStatus === 'paid' &&
+                                  isGrace
+                                ? { label: 'Live (7-Day Grace Window)', tone: 'text-amber-400' }
+                                : isSuspended
+                                ? { label: 'Offline: Suspended by Admin', tone: 'text-rose-400' }
+                                : site.subscriptionStatus === 'cancelled'
+                                ? { label: 'Offline: Cancelled by Merchant', tone: 'text-slate-400' }
+                                : hasPendingReq || site.paymentStatus === 'pending_review'
+                                ? { label: 'Offline: Pending Payment Review', tone: 'text-amber-400' }
+                                : site.paymentStatus === 'failed'
+                                ? { label: 'Offline: Payment Rejected', tone: 'text-rose-400' }
+                                : site.paymentStatus !== 'paid'
+                                ? { label: 'Offline: Awaiting ৳600 Payment', tone: 'text-amber-400' }
+                                : { label: 'Offline: Paid — Unpublished', tone: 'text-blue-400' };
+
+                            return (
+                              <div className="space-y-1">
+                                <span
+                                  className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold ${
+                                    site.deploymentStatus === 'live'
+                                      ? 'bg-blue-950 text-blue-300'
+                                      : 'bg-slate-800 text-slate-400'
+                                  }`}
+                                >
+                                  {site.deploymentStatus.toUpperCase()}
+                                </span>
+                                <span className={`block text-[10px] font-medium ${diagnostic.tone}`}>
+                                  {diagnostic.label}
+                                </span>
+                              </div>
+                            );
+                          })()}
                         </td>
 
                         <td className="py-3.5 px-4 text-slate-300 font-mono text-[11px]">
@@ -638,18 +859,30 @@ export const AdminDashboardPage: React.FC = () => {
 
                             {isSuspended ? (
                               <button
-                                onClick={() => reactivateSubscribedWebsite(site.id)}
-                                className="px-2.5 py-1 rounded-md bg-emerald-900/60 hover:bg-emerald-800 text-emerald-200 text-[11px] font-semibold transition-colors flex items-center gap-1"
-                                title="Reactivate website"
+                                disabled={site.paymentStatus !== 'paid'}
+                                onClick={() => {
+                                  if (site.paymentStatus !== 'paid') return;
+                                  setLifecycleReason('');
+                                  setLifecycleModal({ site, action: 'reactivate' });
+                                }}
+                                className="px-2.5 py-1 rounded-md bg-emerald-900/60 hover:bg-emerald-800 disabled:opacity-40 disabled:cursor-not-allowed text-emerald-200 text-[11px] font-semibold transition-colors flex items-center gap-1"
+                                title={
+                                  site.paymentStatus === 'paid'
+                                    ? 'Reactivate website (requires audit reason)'
+                                    : 'Requires an approved payment request before activation'
+                                }
                               >
                                 <PlayCircle className="w-3 h-3" />
                                 <span>Activate</span>
                               </button>
                             ) : (
                               <button
-                                onClick={() => suspendSubscribedWebsite(site.id, 'Administrative suspension')}
+                                onClick={() => {
+                                  setLifecycleReason('');
+                                  setLifecycleModal({ site, action: 'suspend' });
+                                }}
                                 className="px-2.5 py-1 rounded-md bg-amber-900/60 hover:bg-amber-800 text-amber-200 text-[11px] font-semibold transition-colors flex items-center gap-1"
-                                title="Suspend website"
+                                title="Suspend website (requires audit reason)"
                               >
                                 <PauseCircle className="w-3 h-3" />
                                 <span>Suspend</span>
@@ -657,12 +890,37 @@ export const AdminDashboardPage: React.FC = () => {
                             )}
 
                             <button
-                              onClick={() => renewSubscribedWebsite(site.id)}
-                              className="px-2.5 py-1 rounded-md bg-blue-900/60 hover:bg-blue-800 text-blue-200 text-[11px] font-semibold transition-colors flex items-center gap-1"
-                              title="Extend subscription 30 days"
+                              disabled={site.paymentStatus !== 'paid'}
+                              onClick={() => {
+                                if (site.paymentStatus !== 'paid') return;
+                                setLifecycleReason('');
+                                setLifecycleModal({ site, action: 'renew' });
+                              }}
+                              className="px-2.5 py-1 rounded-md bg-blue-900/60 hover:bg-blue-800 disabled:opacity-40 disabled:cursor-not-allowed text-blue-200 text-[11px] font-semibold transition-colors flex items-center gap-1"
+                              title={
+                                site.paymentStatus === 'paid'
+                                  ? 'Extend verified paid subscription 30 days (requires audit reason)'
+                                  : 'Requires an approved payment request before renewal'
+                              }
                             >
                               <RefreshCw className="w-3 h-3" />
                               <span>Renew</span>
+                            </button>
+
+                            <button
+                              disabled={hasPaymentHistory}
+                              onClick={() => {
+                                if (hasPaymentHistory) return;
+                                setWebsiteToDelete(site);
+                              }}
+                              className="px-2 py-1 rounded-md bg-rose-950/60 hover:bg-rose-900 disabled:opacity-30 disabled:cursor-not-allowed text-rose-300 text-[11px] font-semibold transition-colors flex items-center gap-1"
+                              title={
+                                hasPaymentHistory
+                                  ? 'Cannot delete website with payment history; suspend instead to preserve financial audit records'
+                                  : 'Permanently delete unpaid draft website'
+                              }
+                            >
+                              <Trash2 className="w-3 h-3" />
                             </button>
                           </div>
                         </td>
@@ -671,6 +929,100 @@ export const AdminDashboardPage: React.FC = () => {
                   })}
               </tbody>
             </table>
+          </div>
+
+          {/* Immutable Website Lifecycle Audit Trail */}
+          <div className="rounded-xl bg-slate-900 border border-slate-800 overflow-hidden text-xs">
+            <div className="p-4 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <FileText className="w-4 h-4 text-blue-400" />
+                <div>
+                  <h3 className="text-sm font-bold text-white">Immutable Website Lifecycle Audit Log</h3>
+                  <p className="text-[11px] text-slate-400">
+                    Append-only PostgreSQL audit trail of administrative suspend, reactivate, and verified renewal actions.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => void refreshWebsiteLifecycleAuditLogs()}
+                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-[11px] flex items-center gap-1.5 self-start sm:self-auto cursor-pointer"
+              >
+                <RefreshCw className="w-3 h-3" />
+                <span>Refresh Audit Log</span>
+              </button>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left">
+                <thead className="bg-slate-800/60 border-b border-slate-800 text-slate-400 font-semibold">
+                  <tr>
+                    <th className="py-2.5 px-4">Timestamp</th>
+                    <th className="py-2.5 px-4">Website</th>
+                    <th className="py-2.5 px-4">Action</th>
+                    <th className="py-2.5 px-4">Status Transition</th>
+                    <th className="py-2.5 px-4">Verified Payment</th>
+                    <th className="py-2.5 px-4">Admin</th>
+                    <th className="py-2.5 px-4">Reason</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800">
+                  {websiteLifecycleAuditLogs.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="py-6 text-center text-slate-500">
+                        No lifecycle audit events recorded yet.
+                      </td>
+                    </tr>
+                  ) : (
+                    websiteLifecycleAuditLogs.map((log) => {
+                      const matchedSite = subscribedWebsites.find((w) => w.id === log.websiteId);
+                      return (
+                        <tr key={log.id} className="hover:bg-slate-800/40 transition-colors">
+                          <td className="py-3 px-4 font-mono text-[11px] text-slate-400 whitespace-nowrap">
+                            {new Date(log.createdAt).toLocaleString()}
+                          </td>
+                          <td className="py-3 px-4">
+                            <span className="font-semibold text-white block">
+                              {matchedSite?.businessName || `${log.websiteId.slice(0, 8)}...`}
+                            </span>
+                            {matchedSite && (
+                              <span className="text-[10px] font-mono text-blue-400">{matchedSite.fullDomainUrl}</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4">
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                log.action === 'suspend'
+                                  ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                                  : log.action === 'reactivate'
+                                  ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                                  : 'bg-blue-950 text-blue-300 border border-blue-800'
+                              }`}
+                            >
+                              {log.action}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 font-mono text-[11px] text-slate-300">
+                            {(log.previousStatus || '—')} → {(log.newStatus || '—')}
+                          </td>
+                          <td className="py-3 px-4 font-mono text-[11px] text-slate-400">
+                            {log.verifiedPaymentRequestId
+                              ? `${log.verifiedPaymentRequestId.slice(0, 8)}...`
+                              : '—'}
+                          </td>
+                          <td className="py-3 px-4 font-mono text-[11px] text-slate-400">
+                            {log.adminId.slice(0, 8)}...
+                          </td>
+                          <td className="py-3 px-4 text-slate-300 max-w-xs truncate" title={log.reason}>
+                            {log.reason}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}
@@ -1001,7 +1353,7 @@ export const AdminDashboardPage: React.FC = () => {
           isOpen={!!previewingWebsite}
           onClose={() => setPreviewingWebsite(null)}
           title={`Website Preview: ${previewingWebsite.businessName}`}
-          description={`Assigned Subdomain: ${previewingWebsite.fullDomainUrl} • Status: ${previewingWebsite.subscriptionStatus.toUpperCase()}`}
+          description={`GoAMAAS Website (৳${previewingWebsite.monthlyFee}/mo) • Subdomain: ${previewingWebsite.fullDomainUrl}${previewingWebsite.customDomain ? ` • Custom Domain: ${previewingWebsite.customDomain}` : ''} • Status: ${previewingWebsite.subscriptionStatus.toUpperCase()}`}
           maxWidth="xl"
         >
           <div className="space-y-4">
@@ -1050,6 +1402,112 @@ export const AdminDashboardPage: React.FC = () => {
           </div>
         </Modal>
       )}
+
+      {/* MODAL 3: Audited Website Lifecycle Action Confirmation */}
+      <Modal
+        isOpen={!!lifecycleModal}
+        onClose={() => {
+          setLifecycleModal(null);
+          setLifecycleReason('');
+        }}
+        title={
+          lifecycleModal?.action === 'suspend'
+            ? 'Suspend Subscribed Website'
+            : lifecycleModal?.action === 'reactivate'
+            ? 'Reactivate Subscribed Website'
+            : 'Renew Verified Website Subscription'
+        }
+        description={
+          lifecycleModal
+            ? `${lifecycleModal.site.businessName} (${lifecycleModal.site.fullDomainUrl}) • Action is recorded in the immutable admin lifecycle audit log.`
+            : undefined
+        }
+        maxWidth="md"
+      >
+        {lifecycleModal && (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const cleanReason = lifecycleReason.trim();
+              if (!cleanReason) {
+                showToast('Please provide an administrative reason for the audit log.', 'warning');
+                return;
+              }
+              const { site, action } = lifecycleModal;
+              setLifecycleModal(null);
+              setLifecycleReason('');
+              if (action === 'suspend') {
+                suspendSubscribedWebsite(site.id, cleanReason);
+              } else if (action === 'reactivate') {
+                reactivateSubscribedWebsite(site.id, cleanReason);
+              } else {
+                renewSubscribedWebsite(site.id, cleanReason);
+              }
+            }}
+            className="space-y-4 text-xs"
+          >
+            <p className="text-slate-400 leading-relaxed">
+              Provide a clear administrative reason for this{' '}
+              <strong className="text-white uppercase">{lifecycleModal.action}</strong> action. Your administrator ID,
+              target website, action, reason, and timestamp will be recorded permanently.
+            </p>
+            <div>
+              <label className="block font-semibold text-slate-300 mb-1">Audit Reason *</label>
+              <textarea
+                rows={3}
+                required
+                value={lifecycleReason}
+                onChange={(e) => setLifecycleReason(e.target.value)}
+                placeholder={
+                  lifecycleModal.action === 'suspend'
+                    ? 'e.g. Policy compliance review or billing hold...'
+                    : lifecycleModal.action === 'reactivate'
+                    ? 'e.g. Compliance review cleared; verified payment on file...'
+                    : 'e.g. Verified 30-day cycle extension against approved payment...'
+                }
+                className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-white"
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setLifecycleModal(null);
+                  setLifecycleReason('');
+                }}
+                className="px-4 py-2 rounded-lg bg-slate-800 text-slate-300 font-semibold text-xs cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={!lifecycleReason.trim()}
+                className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold text-xs cursor-pointer"
+              >
+                Confirm & Log Action
+              </button>
+            </div>
+          </form>
+        )}
+      </Modal>
+
+      <ConfirmDialog
+        isOpen={!!websiteToDelete}
+        onClose={() => setWebsiteToDelete(null)}
+        onConfirm={() => {
+          if (!websiteToDelete) return;
+          const targetId = websiteToDelete.id;
+          void adminDeleteSubscribedWebsite(targetId);
+        }}
+        title="Delete Unpaid Website Record"
+        message={
+          websiteToDelete
+            ? `Are you sure you want to permanently delete "${websiteToDelete.businessName}" (${websiteToDelete.fullDomainUrl})? Websites with payment history cannot be deleted.`
+            : ''
+        }
+        confirmLabel="Delete Website"
+        isDestructive
+      />
     </div>
   );
 };

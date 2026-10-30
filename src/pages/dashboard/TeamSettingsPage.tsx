@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import { TeamMember, Store } from '../../types';
 import {
@@ -38,6 +38,14 @@ export const TeamSettingsPage: React.FC = () => {
   const [storeAddress, setStoreAddress] = useState(activeStore?.address || '');
   const [storeCurrency, setStoreCurrency] = useState(activeStore?.currency || '৳');
 
+  useEffect(() => {
+    setStoreName(activeStore?.name || '');
+    setStoreCategory(activeStore?.category || '');
+    setStorePhone(activeStore?.phone || '');
+    setStoreAddress(activeStore?.address || '');
+    setStoreCurrency(activeStore?.currency || '৳');
+  }, [activeStore?.id, activeStore?.name, activeStore?.category, activeStore?.phone, activeStore?.address, activeStore?.currency]);
+
   // Invite modal
   const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
   const [inviteName, setInviteName] = useState('');
@@ -75,7 +83,7 @@ export const TeamSettingsPage: React.FC = () => {
       name: inviteName,
       email: inviteEmail,
       role: inviteRole,
-      status: 'active',
+      status: 'invited',
     });
     setIsInviteModalOpen(false);
     setInviteName('');
@@ -184,7 +192,7 @@ export const TeamSettingsPage: React.FC = () => {
                 <div>
                   <button
                     type="button"
-                    onClick={() => showToast('Store logo updated (Demo)', 'info')}
+                    onClick={() => showToast('Logo storage bucket is not configured for this workspace yet.', 'info')}
                     className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors flex items-center gap-1.5"
                   >
                     <Upload className="w-3.5 h-3.5" />
@@ -491,7 +499,7 @@ export const TeamSettingsPage: React.FC = () => {
                 type="submit"
                 className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold"
               >
-                Change Password (Demo)
+                Update Password
               </button>
             </div>
           </form>
@@ -562,7 +570,7 @@ export const TeamSettingsPage: React.FC = () => {
               type="submit"
               className="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold"
             >
-              Send Invitation (Demo)
+              Send Invitation
             </button>
           </div>
         </form>

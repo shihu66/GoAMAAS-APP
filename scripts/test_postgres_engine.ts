@@ -8,7 +8,15 @@ async function runPostgresSecurityTests() {
 
   // 1. Setup Supabase Auth Mock Environment in PostgreSQL
   await db.exec(`
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'anon') THEN CREATE ROLE anon; END IF;
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'authenticated') THEN CREATE ROLE authenticated; END IF;
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'service_role') THEN CREATE ROLE service_role; END IF;
+    END $$;
     CREATE SCHEMA IF NOT EXISTS auth;
+    GRANT USAGE ON SCHEMA auth TO authenticated, anon, service_role;
+    GRANT ALL ON ALL TABLES IN SCHEMA auth TO authenticated, anon, service_role;
+    GRANT ALL ON ALL ROUTINES IN SCHEMA auth TO authenticated, anon, service_role;
     
     CREATE TABLE IF NOT EXISTS auth.users (
       id UUID PRIMARY KEY,
@@ -21,7 +29,7 @@ async function runPostgresSecurityTests() {
     CREATE TABLE IF NOT EXISTS public._test_session (
       current_user_id UUID,
       current_email TEXT,
-      current_role TEXT DEFAULT 'authenticated'
+      session_role TEXT DEFAULT 'authenticated'
     );
     INSERT INTO public._test_session VALUES (NULL, NULL, 'authenticated');
 
@@ -34,21 +42,40 @@ async function runPostgresSecurityTests() {
     $$ LANGUAGE sql STABLE;
 
     CREATE OR REPLACE FUNCTION auth.role() RETURNS TEXT AS $$
-      SELECT current_role FROM public._test_session LIMIT 1;
+      SELECT session_role FROM public._test_session LIMIT 1;
+    $$ LANGUAGE sql STABLE;
+
+    CREATE OR REPLACE FUNCTION auth.jwt() RETURNS JSONB AS $$
+      SELECT COALESCE(NULLIF(current_setting('request.jwt.claims', true), '')::jsonb, '{}'::jsonb);
     $$ LANGUAGE sql STABLE;
   `);
 
   console.log('[OK] PostgreSQL mock auth environment initialized.');
 
-  // 2. Load and Apply Migration SQL
+  // 2. Load and Apply base schema.sql then Migration SQL
+  const schemaPath = path.resolve("supabase/schema.sql");
+  const schemaSql = fs.readFileSync(schemaPath, 'utf8').replace('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";', '');
+  await db.exec(schemaSql);
+  console.log("[OK] Base schema applied successfully to PostgreSQL.");
+  await db.exec(`
+    GRANT ALL ON ALL TABLES IN SCHEMA public TO authenticated, anon, service_role;
+    GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO authenticated, anon, service_role;
+    GRANT ALL ON ALL ROUTINES IN SCHEMA public TO authenticated, anon, service_role;
+    ALTER TABLE public.products FORCE ROW LEVEL SECURITY;
+    ALTER TABLE public.stores FORCE ROW LEVEL SECURITY;
+    ALTER TABLE public.store_members FORCE ROW LEVEL SECURITY;
+    ALTER TABLE public.subscribed_websites FORCE ROW LEVEL SECURITY;
+    ALTER TABLE public.profiles FORCE ROW LEVEL SECURITY;
+  `);
+
   const migrationPath = path.resolve('supabase/migrations/20261010_security_and_rls_hardening.sql');
-  const migrationSql = fs.readFileSync(migrationPath, 'utf8');
+  const migrationSql = fs.readFileSync(migrationPath, 'utf8').replace('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";', '');
 
   try {
     await db.exec(migrationSql);
     console.log('[OK] Migration applied successfully to PostgreSQL.');
   } catch (err: any) {
-    console.error('Migration failed to execute on PostgreSQL:', err);
+    console.error('Migration failed to execute on PostgreSQL:', err.message, 'pos:', err.position, 'where:', err.where);
     process.exit(1);
   }
 
@@ -69,7 +96,21 @@ async function runPostgresSecurityTests() {
 
   // Helper to switch simulated user session
   async function asUser(userId: string | null, email: string | null = null, role: string = 'authenticated') {
-    await db.exec(`UPDATE public._test_session SET current_user_id = ${userId ? `'${userId}'::uuid` : 'NULL'}, current_email = ${email ? `'${email}'` : 'NULL'}, current_role = '${role}';`);
+    await db.exec(`RESET ROLE;`);
+    await db.exec(`
+      UPDATE public._test_session 
+      SET current_user_id = ${userId ? `'${userId}'::uuid` : 'NULL'}, 
+          current_email = ${email ? `'${email}'` : 'NULL'}, 
+          session_role = '${role}';
+      SELECT set_config('request.jwt.claim.role', '${role}', false);
+      SELECT set_config('request.jwt.claim.sub', ${userId ? `'${userId}'` : "''"}, false);
+      SELECT set_config('request.jwt.claims', json_build_object('sub', ${userId ? `'${userId}'` : "NULL"}, 'role', '${role}')::text, false);
+    `);
+    if (role === 'authenticated' || role === 'anon') {
+      await db.exec(`SET ROLE ${role};`);
+    } else {
+      await db.exec(`RESET ROLE;`);
+    }
   }
 
   const userMerchantA = '11111111-1111-1111-1111-111111111111';
@@ -78,6 +119,7 @@ async function runPostgresSecurityTests() {
   const userAdmin = '99999999-9999-9999-9999-999999999999';
 
   // Seed Users into auth.users (trigger creates profiles)
+  await asUser(null, null, 'service_role');
   await db.exec(`
     INSERT INTO auth.users (id, email, raw_user_meta_data) VALUES
       ('${userMerchantA}', 'merchantA@test.com', '{"full_name": "Merchant A", "role": "admin"}'::jsonb),

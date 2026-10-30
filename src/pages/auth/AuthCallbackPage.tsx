@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams, Link } from 'react-router-dom';
-import { supabase, isSupabaseConfigured, getUserProfile, upsertUserProfile } from '../../lib/supabase';
+import { supabase, isSupabaseConfigured, UUID_REGEX, getUserProfile, upsertUserProfile } from '../../lib/supabase';
 import { useApp } from '../../context/AppContext';
 import { Loader2, AlertCircle, CheckCircle2, ArrowRight } from 'lucide-react';
 
@@ -106,13 +106,16 @@ export const AuthCallbackPage: React.FC = () => {
           onboardingCompleted = Boolean(profile.onboarding_completed);
         }
 
+        const candidateStoreId = String(profile?.store_id || userMeta.store_id || '').trim();
+        const resolvedStoreId = UUID_REGEX.test(candidateStoreId) ? candidateStoreId : '';
+
         // Sync into AppContext
         setAuthenticatedUser({
           id: userId,
           name: fullName,
           email: email,
           role: (profile?.role || 'merchant'),
-          storeId: profile?.store_id || userMeta.store_id || `store-${userId.substring(0, 8)}`,
+          storeId: resolvedStoreId,
         });
 
         setStatus('success');

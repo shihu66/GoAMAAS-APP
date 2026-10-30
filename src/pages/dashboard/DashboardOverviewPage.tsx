@@ -203,7 +203,7 @@ export const DashboardOverviewPage: React.FC = () => {
               Independent 7-Day Free Trials Available
             </span>
             <span className="text-xs text-slate-500 dark:text-slate-400">
-              Every GoAMAAS service (Dashboard, AI Automations, Landing Page Builder, Website) has its own independent 7-day free trial.
+              Eligible GoAMAAS services (Dashboard Plans, AI Automations, Landing Page Builder) include an independent 7-day free trial.
             </span>
           </div>
         </div>

@@ -38,10 +38,21 @@ async function test() {
   await db.exec(schema);
   console.log('[OK] schema.sql passed cleanly!');
 
-  console.log('[2/3] Executing migration in one go (idempotency check)...');
-  const mig = fs.readFileSync('supabase/migrations/20261010_security_and_rls_hardening.sql', 'utf8').replace('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";', '');
-  await db.exec(mig);
-  console.log('[OK] migration passed cleanly!');
+  console.log('[2/3] Executing full migration chain in chronological order (idempotency check)...');
+  const migrationFiles = [
+    'supabase/migrations/20261010_security_and_rls_hardening.sql',
+    'supabase/migrations/20261015_service_trials_system.sql',
+    'supabase/migrations/20261015_complete_saas_website_builder_and_payments.sql',
+    'supabase/migrations/20261017_public_website_resolution_and_publishing.sql',
+    'supabase/migrations/20261018_fix_admin_approve_payment_request_safety.sql',
+    'supabase/migrations/20261024_harden_payment_requests_ownership_and_uniqueness.sql',
+    'supabase/migrations/20261026_stores_gateway_pricing_and_admin_hardening.sql',
+  ];
+  for (const migPath of migrationFiles) {
+    const mig = fs.readFileSync(migPath, 'utf8').replace(/CREATE EXTENSION IF NOT EXISTS "uuid-ossp";/g, '');
+    await db.exec(mig);
+  }
+  console.log(`[OK] all ${migrationFiles.length} migrations replayed cleanly!`);
 
   console.log('[3/3] Executing 14 security verification scenarios...');
   const suite = fs.readFileSync('supabase/tests/security_verification_tests.sql', 'utf8');
