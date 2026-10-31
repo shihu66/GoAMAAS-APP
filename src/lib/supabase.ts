@@ -17,8 +17,10 @@ import {
   ServicePricingCatalogEntry,
   WebsiteLifecycleAuditLog,
   WebsiteEditableFields,
+  AdminPaymentApprovalRpcResult,
 } from '../types';
 import { normalizeDashboardPlanId } from '../data/pricingConfig';
+import { validateManualPaymentSubmissionInput } from './paymentWorkflow';
 
 export const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -835,22 +837,23 @@ export async function createPaymentRequestInDb(params: {
       };
     }
 
+    const validation = validateManualPaymentSubmissionInput({
+      paymentMethod: params.paymentMethod,
+      transactionId: params.transactionId,
+      bankReference: params.bankReference,
+      senderNumber: params.senderNumber,
+      amount: params.amount,
+      serviceId: params.serviceId,
+    });
+    if (!validation.valid) {
+      return {
+        data: null,
+        error: new Error(validation.error || 'Invalid payment submission details.'),
+      };
+    }
+
     const cleanServiceId = (params.serviceId || '').trim();
-    if (!cleanServiceId) {
-      return {
-        data: null,
-        error: new Error('Target service ID is required to submit a payment request.'),
-      };
-    }
-
     const submittedAmount = Number(params.amount);
-    if (!Number.isFinite(submittedAmount) || submittedAmount <= 0) {
-      return {
-        data: null,
-        error: new Error('Invalid payment amount: a positive amount is required.'),
-      };
-    }
-
     let resolvedServiceId = cleanServiceId;
     let resolvedPlanTier = (params.planTier || '').trim();
 
@@ -1072,6 +1075,12 @@ export async function createPaymentRequestInDb(params: {
     const validStoreId =
       params.storeId && UUID_REGEX.test(params.storeId.trim()) ? params.storeId.trim() : null;
 
+    const canonicalTrxId = validation.normalizedReference;
+    const canonicalBankRef =
+      params.paymentMethod === 'Bank Transfer'
+        ? validation.normalizedReference
+        : (params.bankReference || '').trim().toUpperCase() || null;
+
     const { data, error } = await supabase
       .from('payment_requests')
       .insert({
@@ -1087,11 +1096,11 @@ export async function createPaymentRequestInDb(params: {
         amount: submittedAmount,
         currency: '৳',
         payment_method: params.paymentMethod,
-        transaction_id: params.transactionId || null,
-        sender_number: params.senderNumber || null,
-        bank_name: params.bankName || null,
-        bank_account_name: params.bankAccountName || null,
-        bank_reference: params.bankReference || null,
+        transaction_id: canonicalTrxId,
+        sender_number: validation.normalizedSender,
+        bank_name: (params.bankName || '').trim() || null,
+        bank_account_name: (params.bankAccountName || '').trim() || null,
+        bank_reference: canonicalBankRef,
         status: 'pending',
       })
       .select('*')
@@ -1099,7 +1108,7 @@ export async function createPaymentRequestInDb(params: {
 
     if (error) {
       if (error.code === '23505') {
-        const errMsg = (error.message || '').toLowerCase();
+        const errMsg = `${error.message || ''} ${error.details || ''}`.toLowerCase();
         if (errMsg.includes('uq_payment_requests_pending_user_service')) {
           return {
             data: null,
@@ -1112,12 +1121,14 @@ export async function createPaymentRequestInDb(params: {
         ) {
           return {
             data: null,
-            error: new Error('This transaction reference has already been submitted and is pending or approved.'),
+            error: new Error(
+              `Transaction ID "${canonicalTrxId}" has already been submitted and is pending or approved.`
+            ),
           };
         }
         return {
           data: null,
-          error: new Error('Duplicate payment request or transaction reference detected.'),
+          error: new Error('Duplicate payment request or Transaction ID detected.'),
         };
       }
       return { data: null, error: new Error(error.message || 'Failed to submit payment request to database') };
@@ -1134,29 +1145,94 @@ export async function createPaymentRequestInDb(params: {
   }
 }
 
-export async function adminApprovePaymentInDb(requestId: string, notes?: string): Promise<{ success: boolean; error: Error | null }> {
+export async function fetchPaymentRequestByIdFromDb(
+  requestId: string
+): Promise<{ data: RawPaymentRequestRow | null; error: Error | null }> {
   if (!isSupabaseConfigured || !supabase) {
-    return { success: false, error: new Error('Supabase not configured') };
+    return { data: null, error: new Error('Supabase not configured') };
+  }
+  const cleanId = (requestId || '').trim();
+  if (!UUID_REGEX.test(cleanId)) {
+    return { data: null, error: new Error('Invalid payment request ID format') };
+  }
+  try {
+    const { data, error } = await supabase
+      .from('payment_requests')
+      .select('*')
+      .eq('id', cleanId)
+      .maybeSingle();
+    if (error) {
+      return { data: null, error: new Error(error.message || 'Failed to load payment request') };
+    }
+    return { data: (data as RawPaymentRequestRow | null) || null, error: null };
+  } catch (err: unknown) {
+    return {
+      data: null,
+      error: err instanceof Error ? err : new Error('Failed to load payment request'),
+    };
+  }
+}
+
+export async function adminApprovePaymentInDb(
+  requestId: string,
+  notes?: string
+): Promise<AdminPaymentApprovalRpcResult> {
+  if (!isSupabaseConfigured || !supabase) {
+    const err = new Error('Supabase not configured');
+    return { success: false, message: err.message, error: err };
   }
   const cleanRequestId = (requestId || '').trim();
   if (!cleanRequestId || !UUID_REGEX.test(cleanRequestId)) {
-    return { success: false, error: new Error('Invalid payment request ID format') };
+    const err = new Error('Invalid payment request ID format');
+    return { success: false, code: 'INVALID_REQUEST_ID', message: err.message, error: err };
   }
   try {
     const { data, error } = await supabase.rpc('admin_approve_payment_request', {
       p_request_id: cleanRequestId,
-      p_admin_notes: notes || null,
+      p_admin_notes: (notes || '').trim() || null,
     });
     if (error) {
-      return { success: false, error: new Error(error.message || 'RPC admin_approve_payment_request failed') };
+      const err = new Error(error.message || 'RPC admin_approve_payment_request failed');
+      return { success: false, code: 'RPC_ERROR', message: err.message, error: err };
     }
-    const res = data as { success?: boolean; message?: string; code?: string } | null;
+    const res = data as {
+      success?: boolean;
+      message?: string;
+      code?: string;
+      requestId?: string;
+      request_id?: string;
+      website_id?: string;
+      auto_published?: boolean;
+      deployment_status?: SubscribedWebsite['deploymentStatus'];
+      current_period_end?: string;
+      grace_period_end?: string;
+    } | null;
+
     if (!res || typeof res !== 'object' || !res.success) {
-      return { success: false, error: new Error(res?.message || 'Payment approval failed') };
+      const msg = res?.message || 'Payment approval failed';
+      return {
+        success: false,
+        code: res?.code,
+        message: msg,
+        error: new Error(msg),
+      };
     }
-    return { success: true, error: null };
+
+    return {
+      success: true,
+      code: res.code || 'APPROVED',
+      message: res.message || 'Payment approved successfully.',
+      requestId: res.request_id || res.requestId || cleanRequestId,
+      websiteId: res.website_id,
+      autoPublished: res.auto_published,
+      deploymentStatus: res.deployment_status,
+      currentPeriodEnd: res.current_period_end,
+      gracePeriodEnd: res.grace_period_end,
+      error: null,
+    };
   } catch (err: unknown) {
-    return { success: false, error: err instanceof Error ? err : new Error('Failed to approve payment') };
+    const error = err instanceof Error ? err : new Error('Failed to approve payment');
+    return { success: false, code: 'EXCEPTION', message: error.message, error };
   }
 }
 
@@ -1168,10 +1244,14 @@ export async function adminRejectPaymentInDb(requestId: string, reason: string):
   if (!cleanRequestId || !UUID_REGEX.test(cleanRequestId)) {
     return { success: false, error: new Error('Invalid payment request ID format') };
   }
+  const cleanReason = (reason || '').trim();
+  if (!cleanReason) {
+    return { success: false, error: new Error('Please provide a reason for rejecting this payment request.') };
+  }
   try {
     const { data, error } = await supabase.rpc('admin_reject_payment_request', {
       p_request_id: cleanRequestId,
-      p_reason: reason,
+      p_reason: cleanReason,
     });
     if (error) {
       return { success: false, error: new Error(error.message || 'RPC admin_reject_payment_request failed') };
@@ -1973,15 +2053,52 @@ export async function fetchPublishedWebsiteBySubdomain(
   }
 }
 
+export async function fetchSubscribedWebsiteByIdFromDb(
+  websiteId: string
+): Promise<{ data: SubscribedWebsite | null; error: Error | null }> {
+  if (!isSupabaseConfigured || !supabase) {
+    return { data: null, error: new Error('Supabase is not configured') };
+  }
+  const cleanId = (websiteId || '').trim();
+  if (!UUID_REGEX.test(cleanId)) {
+    return { data: null, error: new Error('Invalid website ID format') };
+  }
+  try {
+    const { data, error } = await supabase
+      .from('subscribed_websites')
+      .select('*')
+      .eq('id', cleanId)
+      .maybeSingle();
+
+    if (error) {
+      return { data: null, error: new Error(error.message || 'Failed to load website record') };
+    }
+    if (!data) {
+      return { data: null, error: null };
+    }
+    return { data: mapDatabaseRowToSubscribedWebsite(data), error: null };
+  } catch (err: unknown) {
+    return {
+      data: null,
+      error: err instanceof Error ? err : new Error('Failed to load website record'),
+    };
+  }
+}
+
 export async function publishClientWebsiteInDb(
   websiteId: string
 ): Promise<{ success: boolean; message: string; error: Error | null }> {
   if (!isSupabaseConfigured || !supabase) {
     return { success: true, message: 'Website published locally.', error: null };
   }
+  const cleanId = (websiteId || '').trim();
+  if (!UUID_REGEX.test(cleanId)) {
+    const err = new Error('Invalid website ID format');
+    return { success: false, message: err.message, error: err };
+  }
   try {
     const { data: rpcData, error: rpcError } = await supabase.rpc('publish_client_website', {
-      p_website_id: websiteId,
+      p_website_id: cleanId,
     });
 
     if (!rpcError && rpcData) {

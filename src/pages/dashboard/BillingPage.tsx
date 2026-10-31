@@ -17,6 +17,7 @@ import {
   Info,
   Layers,
   RefreshCw,
+  XCircle,
 } from 'lucide-react';
 import {
   DASHBOARD_SUBSCRIPTION_PLANS,
@@ -29,6 +30,7 @@ import {
   resolveCatalogPlanState,
 } from '../../data/pricingConfig';
 import { isSupabaseConfigured } from '../../lib/supabase';
+import { isWebsiteTrulyLive } from '../../lib/paymentWorkflow';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { TrialStatusBadge } from '../../components/ui/TrialStatusBadge';
@@ -37,6 +39,7 @@ import { ManualPaymentModal } from '../../components/payment/ManualPaymentModal'
 export const BillingPage: React.FC = () => {
   const navigate = useNavigate();
   const {
+    user,
     currentPlan,
     trialDaysLeft,
     invoices,
@@ -49,6 +52,10 @@ export const BillingPage: React.FC = () => {
     serviceTrials,
     getServiceAccess,
     activateServiceTrial,
+    paymentRequests,
+    isPaymentsLoading,
+    refreshPaymentRequests,
+    refreshSubscribedWebsites,
     paymentGatewayConfigs,
     servicePricingCatalog,
     isPricingCatalogLoading,
@@ -61,17 +68,21 @@ export const BillingPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'automations' | 'websites' | 'webSubscription'>('dashboard');
 
   const myWebsite = subscribedWebsites.find((w) => w.storeId === activeStore?.id) || subscribedWebsites[0];
+  const myPaymentRequests = paymentRequests
+    .filter((r) => !user?.id || r.userId === user.id)
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
   // Confirmation dialogs & verified payment modal payload
   const [selectedDashboardPlan, setSelectedDashboardPlan] = useState<DashboardPlanConfig | null>(null);
   const [selectedAutoPackage, setSelectedAutoPackage] = useState<AutomationPackageConfig | null>(null);
   const [isCancelDialogOpen, setIsCancelDialogOpen] = useState(false);
   const [checkoutPayload, setCheckoutPayload] = useState<{
-    serviceType: 'dashboard_plan' | 'ai_automation';
+    serviceType: 'website_subscription' | 'website_package' | 'dashboard_plan' | 'ai_automation';
     serviceId: string;
     serviceName: string;
     planTier: string;
     amount: number;
+    allowWebsiteSelection?: boolean;
   } | null>(null);
 
   const isCatalogPending = isSupabaseConfigured && isPricingCatalogLoading && !isPricingCatalogLoaded;
@@ -756,14 +767,16 @@ export const BillingPage: React.FC = () => {
                     </span>
                     <span
                       className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                        myWebsite.paymentStatus === 'paid' && myWebsite.subscriptionStatus === 'active'
+                        isWebsiteTrulyLive(myWebsite)
                           ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                          : 'bg-amber-500/20 text-amber-300 border border-amber-500/30 animate-pulse'
+                          : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
                       }`}
                     >
-                      {myWebsite.paymentStatus === 'paid'
-                        ? myWebsite.subscriptionStatus.replace('_', ' ')
-                        : myWebsite.paymentStatus.replace('_', ' ')}
+                      {isWebsiteTrulyLive(myWebsite)
+                        ? 'Live'
+                        : myWebsite.paymentStatus === 'paid'
+                        ? 'Paid · Unpublished'
+                        : 'Pending Verification'}
                     </span>
                   </div>
                   <h3 className="text-xl font-bold text-white mt-1">
@@ -777,7 +790,7 @@ export const BillingPage: React.FC = () => {
                 </div>
 
                 <div className="text-right sm:border-l sm:border-slate-800 sm:pl-6">
-                  <div className="text-2xl font-black font-mono text-white">
+                  <div className="text-2xl font-black font-mono text-white tabular-nums">
                     ৳{myWebsite.monthlyFee.toLocaleString()}<span className="text-xs text-slate-400 font-sans font-normal"> / month</span>
                   </div>
                   <div className="text-[11px] text-slate-300 mt-0.5">
@@ -808,15 +821,38 @@ export const BillingPage: React.FC = () => {
 
               <div className="flex flex-wrap items-center gap-2 pt-2">
                 <button
-                  onClick={() => navigate('/dashboard/subscribed-website')}
-                  className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center gap-1.5 transition-colors shadow-sm"
+                  type="button"
+                  onClick={() =>
+                    setCheckoutPayload({
+                      serviceType: 'website_subscription',
+                      serviceId: myWebsite.id,
+                      serviceName: `GoAMAAS Website (${myWebsite.fullDomainUrl})`,
+                      planTier: myWebsite.planName || 'GoAMAAS Website',
+                      amount: myWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly,
+                      allowWebsiteSelection: subscribedWebsites.length > 1,
+                    })
+                  }
+                  className="min-h-[44px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
                 >
-                  <Globe className="w-3.5 h-3.5" />
-                  <span>Manage Website & Live Preview</span>
+                  <CreditCard className="w-3.5 h-3.5" />
+                  <span>
+                    {myWebsite.paymentStatus === 'paid'
+                      ? `Renew +30 Days (৳${(myWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly).toLocaleString()})`
+                      : `Submit Payment (৳${(myWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly).toLocaleString()})`}
+                  </span>
                 </button>
                 <button
+                  type="button"
+                  onClick={() => navigate('/dashboard/subscribed-website')}
+                  className="min-h-[44px] px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
+                >
+                  <Globe className="w-3.5 h-3.5" />
+                  <span>Manage Website &amp; Live Preview</span>
+                </button>
+                <button
+                  type="button"
                   onClick={() => navigate('/create-website')}
-                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs flex items-center gap-1.5 transition-colors border border-slate-700"
+                  className="min-h-[44px] px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs flex items-center gap-1.5 transition-colors border border-slate-700 cursor-pointer"
                 >
                   <Sparkles className="w-3.5 h-3.5 text-amber-300" />
                   <span>Build Another Website (৳{websiteSubscriptionPlan.priceMonthly.toLocaleString()}/mo)</span>
@@ -979,11 +1015,135 @@ export const BillingPage: React.FC = () => {
         </div>
       </div>
 
+      {/* Manual Payment Submissions & Verification Status */}
+      {myPaymentRequests.length > 0 && (
+        <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
+          <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                Payment Verification Status
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Track submitted bKash, Nagad, and Bank Transfer verification requests
+              </p>
+            </div>
+            <button
+              type="button"
+              disabled={isPaymentsLoading}
+              onClick={() => {
+                void refreshPaymentRequests();
+                void refreshSubscribedWebsites();
+              }}
+              className="min-h-[40px] px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer self-start sm:self-auto"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isPaymentsLoading ? 'animate-spin' : ''}`} />
+              <span>Refresh</span>
+            </button>
+          </div>
+
+          <div className="divide-y divide-slate-100 dark:divide-slate-800">
+            {myPaymentRequests.map((req) => {
+              const statusLabel =
+                req.status === 'pending'
+                  ? 'Pending Verification'
+                  : req.status === 'approved'
+                  ? 'Approved'
+                  : 'Rejected';
+              const hasActivePendingForSameService = myPaymentRequests.some(
+                (other) =>
+                  other.id !== req.id &&
+                  other.serviceType === req.serviceType &&
+                  other.serviceId.trim().toLowerCase() === req.serviceId.trim().toLowerCase() &&
+                  other.status === 'pending'
+              );
+
+              return (
+                <div
+                  key={req.id}
+                  className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                >
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-bold text-slate-900 dark:text-white">
+                        {req.serviceName}
+                      </span>
+                      <span
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold ${
+                          req.status === 'approved'
+                            ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                            : req.status === 'rejected'
+                            ? 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+                            : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                        }`}
+                      >
+                        {req.status === 'approved' ? (
+                          <CheckCircle2 className="w-3 h-3" />
+                        ) : req.status === 'rejected' ? (
+                          <XCircle className="w-3 h-3" />
+                        ) : (
+                          <Clock className="w-3 h-3" />
+                        )}
+                        <span>{statusLabel}</span>
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500 font-mono tabular-nums">
+                      <span>{req.paymentMethod}</span>
+                      <span>·</span>
+                      <span>TrxID: {req.transactionId || req.bankReference || '—'}</span>
+                      {req.senderNumber && (
+                        <>
+                          <span>·</span>
+                          <span>Sender: {req.senderNumber}</span>
+                        </>
+                      )}
+                      <span>·</span>
+                      <span>{new Date(req.createdAt).toLocaleString()}</span>
+                    </div>
+
+                    {req.status === 'rejected' && (
+                      <div className="mt-1.5 p-2.5 rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 text-rose-800 dark:text-rose-200 text-[11px]">
+                        <strong>Rejection Reason:</strong>{' '}
+                        {req.adminNotes || 'Transaction ID or transfer proof could not be verified.'}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0">
+                    <span className="font-mono font-bold text-sm text-slate-900 dark:text-white tabular-nums">
+                      ৳{req.amount.toLocaleString()}
+                    </span>
+
+                    {req.status === 'rejected' && !hasActivePendingForSameService && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setCheckoutPayload({
+                            serviceType: req.serviceType,
+                            serviceId: req.serviceId,
+                            serviceName: req.serviceName,
+                            planTier: req.planTier,
+                            amount: req.amount,
+                          })
+                        }
+                        className="min-h-[40px] px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs cursor-pointer whitespace-nowrap"
+                      >
+                        Resubmit Payment
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Billing Invoices List */}
       <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
         <div className="p-4 border-b border-slate-200 dark:border-slate-800">
           <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-            Billing History & Tax Receipts
+            Billing History &amp; Tax Receipts
           </h3>
           <p className="text-xs text-slate-500 mt-0.5">
             Past monthly subscription statement receipts
@@ -1025,7 +1185,11 @@ export const BillingPage: React.FC = () => {
                           : 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300'
                       }`}
                     >
-                      {inv.status}
+                      {inv.status === 'Paid'
+                        ? 'Approved'
+                        : inv.status === 'Pending'
+                        ? 'Pending Verification'
+                        : 'Rejected'}
                     </span>
                   </td>
                   <td className="py-3.5 px-4 text-right font-sans">
@@ -1178,7 +1342,7 @@ export const BillingPage: React.FC = () => {
         );
       })()}
 
-      {/* Manual Payment Verification Modal for Dashboard Plans & AI Automations */}
+      {/* Manual Payment Verification Modal */}
       {checkoutPayload && (
         <ManualPaymentModal
           isOpen={!!checkoutPayload}
@@ -1188,9 +1352,10 @@ export const BillingPage: React.FC = () => {
           serviceName={checkoutPayload.serviceName}
           planTier={checkoutPayload.planTier}
           amount={checkoutPayload.amount}
+          allowWebsiteSelection={checkoutPayload.allowWebsiteSelection}
           onSuccess={() => {
             showToast(
-              `Payment submitted for ${checkoutPayload.serviceName}! Your plan will activate once verified by AMAAS Admin.`,
+              `Payment submitted for ${checkoutPayload.serviceName}! Pending admin verification.`,
               'success'
             );
             setCheckoutPayload(null);

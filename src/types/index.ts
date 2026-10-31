@@ -210,7 +210,7 @@ export interface Invoice {
   date: string;
   planName: string;
   amount: number;
-  status: 'Paid' | 'Pending';
+  status: 'Paid' | 'Pending' | 'Failed';
   downloadUrl?: string;
 }
 
@@ -582,3 +582,32 @@ export interface WebsiteLifecycleAuditLog {
   createdAt: string;
 }
 
+export interface AdminPaymentApprovalRpcResult {
+  success: boolean;
+  code?: string;
+  message: string;
+  requestId?: string;
+  websiteId?: string;
+  autoPublished?: boolean;
+  deploymentStatus?: SubscribedWebsite['deploymentStatus'];
+  currentPeriodEnd?: string;
+  gracePeriodEnd?: string;
+  error: Error | null;
+}
+
+export interface ApproveAndPublishResult {
+  success: boolean;
+  paymentApproved: boolean;
+  websitePublished: boolean;
+  isWebsiteService: boolean;
+  partialFailure?: boolean;
+  suspendedHold?: boolean;
+  websiteId?: string;
+  subdomain?: string;
+  fullDomainUrl?: string;
+  deploymentStatus?: SubscribedWebsite['deploymentStatus'];
+  subscriptionStatus?: SubscribedWebsite['subscriptionStatus'];
+  paymentStatus?: SubscribedWebsite['paymentStatus'];
+  code?: string;
+  message: string;
+}

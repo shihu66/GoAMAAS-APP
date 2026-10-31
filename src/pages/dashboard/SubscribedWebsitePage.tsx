@@ -53,7 +53,11 @@ import {
   ChevronUp,
   Link2,
   RotateCcw,
+  CheckCircle2,
+  XCircle,
+  RefreshCw,
 } from 'lucide-react';
+import { isWebsiteTrulyLive } from '../../lib/paymentWorkflow';
 
 function createInitialSections(site: SubscribedWebsite, draft?: SubscribedWebsite['draftConfig']): WebsiteSectionConfig[] {
   const sourceSections = draft?.sections ?? site.sections;
@@ -152,9 +156,14 @@ export const SubscribedWebsitePage: React.FC = () => {
     uploadWebsiteAsset,
     requestWebsiteContentUpdate,
     showToast,
+    publishWebsite,
     unpublishWebsite,
     cancelWebsiteSubscription,
     paymentGatewayConfigs,
+    paymentRequests,
+    isPaymentsLoading,
+    refreshPaymentRequests,
+    refreshSubscribedWebsites,
   } = useApp();
 
   const [selectedWebsiteId, setSelectedWebsiteId] = useState<string>('');
@@ -1011,9 +1020,20 @@ export const SubscribedWebsitePage: React.FC = () => {
   const isSuspended = activeWebsite.subscriptionStatus === 'suspended';
   const isCancelled = activeWebsite.subscriptionStatus === 'cancelled';
   const isPaid = activeWebsite.paymentStatus === 'paid';
-  const isLive = activeWebsite.deploymentStatus === 'live';
   const isPublishEligible =
     isPaid && (activeWebsite.subscriptionStatus === 'active' || isGracePeriod);
+  const isLive = isWebsiteTrulyLive(activeWebsite);
+
+  const websitePaymentRequests = paymentRequests
+    .filter(
+      (r) =>
+        (r.serviceType === 'website_subscription' || r.serviceType === 'website_package') &&
+        r.serviceId.trim().toLowerCase() === activeWebsite.id.trim().toLowerCase()
+    )
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  const latestWebsitePayment = websitePaymentRequests[0];
+  const hasPendingWebsitePayment = websitePaymentRequests.some((r) => r.status === 'pending');
 
   // Legacy items not yet migrated to DB products
   const dbIdsSet = new Set(websiteDbProducts.map((p) => p.id));
@@ -1217,10 +1237,165 @@ export const SubscribedWebsitePage: React.FC = () => {
             <button
               type="button"
               onClick={() => setIsPaymentModalOpen(true)}
-              className="px-3.5 py-1.5 rounded-lg bg-rose-600 text-white font-bold text-xs shrink-0 hover:bg-rose-500 cursor-pointer"
+              className="min-h-[44px] px-4 py-2 rounded-lg bg-rose-600 text-white font-bold text-xs shrink-0 hover:bg-rose-500 cursor-pointer"
             >
               Submit Renewal Payment
             </button>
+          </div>
+        )}
+
+        {/* Payment Verification & Instant Publishing Status Banner */}
+        {latestWebsitePayment && (
+          <div
+            className={`p-4 rounded-xl border text-xs space-y-2.5 ${
+              latestWebsitePayment.status === 'pending'
+                ? 'bg-amber-50/80 dark:bg-amber-950/40 border-amber-300 dark:border-amber-800 text-amber-950 dark:text-amber-100'
+                : latestWebsitePayment.status === 'rejected'
+                ? 'bg-rose-50/80 dark:bg-rose-950/40 border-rose-300 dark:border-rose-800 text-rose-950 dark:text-rose-100'
+                : isLive
+                ? 'bg-emerald-50/80 dark:bg-emerald-950/30 border-emerald-300 dark:border-emerald-800 text-emerald-950 dark:text-emerald-100'
+                : 'bg-blue-50/80 dark:bg-blue-950/30 border-blue-300 dark:border-blue-800 text-blue-950 dark:text-blue-100'
+            }`}
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-start gap-2.5">
+                {latestWebsitePayment.status === 'pending' ? (
+                  <Clock className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                ) : latestWebsitePayment.status === 'rejected' ? (
+                  <XCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                )}
+
+                <div className="space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-bold">
+                      Payment Status:{' '}
+                      {latestWebsitePayment.status === 'pending'
+                        ? 'Pending Verification'
+                        : latestWebsitePayment.status === 'approved'
+                        ? 'Approved'
+                        : 'Rejected'}
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-white/80 dark:bg-slate-900/80 font-mono text-[11px] font-semibold tabular-nums">
+                      {latestWebsitePayment.paymentMethod} · ৳{latestWebsitePayment.amount.toLocaleString()}
+                    </span>
+                    {(latestWebsitePayment.transactionId || latestWebsitePayment.bankReference) && (
+                      <span className="font-mono text-[11px] opacity-90">
+                        TrxID: {latestWebsitePayment.transactionId || latestWebsitePayment.bankReference}
+                      </span>
+                    )}
+                  </div>
+
+                  {latestWebsitePayment.status === 'pending' && (
+                    <p className="text-[11px] opacity-90 leading-relaxed">
+                      Submitted on{' '}
+                      <span className="font-mono tabular-nums">
+                        {new Date(latestWebsitePayment.createdAt).toLocaleString()}
+                      </span>
+                      {latestWebsitePayment.senderNumber
+                        ? ` from ${latestWebsitePayment.senderNumber}`
+                        : ''}
+                      . Your website will become <strong>Active</strong> and <strong>Live</strong> automatically as soon as an administrator verifies this transfer.
+                    </p>
+                  )}
+
+                  {latestWebsitePayment.status === 'rejected' && (
+                    <div className="space-y-1">
+                      <p className="text-[11px] font-semibold text-rose-800 dark:text-rose-200">
+                        Rejection Reason:{' '}
+                        <span className="font-normal">
+                          {latestWebsitePayment.adminNotes ||
+                            'Transaction ID or transfer details could not be verified.'}
+                        </span>
+                      </p>
+                      <p className="text-[11px] opacity-85">
+                        Please verify your Transaction ID and sender number, then submit a corrected payment request.
+                      </p>
+                    </div>
+                  )}
+
+                  {latestWebsitePayment.status === 'approved' && (
+                    <p className="text-[11px] opacity-90 leading-relaxed">
+                      {isLive ? (
+                        <>
+                          Verified and published live at{' '}
+                          <code className="font-mono font-semibold">
+                            https://{activeWebsite.fullDomainUrl}
+                          </code>
+                          .
+                        </>
+                      ) : isPublishEligible ? (
+                        <>
+                          Your payment is verified and subscription is active, but the website is currently unpublished. Click <strong>Publish Website Now</strong> to make it live.
+                        </>
+                      ) : (
+                        <>Payment record verified.</>
+                      )}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                {latestWebsitePayment.status === 'pending' && (
+                  <button
+                    type="button"
+                    disabled={isPaymentsLoading || isWebsitesLoading}
+                    onClick={() => {
+                      void refreshPaymentRequests();
+                      void refreshSubscribedWebsites();
+                      showToast('Synced latest payment & website status.', 'info');
+                    }}
+                    className="min-h-[44px] px-3.5 py-2 rounded-lg bg-white dark:bg-slate-900 border border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-200 font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 ${
+                        isPaymentsLoading || isWebsitesLoading ? 'animate-spin' : ''
+                      }`}
+                    />
+                    <span>Refresh Status</span>
+                  </button>
+                )}
+
+                {latestWebsitePayment.status === 'rejected' && !hasPendingWebsitePayment && (
+                  <button
+                    type="button"
+                    onClick={() => setIsPaymentModalOpen(true)}
+                    className="min-h-[44px] px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <CreditCard className="w-3.5 h-3.5" />
+                    <span>Resubmit Payment</span>
+                  </button>
+                )}
+
+                {latestWebsitePayment.status === 'approved' && isPublishEligible && !isLive && (
+                  <button
+                    type="button"
+                    disabled={isActionLoading}
+                    onClick={async () => {
+                      setIsActionLoading(true);
+                      try {
+                        const res = await publishWebsite(activeWebsite.id);
+                        if (!res.success) {
+                          showToast(res.message || 'Could not publish website.', 'error');
+                        }
+                      } finally {
+                        setIsActionLoading(false);
+                      }
+                    }}
+                    className="min-h-[44px] px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    {isActionLoading ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Globe className="w-3.5 h-3.5" />
+                    )}
+                    <span>Publish Website Now</span>
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
         )}
       </div>

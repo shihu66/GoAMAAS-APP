@@ -30,6 +30,7 @@ import {
   WebsiteSubscriptionPlanConfig,
   ServicePricingCatalogEntry,
   WebsiteLifecycleAuditLog,
+  ApproveAndPublishResult,
 } from '../types';
 import {
   INITIAL_STORES,
@@ -56,6 +57,13 @@ import {
   resolveAuthoritativeServicePrice,
 } from '../data/pricingConfig';
 import {
+  executeApproveAndPublishWorkflow,
+  hasDuplicateActiveTransactionReference,
+  isWebsitePaymentService,
+  isWebsiteTrulyLive,
+  validateManualPaymentSubmissionInput,
+} from '../lib/paymentWorkflow';
+import {
   supabase,
   isSupabaseConfigured,
   UUID_REGEX,
@@ -74,11 +82,13 @@ import {
   activateServiceTrialInDb,
   RawServiceTrialRow,
   fetchUserPaymentRequests,
+  fetchPaymentRequestByIdFromDb,
   createPaymentRequestInDb,
   adminApprovePaymentInDb,
   adminRejectPaymentInDb,
   RawPaymentRequestRow,
   fetchPublishedWebsiteBySubdomain,
+  fetchSubscribedWebsiteByIdFromDb,
   publishClientWebsiteInDb,
   updateClientWebsiteInDb,
   unpublishClientWebsiteInDb,
@@ -266,6 +276,11 @@ interface AppContextType {
     bankReference?: string;
   }) => Promise<{ success: boolean; message: string; request?: PaymentRequest }>;
   adminApprovePayment: (requestId: string, notes?: string) => Promise<{ success: boolean; message: string }>;
+  adminApproveAndPublishPayment: (
+    requestId: string,
+    notes?: string
+  ) => Promise<ApproveAndPublishResult>;
+  adminRetryPublishForPayment: (requestId: string) => Promise<ApproveAndPublishResult>;
   adminRejectPayment: (requestId: string, reason: string) => Promise<{ success: boolean; message: string }>;
   refreshPaymentRequests: () => Promise<void>;
   updatePaymentGatewayConfig: (id: string, updates: Partial<PaymentGatewayConfig>) => Promise<boolean>;
@@ -2656,54 +2671,88 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [paymentRequests]);
 
-  const refreshPaymentRequests = async () => {
+  const mapRawPaymentRow = (r: RawPaymentRequestRow): PaymentRequest => ({
+    id: r.id,
+    userId: r.user_id,
+    storeId: r.store_id || undefined,
+    customerName: r.customer_name,
+    customerPhone: r.customer_phone,
+    customerEmail: r.customer_email,
+    serviceType: r.service_type,
+    serviceId: r.service_id,
+    serviceName: r.service_name,
+    planTier: r.plan_tier,
+    amount: Number(r.amount),
+    currency: r.currency || '৳',
+    paymentMethod: r.payment_method,
+    transactionId: r.transaction_id || undefined,
+    senderNumber: r.sender_number || undefined,
+    bankName: r.bank_name || undefined,
+    bankAccountName: r.bank_account_name || undefined,
+    bankReference: r.bank_reference || undefined,
+    status: r.status,
+    adminNotes: r.admin_notes || undefined,
+    reviewedBy: r.reviewed_by || undefined,
+    reviewedAt: r.reviewed_at || undefined,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  });
+
+  const refreshPaymentRequests = useCallback(async () => {
     if (!user?.id || !isSupabaseConfigured) return;
     setIsPaymentsLoading(true);
     try {
       const { data, error } = await fetchUserPaymentRequests(role === 'admin' ? undefined : user.id);
       if (!error && data) {
-        const mapped: PaymentRequest[] = data.map((r: RawPaymentRequestRow) => ({
-          id: r.id,
-          userId: r.user_id,
-          storeId: r.store_id || undefined,
-          customerName: r.customer_name,
-          customerPhone: r.customer_phone,
-          customerEmail: r.customer_email,
-          serviceType: r.service_type,
-          serviceId: r.service_id,
-          serviceName: r.service_name,
-          planTier: r.plan_tier,
-          amount: Number(r.amount),
-          currency: r.currency || '৳',
-          paymentMethod: r.payment_method,
-          transactionId: r.transaction_id || undefined,
-          senderNumber: r.sender_number || undefined,
-          bankName: r.bank_name || undefined,
-          bankAccountName: r.bank_account_name || undefined,
-          bankReference: r.bank_reference || undefined,
-          status: r.status,
-          adminNotes: r.admin_notes || undefined,
-          reviewedBy: r.reviewed_by || undefined,
-          reviewedAt: r.reviewed_at || undefined,
-          createdAt: r.created_at,
-          updatedAt: r.updated_at,
-        }));
-        setPaymentRequests(mapped);
+        setPaymentRequests(data.map(mapRawPaymentRow));
       }
     } catch (err) {
       console.warn('Failed to sync payment requests from Supabase:', err);
     } finally {
       setIsPaymentsLoading(false);
     }
-  };
+  }, [user?.id, role]);
 
   useEffect(() => {
     if (user?.id) {
-      refreshPaymentRequests();
+      void refreshPaymentRequests();
     } else if (isSupabaseConfigured) {
       setPaymentRequests([]);
     }
-  }, [user?.id, role]);
+  }, [user?.id, role, refreshPaymentRequests]);
+
+  // Keep client dashboard synchronized when a payment request is pending verification
+  // or approved while website publishing is transitioning to live.
+  const hasActiveVerificationSyncNeed = paymentRequests.some((r) => {
+    if (!user?.id) return false;
+    if (role !== 'admin' && r.userId !== user.id) return false;
+    if (r.status === 'pending') return true;
+    if (r.status === 'approved' && isWebsitePaymentService(r.serviceType)) {
+      const site = subscribedWebsites.find((w) => w.id === r.serviceId);
+      return Boolean(site && !isWebsiteTrulyLive(site) && site.subscriptionStatus !== 'suspended');
+    }
+    return false;
+  });
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !user?.id || !hasActiveVerificationSyncNeed) return;
+
+    const syncNow = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      void refreshPaymentRequests();
+      void refreshSubscribedWebsites();
+    };
+
+    const intervalId = window.setInterval(syncNow, 15000);
+    window.addEventListener('focus', syncNow);
+    document.addEventListener('visibilitychange', syncNow);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', syncNow);
+      document.removeEventListener('visibilitychange', syncNow);
+    };
+  }, [user?.id, hasActiveVerificationSyncNeed, refreshPaymentRequests, refreshSubscribedWebsites]);
 
   const submitPaymentRequest = async (params: {
     serviceType: 'website_subscription' | 'website_package' | 'dashboard_plan' | 'ai_automation';
@@ -2795,29 +2844,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: msg };
     }
 
-    // Validate required payment reference proof per payment method
-    if (params.paymentMethod === 'Bank Transfer') {
-      if (!(params.bankReference || '').trim() || (params.bankReference || '').trim().length < 3) {
-        const msg = 'Please enter a valid bank deposit or transfer reference number.';
-        showToast(msg, 'warning');
-        return { success: false, message: msg };
-      }
-    } else {
-      if (!(params.transactionId || '').trim() || (params.transactionId || '').trim().length < 4) {
-        const msg = 'Please enter a valid Transaction ID (TrxID).';
-        showToast(msg, 'warning');
-        return { success: false, message: msg };
-      }
-      if (!(params.senderNumber || '').trim() || (params.senderNumber || '').trim().length < 6) {
-        const msg = 'Please enter the sender wallet number used for the transfer.';
-        showToast(msg, 'warning');
-        return { success: false, message: msg };
-      }
+    // Validate required payment fields (method, Transaction ID, sender phone, amount, target service)
+    const inputCheck = validateManualPaymentSubmissionInput({
+      paymentMethod: params.paymentMethod,
+      transactionId: params.transactionId,
+      bankReference: params.bankReference,
+      senderNumber: params.senderNumber,
+      amount: submittedAmount,
+      serviceId: resolvedServiceId,
+    });
+    if (!inputCheck.valid) {
+      const msg = inputCheck.error || 'Please complete all required payment verification fields.';
+      showToast(msg, 'warning');
+      return { success: false, message: msg };
     }
 
-    // Prevent duplicate pending requests before network submission
-    const normalizedTrx = (params.transactionId || '').trim().toUpperCase();
-    const normalizedBankRef = (params.bankReference || '').trim().toUpperCase();
+    const canonicalTrx = inputCheck.normalizedReference;
+    const canonicalSender = inputCheck.normalizedSender;
+
+    // Prevent duplicate pending requests for the same service before network submission
     const hasDuplicatePendingService = paymentRequests.some((r) => {
       if (r.userId !== user.id || r.serviceType !== params.serviceType || r.status !== 'pending') {
         return false;
@@ -2833,21 +2878,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: msg };
     }
 
-    if (normalizedTrx || normalizedBankRef) {
-      const hasDuplicateReference = paymentRequests.some((r) => {
-        if (r.status === 'rejected') return false;
-        const existingTrx = (r.transactionId || '').trim().toUpperCase();
-        const existingRef = (r.bankReference || '').trim().toUpperCase();
-        return (
-          (normalizedTrx !== '' && existingTrx === normalizedTrx) ||
-          (normalizedBankRef !== '' && existingRef === normalizedBankRef)
-        );
-      });
-      if (hasDuplicateReference) {
-        const msg = 'This transaction reference has already been submitted and is pending or approved.';
-        showToast(msg, 'warning');
-        return { success: false, message: msg };
-      }
+    if (hasDuplicateActiveTransactionReference(paymentRequests, canonicalTrx)) {
+      const msg = `Transaction ID "${canonicalTrx}" has already been submitted and is pending or approved.`;
+      showToast(msg, 'warning');
+      return { success: false, message: msg };
     }
 
     // Resolve storeId safely to avoid invalid UUID or foreign-key errors
@@ -2996,14 +3030,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         authoritativeAmount = expectedWebsiteAmount;
       }
 
+      const submitCustomerPhone =
+        activeStore?.phone || onboarding.phone || canonicalSender || 'Not provided';
+      const canonicalBankRef =
+        params.paymentMethod === 'Bank Transfer'
+          ? canonicalTrx
+          : (params.bankReference || '').trim().toUpperCase() || undefined;
+
       if (isSupabaseConfigured) {
         const { data, error } = await createPaymentRequestInDb({
           userId: user.id,
           storeId: resolvedStoreId,
           customerName: user.name || 'Merchant',
-          customerPhone: activeStore?.phone || onboarding.phone || 'Not provided',
+          customerPhone: submitCustomerPhone,
           customerEmail: user.email || '',
           ...params,
+          transactionId: canonicalTrx,
+          senderNumber: canonicalSender,
+          bankReference: canonicalBankRef,
           serviceId: resolvedServiceId,
           planTier: resolvedPlanTier,
           amount: authoritativeAmount,
@@ -3015,29 +3059,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           return { success: false, message: errorMsg };
         }
 
-        const newReq: PaymentRequest = {
-          id: data.id,
-          userId: data.user_id,
-          storeId: data.store_id || undefined,
-          customerName: data.customer_name,
-          customerPhone: data.customer_phone,
-          customerEmail: data.customer_email,
-          serviceType: data.service_type,
-          serviceId: data.service_id,
-          serviceName: data.service_name,
-          planTier: data.plan_tier,
-          amount: Number(data.amount),
-          currency: data.currency,
-          paymentMethod: data.payment_method,
-          transactionId: data.transaction_id || undefined,
-          senderNumber: data.sender_number || undefined,
-          bankName: data.bank_name || undefined,
-          bankAccountName: data.bank_account_name || undefined,
-          bankReference: data.bank_reference || undefined,
-          status: data.status,
-          createdAt: data.created_at,
-          updatedAt: data.updated_at,
-        };
+        const newReq = mapRawPaymentRow(data);
         setPaymentRequests((prev) => [newReq, ...prev.filter((r) => r.id !== newReq.id)]);
         showToast('Payment submission received! Pending manual admin verification.', 'success');
         return { success: true, message: 'Payment submitted successfully', request: newReq };
@@ -3050,9 +3072,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         userId: user.id,
         storeId: resolvedStoreId || activeStoreId || undefined,
         customerName: user.name || 'Merchant',
-        customerPhone: activeStore?.phone || onboarding.phone || 'Not provided',
+        customerPhone: submitCustomerPhone,
         customerEmail: user.email || '',
         ...params,
+        transactionId: canonicalTrx,
+        senderNumber: canonicalSender,
+        bankReference: canonicalBankRef,
         serviceId: resolvedServiceId,
         planTier: resolvedPlanTier,
         amount: authoritativeAmount,
@@ -3069,161 +3094,331 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const adminApprovePayment = async (requestId: string, notes?: string): Promise<{ success: boolean; message: string }> => {
+  const runAdminPaymentWorkflow = async (
+    requestId: string,
+    mode: 'approve_and_publish' | 'retry_publish',
+    notes?: string
+  ): Promise<ApproveAndPublishResult> => {
+    const cleanId = (requestId || '').trim();
     if (role !== 'admin' || (isSupabaseConfigured && user?.role !== 'admin')) {
-      return { success: false, message: 'Unauthorized. Admin role required.' };
+      return {
+        success: false,
+        paymentApproved: false,
+        websitePublished: false,
+        isWebsiteService: false,
+        code: 'FORBIDDEN',
+        message: 'Unauthorized: Verified platform administrator role is required.',
+      };
     }
 
-    if (processingPaymentIdsRef.current.has(requestId)) {
-      return { success: false, message: 'This payment request is already being processed.' };
+    if (!cleanId) {
+      return {
+        success: false,
+        paymentApproved: false,
+        websitePublished: false,
+        isWebsiteService: false,
+        code: 'INVALID_REQUEST_ID',
+        message: 'Invalid payment request ID.',
+      };
     }
 
-    processingPaymentIdsRef.current.add(requestId);
+    if (processingPaymentIdsRef.current.has(cleanId)) {
+      return {
+        success: false,
+        paymentApproved: false,
+        websitePublished: false,
+        isWebsiteService: false,
+        code: 'IN_FLIGHT',
+        message: 'This payment request is already being processed. Please wait.',
+      };
+    }
+
+    processingPaymentIdsRef.current.add(cleanId);
     try {
+      let targetRequest = paymentRequests.find((r) => r.id === cleanId) || null;
+      if (!targetRequest && isSupabaseConfigured) {
+        const { data } = await fetchPaymentRequestByIdFromDb(cleanId);
+        if (data) {
+          targetRequest = mapRawPaymentRow(data);
+        }
+      }
+
       if (isSupabaseConfigured) {
-        const { success, error } = await adminApprovePaymentInDb(requestId, notes);
-        if (!success) {
-          const msg = error?.message || 'Payment approval failed';
-          showToast(msg, 'error');
-          return { success: false, message: msg };
+        const result = await executeApproveAndPublishWorkflow({
+          mode,
+          request: targetRequest,
+          notes,
+          callerRole: user?.role === 'admin' ? 'admin' : 'merchant',
+          callerUserId: user?.id,
+          adapters: {
+            requireUuidServiceId: true,
+            approvePaymentRpc: (id, adminNotes) => adminApprovePaymentInDb(id, adminNotes),
+            fetchPaymentRequestById: async (id) => {
+              const { data } = await fetchPaymentRequestByIdFromDb(id);
+              return data ? mapRawPaymentRow(data) : null;
+            },
+            fetchWebsiteById: async (websiteId) => {
+              const { data } = await fetchSubscribedWebsiteByIdFromDb(websiteId);
+              return data;
+            },
+            publishWebsiteRpc: (websiteId) => publishClientWebsiteInDb(websiteId),
+          },
+        });
+
+        await Promise.all([refreshPaymentRequests(), refreshSubscribedWebsites()]);
+
+        if (result.success) {
+          showToast(result.message, result.suspendedHold ? 'warning' : 'success');
+        } else if (result.partialFailure) {
+          showToast(result.message, 'warning');
+        } else {
+          showToast(result.message, 'error');
         }
-        // Authoritative database synchronization
-        await refreshPaymentRequests();
-        await refreshSubscribedWebsites();
-        showToast('Payment approved. Service subscription activated!', 'success');
-        return { success: true, message: 'Payment approved successfully' };
+        return result;
       }
 
-      // Update local state atomically for unconfigured dev/demo environments
-      const req = paymentRequests.find((r) => r.id === requestId);
-      if (!req) {
-        const msg = 'Payment request not found';
-        showToast(msg, 'error');
-        return { success: false, message: msg };
-      }
+      // Offline / local fallback using the exact same workflow orchestrator
+      let workingRequests = [...paymentRequests];
+      let workingWebsites = [...subscribedWebsites];
 
-      if (req.status !== 'pending') {
-        const msg = `Payment request is already ${req.status}`;
-        showToast(msg, 'warning');
-        return { success: false, message: msg };
-      }
-
-      if (req.userId && user?.id && req.userId === user.id) {
-        const msg = 'Access denied: Administrators cannot approve their own payment requests.';
-        showToast(msg, 'error');
-        return { success: false, message: msg };
-      }
-
-      // If website subscription or package:
-      // Validate exact target website existence and ownership BEFORE marking request approved,
-      // and strictly update ONLY the exact website matching serviceId and website owner (req.userId).
-      if (req.serviceType === 'website_subscription' || req.serviceType === 'website_package') {
-        const targetId = (req.serviceId || '').trim();
-        if (!targetId) {
-          const msg = 'Payment approval failed: Website payment request is missing target website ID.';
-          showToast(msg, 'error');
-          return { success: false, message: msg };
-        }
-
-        const matchingSites = subscribedWebsites.filter((w) => w.id === targetId);
-        if (matchingSites.length === 0) {
-          const msg = 'Payment approval failed: Target website record does not exist.';
-          showToast(msg, 'error');
-          return { success: false, message: msg };
-        }
-
-        if (matchingSites.length !== 1) {
-          const msg = `Payment approval failed: Unexpected number of matching website records (${matchingSites.length}).`;
-          showToast(msg, 'error');
-          return { success: false, message: msg };
-        }
-
-        const targetSite = matchingSites[0];
-        if (!targetSite.userId || targetSite.userId !== req.userId) {
-          const msg = 'Payment approval failed: Payment request submitter does not match website owner.';
-          showToast(msg, 'error');
-          return { success: false, message: msg };
-        }
-
-        const canAutoPublish =
-          req.serviceType === 'website_subscription' &&
-          validateSubdomainFormat(targetSite.subdomain).valid &&
-          !subscribedWebsites.some(
-            (other) =>
-              other.id !== targetSite.id &&
-              other.subdomain.toLowerCase() === targetSite.subdomain.toLowerCase()
-          );
-
-        setSubscribedWebsites((prev) =>
-          prev.map((w) => {
-            if (w.id === targetId && w.userId === req.userId) {
-              const existingMs =
-                w.paymentStatus === 'paid' && w.nextBillingDate
-                  ? new Date(w.nextBillingDate).getTime()
-                  : 0;
-              const baseMs = Number.isFinite(existingMs) && existingMs > Date.now() ? existingMs : Date.now();
-              const nextPeriodMs = baseMs + 30 * 24 * 60 * 60 * 1000;
-              const nextGraceMs = baseMs + 37 * 24 * 60 * 60 * 1000;
-              const promotedDraft = canAutoPublish && w.draftConfig ? w.draftConfig : {};
-
+      const result = await executeApproveAndPublishWorkflow({
+        mode,
+        request: targetRequest,
+        notes,
+        callerRole: role,
+        callerUserId: user?.id,
+        adapters: {
+          requireUuidServiceId: false,
+          approvePaymentRpc: async (id, adminNotes) => {
+            const currentReq = workingRequests.find((r) => r.id === id);
+            if (!currentReq) {
               return {
-                ...w,
-                ...promotedDraft,
-                hasUnpublishedDraft: canAutoPublish ? false : w.hasUnpublishedDraft,
-                draftConfig: canAutoPublish ? undefined : w.draftConfig,
-                subscriptionStatus: 'active',
-                paymentStatus: 'paid',
-                deploymentStatus: canAutoPublish ? 'live' : w.deploymentStatus,
-                sslStatus: canAutoPublish ? 'active' : w.sslStatus,
-                nextBillingDate: new Date(nextPeriodMs).toISOString().split('T')[0],
-                gracePeriodEndsAt: new Date(nextGraceMs).toISOString(),
+                success: false,
+                code: 'NOT_FOUND',
+                message: 'Payment request not found',
+                error: new Error('Payment request not found'),
               };
             }
-            return w;
-          })
-        );
-      }
+            if (currentReq.status !== 'pending') {
+              return {
+                success: false,
+                code: 'ALREADY_SETTLED',
+                message: `Payment request is already ${currentReq.status}`,
+                error: new Error(`Payment request is already ${currentReq.status}`),
+              };
+            }
+            if (isWebsitePaymentService(currentReq.serviceType)) {
+              const targetId = (currentReq.serviceId || '').trim();
+              const siteMatches = workingWebsites.filter((w) => w.id === targetId);
+              if (siteMatches.length !== 1 || siteMatches[0].userId !== currentReq.userId) {
+                return {
+                  success: false,
+                  code: 'TARGET_WEBSITE_INVALID',
+                  message: 'Target website record is missing or ownership mismatched.',
+                  error: new Error('Target website record is missing or ownership mismatched.'),
+                };
+              }
+              const site = siteMatches[0];
+              if (site.subscriptionStatus === 'cancelled') {
+                return {
+                  success: false,
+                  code: 'WEBSITE_CANCELLED',
+                  message: 'Cannot approve payment for a cancelled website subscription.',
+                  error: new Error('Cannot approve payment for a cancelled website subscription.'),
+                };
+              }
+              const existingMs =
+                site.paymentStatus === 'paid' && site.nextBillingDate
+                  ? new Date(site.nextBillingDate).getTime()
+                  : 0;
+              const baseMs =
+                Number.isFinite(existingMs) && existingMs > Date.now() ? existingMs : Date.now();
+              const nextPeriodMs = baseMs + 30 * 24 * 60 * 60 * 1000;
+              const nextGraceMs = baseMs + 37 * 24 * 60 * 60 * 1000;
+              const canAutoPublish =
+                currentReq.serviceType === 'website_subscription' &&
+                site.subscriptionStatus !== 'suspended' &&
+                validateSubdomainFormat(site.subdomain).valid &&
+                !workingWebsites.some(
+                  (other) =>
+                    other.id !== site.id &&
+                    other.subdomain.toLowerCase() === site.subdomain.toLowerCase()
+                );
+              const promotedDraft = canAutoPublish && site.draftConfig ? site.draftConfig : {};
 
-      setPaymentRequests((prev) =>
-        prev.map((r) => {
-          if (r.id === requestId) {
+              workingWebsites = workingWebsites.map((w) =>
+                w.id === targetId && w.userId === currentReq.userId
+                  ? {
+                      ...w,
+                      ...promotedDraft,
+                      hasUnpublishedDraft: canAutoPublish ? false : w.hasUnpublishedDraft,
+                      draftConfig: canAutoPublish ? undefined : w.draftConfig,
+                      subscriptionStatus:
+                        w.subscriptionStatus === 'suspended' ? 'suspended' : 'active',
+                      paymentStatus: 'paid',
+                      deploymentStatus: canAutoPublish ? 'live' : w.deploymentStatus,
+                      sslStatus: canAutoPublish ? 'active' : w.sslStatus,
+                      nextBillingDate: new Date(nextPeriodMs).toISOString().split('T')[0],
+                      gracePeriodEndsAt: new Date(nextGraceMs).toISOString(),
+                    }
+                  : w
+              );
+            }
+
+            const nowIso = new Date().toISOString();
+            workingRequests = workingRequests.map((r) =>
+              r.id === id
+                ? {
+                    ...r,
+                    status: 'approved',
+                    adminNotes: (adminNotes || '').trim() || r.adminNotes,
+                    reviewedBy: user?.id,
+                    reviewedAt: nowIso,
+                    updatedAt: nowIso,
+                  }
+                : r
+            );
+
             return {
-              ...r,
-              status: 'approved',
-              adminNotes: notes || r.adminNotes,
-              reviewedBy: user?.id,
-              reviewedAt: new Date().toISOString(),
+              success: true,
+              code: 'APPROVED',
+              message: 'Payment approved successfully.',
+              requestId: id,
+              error: null,
             };
-          }
-          return r;
-        })
-      );
+          },
+          fetchPaymentRequestById: async (id) => workingRequests.find((r) => r.id === id) || null,
+          fetchWebsiteById: async (websiteId) =>
+            workingWebsites.find((w) => w.id === websiteId) || null,
+          publishWebsiteRpc: async (websiteId) => {
+            const site = workingWebsites.find((w) => w.id === websiteId);
+            if (!site) {
+              return {
+                success: false,
+                message: 'Website record not found.',
+                error: new Error('Website record not found.'),
+              };
+            }
+            if (site.paymentStatus !== 'paid') {
+              return {
+                success: false,
+                message: 'Verified payment approval required before publishing.',
+                error: new Error('Verified payment approval required before publishing.'),
+              };
+            }
+            if (
+              site.subscriptionStatus !== 'active' &&
+              site.subscriptionStatus !== 'grace_period'
+            ) {
+              return {
+                success: false,
+                message: 'Cannot publish website while subscription is inactive or suspended.',
+                error: new Error('Cannot publish website while subscription is inactive or suspended.'),
+              };
+            }
+            const subValidation = validateSubdomainFormat(site.subdomain);
+            if (!subValidation.valid) {
+              return {
+                success: false,
+                message: subValidation.reason || 'Invalid subdomain format.',
+                error: new Error(subValidation.reason || 'Invalid subdomain format.'),
+              };
+            }
+            const collision = workingWebsites.some(
+              (other) =>
+                other.id !== site.id &&
+                other.subdomain.toLowerCase() === subValidation.clean.toLowerCase()
+            );
+            if (collision) {
+              return {
+                success: false,
+                message: 'Subdomain is already registered by another merchant.',
+                error: new Error('Subdomain is already registered by another merchant.'),
+              };
+            }
+            const promotedDraft = site.draftConfig || {};
+            workingWebsites = workingWebsites.map((w) =>
+              w.id === websiteId
+                ? {
+                    ...w,
+                    ...promotedDraft,
+                    hasUnpublishedDraft: false,
+                    draftConfig: undefined,
+                    deploymentStatus: 'live',
+                    sslStatus: 'active',
+                  }
+                : w
+            );
+            return {
+              success: true,
+              message: `Website published at https://${site.fullDomainUrl}`,
+              error: null,
+            };
+          },
+        },
+      });
 
-      showToast(
-        req.serviceType === 'website_subscription'
-          ? 'Payment approved! Website subscription renewed for 30 days and published live.'
-          : 'Payment approved. Service subscription activated!',
-        'success'
-      );
-      return { success: true, message: 'Payment approved successfully' };
+      setPaymentRequests(workingRequests);
+      setSubscribedWebsites(workingWebsites);
+
+      if (result.success) {
+        showToast(result.message, result.suspendedHold ? 'warning' : 'success');
+      } else if (result.partialFailure) {
+        showToast(result.message, 'warning');
+      } else {
+        showToast(result.message, 'error');
+      }
+      return result;
     } finally {
-      processingPaymentIdsRef.current.delete(requestId);
+      processingPaymentIdsRef.current.delete(cleanId);
     }
   };
 
-  const adminRejectPayment = async (requestId: string, reason: string): Promise<{ success: boolean; message: string }> => {
+  const adminApproveAndPublishPayment = async (
+    requestId: string,
+    notes?: string
+  ): Promise<ApproveAndPublishResult> => {
+    return runAdminPaymentWorkflow(requestId, 'approve_and_publish', notes);
+  };
+
+  const adminRetryPublishForPayment = async (
+    requestId: string
+  ): Promise<ApproveAndPublishResult> => {
+    return runAdminPaymentWorkflow(requestId, 'retry_publish');
+  };
+
+  const adminApprovePayment = async (
+    requestId: string,
+    notes?: string
+  ): Promise<{ success: boolean; message: string }> => {
+    const res = await runAdminPaymentWorkflow(requestId, 'approve_and_publish', notes);
+    return { success: res.success, message: res.message };
+  };
+
+  const adminRejectPayment = async (
+    requestId: string,
+    reason: string
+  ): Promise<{ success: boolean; message: string }> => {
     if (role !== 'admin' || (isSupabaseConfigured && user?.role !== 'admin')) {
       return { success: false, message: 'Unauthorized. Admin role required.' };
     }
 
-    if (processingPaymentIdsRef.current.has(requestId)) {
+    const cleanId = (requestId || '').trim();
+    const cleanReason = (reason || '').trim();
+    if (!cleanReason) {
+      const msg = 'Please enter a rejection reason so the merchant knows how to resolve it.';
+      showToast(msg, 'warning');
+      return { success: false, message: msg };
+    }
+
+    if (processingPaymentIdsRef.current.has(cleanId)) {
       return { success: false, message: 'This payment request is already being processed.' };
     }
 
-    processingPaymentIdsRef.current.add(requestId);
+    processingPaymentIdsRef.current.add(cleanId);
     try {
       if (isSupabaseConfigured) {
-        const { success, error } = await adminRejectPaymentInDb(requestId, reason);
+        const { success, error } = await adminRejectPaymentInDb(cleanId, cleanReason);
         if (!success) {
           const msg = error?.message || 'Payment rejection failed';
           showToast(msg, 'error');
@@ -3234,7 +3429,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return { success: true, message: 'Payment rejected' };
       }
 
-      const req = paymentRequests.find((r) => r.id === requestId);
+      const req = paymentRequests.find((r) => r.id === cleanId);
       if (!req) {
         const msg = 'Payment request not found';
         showToast(msg, 'error');
@@ -3247,15 +3442,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return { success: false, message: msg };
       }
 
+      const nowIso = new Date().toISOString();
       setPaymentRequests((prev) =>
         prev.map((r) => {
-          if (r.id === requestId) {
+          if (r.id === cleanId) {
             return {
               ...r,
               status: 'rejected',
-              adminNotes: reason,
+              adminNotes: cleanReason,
               reviewedBy: user?.id,
-              reviewedAt: new Date().toISOString(),
+              reviewedAt: nowIso,
+              updatedAt: nowIso,
             };
           }
           return r;
@@ -3265,7 +3462,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       showToast('Payment rejected and reason recorded.', 'info');
       return { success: true, message: 'Payment rejected' };
     } finally {
-      processingPaymentIdsRef.current.delete(requestId);
+      processingPaymentIdsRef.current.delete(cleanId);
     }
   };
 
@@ -3577,14 +3774,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const derivedInvoices: Invoice[] = paymentRequests
-      .filter((r) => (role === 'admin' ? r.status === 'approved' : r.userId === user.id && (r.status === 'approved' || r.status === 'pending')))
+      .filter((r) =>
+        role === 'admin'
+          ? r.status === 'approved'
+          : r.userId === user.id &&
+            (r.status === 'approved' || r.status === 'pending' || r.status === 'rejected')
+      )
       .map((r) => ({
         id: r.id,
         invoiceNumber: `INV-${r.id.replace(/-/g, '').slice(0, 8).toUpperCase()}`,
         date: (r.reviewedAt || r.createdAt || new Date().toISOString()).split('T')[0],
         planName: `${r.serviceName} (${r.planTier})`,
         amount: r.amount,
-        status: r.status === 'approved' ? 'Paid' : 'Pending',
+        status: r.status === 'approved' ? 'Paid' : r.status === 'pending' ? 'Pending' : 'Failed',
       }));
     setInvoices(derivedInvoices);
   }, [paymentRequests, user?.id, role]);
@@ -3995,6 +4197,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         paymentGatewayConfigs,
         submitPaymentRequest,
         adminApprovePayment,
+        adminApproveAndPublishPayment,
+        adminRetryPublishForPayment,
         adminRejectPayment,
         refreshPaymentRequests,
         updatePaymentGatewayConfig,
