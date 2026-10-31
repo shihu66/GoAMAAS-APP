@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex, nofollow, noarchive" />
+    <meta name="theme-color" content="#090D16" />
+    <title>Offline — GoAMAAS Admin</title>
+    <link rel="icon" type="image/svg+xml" href="/admin-icon.svg" />
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: #090d16;
+        color: #f8fafc;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      .card {
+        width: 100%;
+        max-width: 420px;
+        background: #0f172a;
+        border: 1px solid #1e293b;
+        border-radius: 20px;
+        padding: 28px 24px;
+        text-align: center;
+      }
+      .icon-wrap {
+        width: 56px;
+        height: 56px;
+        margin: 0 auto 18px;
+        border-radius: 16px;
+        background: #1e293b;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 18px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+      }
+      p {
+        margin: 0 0 20px;
+        font-size: 13px;
+        line-height: 1.6;
+        color: #94a3b8;
+      }
+      .notice {
+        margin: 0 0 22px;
+        padding: 12px 14px;
+        border-radius: 12px;
+        background: #090d16;
+        border: 1px solid #1e293b;
+        font-size: 12px;
+        line-height: 1.5;
+        color: #cbd5e1;
+        text-align: left;
+      }
+      button {
+        width: 100%;
+        min-height: 48px;
+        border: none;
+        border-radius: 12px;
+        background: #2563eb;
+        color: #ffffff;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:active {
+        transform: scale(0.99);
+      }
+      .brand {
+        margin-top: 18px;
+        font-size: 11px;
+        color: #64748b;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <div class="icon-wrap" aria-hidden="true">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+          <line x1="2" y1="2" x2="22" y2="22" stroke="#f59e0b" />
+        </svg>
+      </div>
+      <h1>Connection Required</h1>
+      <p>
+        GoAMAAS Admin requires a live encrypted connection to verify payments, validate administrator sessions, and publish merchant websites.
+      </p>
+      <div class="notice">
+        For your security, no customer records, payment requests, or authenticated API responses are stored offline on this device.
+      </div>
+      <button type="button" onclick="window.location.replace('/admin')">
+        Retry Secure Connection
+      </button>
+      <div class="brand">GoAMAAS Admin &middot; AMAAS Technologies</div>
+    </main>
+    <script>
+      window.addEventListener('online', function () {
+        window.location.replace('/admin');
+      });
+    </script>
+  </body>
+</html>

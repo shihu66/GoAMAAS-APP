@@ -371,12 +371,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // User & Auth State (Authoritative Supabase session when configured; never trust metadata/localStorage for admin role)
   const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
-  const [user, setUser] = useState<User | null>(() =>
-    isSupabaseConfigured ? null : getStored('user', INITIAL_USER)
-  );
-  const [role, setRole] = useState<UserRole>(() =>
-    isSupabaseConfigured ? 'merchant' : (user?.role || 'merchant')
-  );
+  const [user, setUser] = useState<User | null>(() => {
+    if (isSupabaseConfigured) return null;
+    const stored = getStored<User | null>('user', INITIAL_USER);
+    return stored ? { ...stored, role: 'merchant' } : null;
+  });
+  const [role, setRole] = useState<UserRole>('merchant');
 
   // Real Stores (persisted in public.stores when Supabase is configured)
   const [stores, setStores] = useState<Store[]>(() =>
@@ -424,8 +424,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       profile = refreshed.profile;
     }
 
-    // SECURITY: Never trust user_metadata.role or localStorage for admin authorization
-    const verifiedRole: UserRole = profile?.role === 'admin' ? 'admin' : 'merchant';
+    // SECURITY: Never trust user_metadata.role or localStorage for admin authorization; require both profile.role === 'admin' AND server RPC is_admin()
+    let verifiedRole: UserRole = 'merchant';
+    if (profile?.role === 'admin' && isSupabaseConfigured && supabase) {
+      const { data: rpcAdmin, error: rpcErr } = await supabase.rpc('is_admin');
+      if (!rpcErr && rpcAdmin === true) {
+        verifiedRole = 'admin';
+      }
+    }
     const verifiedStoreId =
       profile?.store_id && UUID_REGEX.test(profile.store_id) ? profile.store_id : '';
 
@@ -549,7 +555,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const setAuthenticatedUser = (newUser: User) => {
     const safeRole: UserRole =
-      isSupabaseConfigured && newUser.role !== 'admin' ? 'merchant' : newUser.role;
+      isSupabaseConfigured && newUser.role === 'admin' ? 'admin' : 'merchant';
     setUser({ ...newUser, role: safeRole });
     setRole(safeRole);
   };
@@ -707,20 +713,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const switchRole = (newRole: UserRole) => {
-    if (isSupabaseConfigured) {
-      if (user?.role !== 'admin') {
+    // SECURITY: Client-side role switching can never grant administrator privileges
+    if (!isSupabaseConfigured || user?.role !== 'admin') {
+      if (newRole === 'admin') {
         showToast('Unauthorized: Administrator privileges are verified server-side.', 'error');
-        return;
       }
-      setRole(newRole);
-      showToast(`Switched view to ${newRole.toUpperCase()} mode`, 'info');
       return;
     }
     setRole(newRole);
-    if (user) {
-      setUser({ ...user, role: newRole });
-    }
-    showToast(`Switched view to ${newRole.toUpperCase()} mode`, 'info');
   };
 
   useEffect(() => {
@@ -2702,7 +2702,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!user?.id || !isSupabaseConfigured) return;
     setIsPaymentsLoading(true);
     try {
-      const { data, error } = await fetchUserPaymentRequests(role === 'admin' ? undefined : user.id);
+      const isVerifiedAdmin = role === 'admin' && user.role === 'admin';
+      const { data, error } = await fetchUserPaymentRequests(isVerifiedAdmin ? undefined : user.id);
       if (!error && data) {
         setPaymentRequests(data.map(mapRawPaymentRow));
       }
@@ -2711,7 +2712,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } finally {
       setIsPaymentsLoading(false);
     }
-  }, [user?.id, role]);
+  }, [user?.id, user?.role, role]);
 
   useEffect(() => {
     if (user?.id) {

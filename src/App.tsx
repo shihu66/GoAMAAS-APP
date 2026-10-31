@@ -10,6 +10,7 @@ import { AdminLayout } from './components/layout/AdminLayout';
 
 // Auth Protection & Callback
 import { ProtectedRoute } from './components/auth/ProtectedRoute';
+import { AdminProtectedRoute } from './components/auth/AdminProtectedRoute';
 import { AuthCallbackPage } from './pages/auth/AuthCallbackPage';
 
 // Public Pages
@@ -46,7 +47,8 @@ import { SubscribedWebsitePage } from './pages/dashboard/SubscribedWebsitePage';
 import { TeamSettingsPage } from './pages/dashboard/TeamSettingsPage';
 import { SupportPage } from './pages/dashboard/SupportPage';
 
-// Admin Page
+// Admin Pages (Isolated /admin Portal)
+import { AdminLoginPage } from './pages/admin/AdminLoginPage';
 import { AdminDashboardPage } from './pages/admin/AdminDashboardPage';
 
 export default function App() {
@@ -130,16 +132,25 @@ export default function App() {
             <Route path="support" element={<SupportPage />} />
           </Route>
 
-          {/* Platform Super Admin Console (Admin Role Protected) */}
+          {/* Isolated GoAMAAS Admin Panel (/admin & /admin/*) */}
+          <Route path="/admin/login" element={<AdminLoginPage />} />
           <Route
             path="/admin"
             element={
-              <ProtectedRoute requiredRole="admin">
+              <AdminProtectedRoute>
                 <AdminLayout />
-              </ProtectedRoute>
+              </AdminProtectedRoute>
             }
           >
             <Route index element={<AdminDashboardPage />} />
+            <Route path="payments" element={<AdminDashboardPage />} />
+            <Route path="websites" element={<AdminDashboardPage />} />
+            <Route path="customers" element={<AdminDashboardPage />} />
+            <Route path="requests" element={<AdminDashboardPage />} />
+            <Route path="gateways" element={<AdminDashboardPage />} />
+            <Route path="audit" element={<AdminDashboardPage />} />
+            <Route path="security" element={<AdminDashboardPage />} />
+            <Route path="*" element={<Navigate to="/admin" replace />} />
           </Route>
 
           {/* Catch-all redirect */}

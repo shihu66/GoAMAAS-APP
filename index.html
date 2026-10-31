@@ -12,6 +12,37 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,300..800;1,300..800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <script>
+      (function () {
+        var p = window.location.pathname;
+        if (p === '/admin' || p.indexOf('/admin/') === 0) {
+          document.title = 'GoAMAAS Admin — AMAAS Technologies';
+          var head = document.head;
+          function meta(name, content) {
+            var m = document.createElement('meta');
+            m.setAttribute('name', name);
+            m.setAttribute('content', content);
+            head.appendChild(m);
+          }
+          function link(rel, href, type) {
+            var l = document.createElement('link');
+            l.setAttribute('rel', rel);
+            l.setAttribute('href', href);
+            if (type) l.setAttribute('type', type);
+            head.appendChild(l);
+          }
+          meta('robots', 'noindex, nofollow, noarchive');
+          meta('googlebot', 'noindex, nofollow, noarchive');
+          meta('theme-color', '#090D16');
+          meta('apple-mobile-web-app-capable', 'yes');
+          meta('apple-mobile-web-app-status-bar-style', 'black-translucent');
+          meta('apple-mobile-web-app-title', 'AMAAS Admin');
+          link('manifest', '/admin-manifest.webmanifest');
+          link('apple-touch-icon', '/admin-apple-touch-icon.png');
+          link('icon', '/admin-icon.svg', 'image/svg+xml');
+        }
+      })();
+    </script>
   </head>
   <body class="bg-slate-50 text-slate-900 antialiased selection:bg-blue-600 selection:text-white dark:bg-slate-950 dark:text-slate-100 font-sans">
     <div id="root"></div>

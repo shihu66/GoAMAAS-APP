@@ -14,7 +14,6 @@ import {
   CreditCard,
   Settings,
   HelpCircle,
-  ShieldAlert,
   Sparkles,
   ChevronDown,
   Menu,
@@ -37,8 +36,6 @@ import { getDashboardPlanById } from '../../data/pricingConfig';
 export const DashboardLayout: React.FC = () => {
   const {
     user,
-    role,
-    switchRole,
     logout,
     stores,
     activeStore,
@@ -210,19 +207,6 @@ export const DashboardLayout: React.FC = () => {
                 </Link>
               );
             })}
-
-            {/* Admin Switcher */}
-            {role === 'admin' && (
-              <div className="pt-3 mt-3 border-t border-slate-100 dark:border-slate-800">
-                <Link
-                  to="/admin"
-                  className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-medium text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-950/40 hover:bg-purple-100 dark:hover:bg-purple-900/40 transition-colors"
-                >
-                  <ShieldAlert className="w-4 h-4 shrink-0" />
-                  {!sidebarCollapsed && <span>Admin Master Panel</span>}
-                </Link>
-              </div>
-            )}
           </nav>
 
           {/* Public Website Link */}
@@ -287,16 +271,6 @@ export const DashboardLayout: React.FC = () => {
                     </Link>
                   );
                 })}
-                {role === 'admin' && (
-                  <Link
-                    to="/admin"
-                    onClick={() => setMobileMenuOpen(false)}
-                    className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-medium text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-950/40"
-                  >
-                    <ShieldAlert className="w-4 h-4 shrink-0" />
-                    <span>Admin Master Panel</span>
-                  </Link>
-                )}
               </nav>
 
               <div className="p-3 border-t border-slate-100 dark:border-slate-800">
@@ -453,9 +427,6 @@ export const DashboardLayout: React.FC = () => {
                         {user?.name}
                       </p>
                       <p className="text-[11px] text-slate-400 truncate">{user?.email}</p>
-                      <span className="inline-block mt-1 text-[10px] font-semibold text-blue-600 dark:text-blue-400">
-                        Role: {role.toUpperCase()}
-                      </span>
                     </div>
 
                     <Link
@@ -472,19 +443,6 @@ export const DashboardLayout: React.FC = () => {
                     >
                       Subscription ({getDashboardPlanById(currentPlan)?.name || 'Starter'})
                     </Link>
-
-                    {user?.role === 'admin' && (
-                      <>
-                        <div className="border-t border-slate-100 dark:border-slate-800 my-1" />
-                        <Link
-                          to="/admin"
-                          onClick={() => setUserMenuOpen(false)}
-                          className="block px-4 py-2 text-purple-600 dark:text-purple-400 hover:bg-slate-50 dark:hover:bg-slate-800 font-medium"
-                        >
-                          Super Admin Console →
-                        </Link>
-                      </>
-                    )}
 
                     <div className="border-t border-slate-100 dark:border-slate-800 my-1" />
 

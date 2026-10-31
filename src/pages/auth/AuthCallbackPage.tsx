@@ -38,13 +38,10 @@ export const AuthCallbackPage: React.FC = () => {
         setErrorMessage('Supabase client is not available.');
         return;
       }
+      const nextParam = (searchParams.get('next') || '').trim();
+      const isAdminAuthFlow = nextParam === '/admin' || nextParam.startsWith('/admin/');
+
       try {
-        console.info('[GoAMAAS AuthCallback] Processing OAuth callback', {
-          origin: window.location.origin,
-          pathname: window.location.pathname,
-          hasCodeParam: searchParams.has('code'),
-          hasHash: Boolean(window.location.hash),
-        });
         const code = searchParams.get('code');
         if (code) {
           // PKCE flow code exchange
@@ -80,16 +77,42 @@ export const AuthCallbackPage: React.FC = () => {
         const email = authenticatedUser.email || '';
         const userId = authenticatedUser.id;
 
-        // Check or create profile in Supabase PostgreSQL
-        const { profile, error: getProfileError } = await getUserProfile(userId);
-        if (getProfileError) {
-          console.warn('Could not retrieve existing profile:', getProfileError.message);
+        // Check profile in Supabase PostgreSQL
+        const { profile } = await getUserProfile(userId);
+
+        // Dedicated /admin OAuth flow: strictly verify server-side admin role; never auto-provision or leak account status
+        if (isAdminAuthFlow) {
+          const { data: rpcIsAdmin, error: rpcErr } = await supabase.rpc('is_admin');
+          if (rpcErr || rpcIsAdmin !== true || !profile || profile.role !== 'admin') {
+            await supabase.auth.signOut({ scope: 'local' });
+            navigate('/admin/login?unauthorized=1', { replace: true });
+            return;
+          }
+
+          const candidateAdminStoreId = String(profile.store_id || '').trim();
+          const resolvedAdminStoreId = UUID_REGEX.test(candidateAdminStoreId) ? candidateAdminStoreId : '';
+
+          setAuthenticatedUser({
+            id: userId,
+            name: profile.full_name || fullName,
+            email,
+            role: 'admin',
+            storeId: resolvedAdminStoreId,
+          });
+
+          setStatus('success');
+          const safeAdminTarget =
+            nextParam.startsWith('/admin') && nextParam !== '/admin/login' ? nextParam : '/admin';
+          setTimeout(() => {
+            navigate(safeAdminTarget, { replace: true });
+          }, 300);
+          return;
         }
 
         let onboardingCompleted = false;
 
         if (!profile) {
-          // Auto-provision profile record
+          // Auto-provision merchant profile record
           const { error: upsertErr } = await upsertUserProfile({
             id: userId,
             full_name: fullName,
@@ -98,8 +121,7 @@ export const AuthCallbackPage: React.FC = () => {
             onboarding_completed: Boolean(userMeta.onboarding_completed),
           });
           if (upsertErr) {
-            console.error('Failed to auto-provision profile on OAuth callback:', upsertErr);
-            throw new Error("Profile setup failed: " + upsertErr.message);
+            throw new Error('Profile setup failed: ' + upsertErr.message);
           }
           onboardingCompleted = Boolean(userMeta.onboarding_completed);
         } else {
@@ -109,12 +131,21 @@ export const AuthCallbackPage: React.FC = () => {
         const candidateStoreId = String(profile?.store_id || userMeta.store_id || '').trim();
         const resolvedStoreId = UUID_REGEX.test(candidateStoreId) ? candidateStoreId : '';
 
+        // Verify admin role via RPC if profile claims admin
+        let verifiedRole: 'merchant' | 'admin' = 'merchant';
+        if (profile?.role === 'admin') {
+          const { data: rpcAdmin } = await supabase.rpc('is_admin');
+          if (rpcAdmin === true) {
+            verifiedRole = 'admin';
+          }
+        }
+
         // Sync into AppContext
         setAuthenticatedUser({
           id: userId,
           name: fullName,
           email: email,
-          role: (profile?.role || 'merchant'),
+          role: verifiedRole,
           storeId: resolvedStoreId,
         });
 
@@ -130,6 +161,11 @@ export const AuthCallbackPage: React.FC = () => {
           }
         }, 500);
       } catch (err: unknown) {
+        if (isAdminAuthFlow) {
+          await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+          navigate('/admin/login?unauthorized=1', { replace: true });
+          return;
+        }
         setStatus('error');
         setErrorMessage(err instanceof Error ? err.message : 'Failed to finalize authentication session.');
       }
