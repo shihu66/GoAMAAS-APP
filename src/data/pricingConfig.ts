@@ -237,7 +237,7 @@ export const WEBSITE_DEVELOPMENT_PACKAGES: WebsitePackageConfig[] = [
     description: 'Clean modern website engineered for startups, boutique shops, and emerging brands.',
     pagesLimit: 'Up to 5 pages',
     estimatedTimeline: 'Estimated: 4–6 business days',
-    domainHostingBenefit: 'First-year domain + hosting FREE',
+    domainHostingBenefit: 'Cloud deployment setup included · Custom domain billed separately',
     features: [
       'Up to 5 pages',
       'Modern responsive design',
@@ -245,10 +245,10 @@ export const WEBSITE_DEVELOPMENT_PACKAGES: WebsitePackageConfig[] = [
       'Contact form',
       'WhatsApp contact button',
       'Basic on-page SEO',
-      'First-year domain + hosting FREE',
+      'Cloud deployment setup included (custom domain billed separately)',
       'Delivery timeline displayed as an estimate (4–6 business days)',
     ],
-    scopeNote: 'E-commerce, complex custom functionality, paid integrations, and recurring third-party costs must be quoted separately when outside the package scope.',
+    scopeNote: 'E-commerce, complex custom functionality, paid integrations, custom domain registration, and recurring third-party costs are quoted separately when outside the package scope.',
     ctaLabel: 'Request a Website',
   },
   {
@@ -259,7 +259,7 @@ export const WEBSITE_DEVELOPMENT_PACKAGES: WebsitePackageConfig[] = [
     description: 'Premium custom design with content management system and interactive integrations.',
     pagesLimit: 'Up to 10 pages',
     estimatedTimeline: 'Estimated: 7–10 business days',
-    domainHostingBenefit: 'First-year domain + hosting FREE',
+    domainHostingBenefit: 'Cloud deployment setup included · Custom domain billed separately',
     features: [
       'Up to 10 pages',
       'Premium custom design',
@@ -269,9 +269,9 @@ export const WEBSITE_DEVELOPMENT_PACKAGES: WebsitePackageConfig[] = [
       'WhatsApp integration',
       'Google Maps integration',
       'Basic on-page SEO',
-      'First-year domain + hosting FREE',
+      'Cloud deployment setup included (custom domain billed separately)',
     ],
-    scopeNote: 'E-commerce, complex custom functionality, paid integrations, and recurring third-party costs must be quoted separately when outside the package scope.',
+    scopeNote: 'E-commerce, complex custom functionality, paid integrations, custom domain registration, and recurring third-party costs are quoted separately when outside the package scope.',
     ctaLabel: 'Request a Website',
   },
   {
@@ -281,7 +281,7 @@ export const WEBSITE_DEVELOPMENT_PACKAGES: WebsitePackageConfig[] = [
     description: 'High-performance web architecture with advanced lead capture, analytics, and technical SEO.',
     pagesLimit: 'Up to 15 pages',
     estimatedTimeline: 'Estimated: 12–16 business days',
-    domainHostingBenefit: 'First-year domain + hosting FREE',
+    domainHostingBenefit: 'Cloud deployment setup included · Custom domain billed separately',
     features: [
       'Up to 15 pages',
       'Advanced custom design',
@@ -291,9 +291,9 @@ export const WEBSITE_DEVELOPMENT_PACKAGES: WebsitePackageConfig[] = [
       'Analytics integration',
       'Technical SEO setup',
       'Performance optimization',
-      'First-year domain + hosting FREE',
+      'Cloud deployment setup included (custom domain billed separately)',
     ],
-    scopeNote: 'E-commerce, complex custom functionality, paid integrations, and recurring third-party costs must be quoted separately when outside the package scope.',
+    scopeNote: 'E-commerce, complex custom functionality, paid integrations, custom domain registration, and recurring third-party costs are quoted separately when outside the package scope.',
     ctaLabel: 'Request a Website',
   },
 ];
@@ -363,12 +363,12 @@ export const SUBSCRIPTION_VS_ONETIME_COMPARISON: SubscriptionVsOneTimeComparison
   {
     feature: 'Domain & Subdomain',
     subscriptionPlan: 'Free businessname.amaas.xyz + optional custom domain (registration paid separately)',
-    oneTimePackages: 'Free 1st-year custom top-level domain (.com)',
+    oneTimePackages: 'Custom domain connection supported (registrar fee billed separately)',
   },
   {
     feature: 'Hosting & Infrastructure',
     subscriptionPlan: 'Free GoAMAAS cloud hosting included in ৳600/mo',
-    oneTimePackages: '1st year free, client renews annually thereafter',
+    oneTimePackages: 'Initial cloud deployment setup included; hosting renewals billed per plan',
   },
   {
     feature: 'Editing & Product Updates',

@@ -19,6 +19,8 @@ import {
   FileSpreadsheet,
 } from 'lucide-react';
 import { Modal } from '../../components/ui/Modal';
+import { TrialStatusBadge } from '../../components/ui/TrialStatusBadge';
+import { TrialGateBanner } from '../../components/ui/TrialGateBanner';
 
 export const OrdersPage: React.FC = () => {
   const {
@@ -29,7 +31,9 @@ export const OrdersPage: React.FC = () => {
     addOrder,
     products,
     showToast,
+    getServiceAccess,
   } = useApp();
+  const serviceAccess = getServiceAccess('dashboard_business', 'Dashboard Business Tier', 'dashboard');
 
   const [search, setSearch] = useState('');
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
@@ -172,9 +176,16 @@ export const OrdersPage: React.FC = () => {
       {/* Title & Actions */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
-            Order Fulfillment & Courier Dispatch
-          </h1>
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
+              Order Fulfillment & Courier Dispatch
+            </h1>
+            <TrialStatusBadge
+              serviceId="dashboard_business"
+              serviceName="Dashboard Business Tier"
+              category="dashboard"
+            />
+          </div>
           <p className="text-xs text-slate-500 mt-1">
             Track multi-channel orders, update shipment stages, and generate printable customer invoices.
           </p>
@@ -183,7 +194,8 @@ export const OrdersPage: React.FC = () => {
         <div className="flex items-center gap-2">
           <button
             onClick={handleExportCSV}
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors shadow-xs"
+            disabled={!serviceAccess.hasAccess}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 transition-colors shadow-xs cursor-pointer"
           >
             <Download className="w-3.5 h-3.5" />
             <span>Export CSV</span>
@@ -191,13 +203,34 @@ export const OrdersPage: React.FC = () => {
 
           <button
             onClick={() => setIsCreateModalOpen(true)}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-xs transition-colors"
+            disabled={!serviceAccess.hasAccess}
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer"
           >
             <Plus className="w-3.5 h-3.5" />
             <span>Create Manual Order</span>
           </button>
         </div>
       </div>
+
+      {!serviceAccess.hasAccess ? (
+        <TrialGateBanner
+          serviceId="dashboard_business"
+          serviceName="Dashboard Business Tier"
+          category="dashboard"
+          serviceDescription="Organize website, Messenger, and WhatsApp orders, assign courier tracking codes, print customer invoices, and export CSV records with a 7-day free Dashboard trial."
+          features={[
+            'Multi-Channel Order Pipeline (Pending → Delivered)',
+            'Steadfast, Pathao & RedX Courier Tracking Assignment',
+            'Printable Branded Customer Invoices',
+            'Manual Phone & Social Order Entry',
+            'Payment Status Verification (COD, bKash, Nagad)',
+            '1-Click CSV Export for Accounting & Dispatch',
+          ]}
+          subscribePath="/dashboard/billing"
+          subscribePriceLabel="From ৳299/mo"
+        />
+      ) : (
+        <>
 
       {/* Status Segmented Tabs */}
       <div className="flex items-center gap-1 overflow-x-auto pb-1 text-xs">
@@ -472,6 +505,8 @@ export const OrdersPage: React.FC = () => {
             </button>
           </div>
         </div>
+      )}
+        </>
       )}
 
       {/* 1. Order Detail Modal */}

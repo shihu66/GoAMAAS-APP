@@ -114,7 +114,7 @@
       "destination": "/api/$1"
     },
     {
-      "source": "/((?!api/|assets/|admin-sw\\.js|admin-manifest\\.webmanifest|admin-offline\\.html|admin-icon\\.svg|admin-pwa-|admin-apple-touch-icon\\.png|robots\\.txt|favicon\\.ico).*)",
+      "source": "/((?!api/|assets/|admin-sw\\.js|admin-manifest\\.webmanifest|admin-offline\\.html|admin-icon\\.svg|admin-pwa-|admin-apple-touch-icon\\.png|robots\\.txt|sitemap\\.xml|favicon\\.ico|favicon\\.svg|og-banner\\.svg).*)",
       "destination": "/index.html"
     }
   ]

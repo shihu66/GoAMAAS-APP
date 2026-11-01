@@ -25,11 +25,44 @@ import {
   Legend,
 } from 'recharts';
 
+import { TrialStatusBadge } from '../../components/ui/TrialStatusBadge';
+import { TrialGateBanner } from '../../components/ui/TrialGateBanner';
+
 export const AnalyticsPage: React.FC = () => {
-  const { orders, products, customers, showToast } = useApp();
+  const { orders, products, customers, showToast, getServiceAccess } = useApp();
+  const serviceAccess = getServiceAccess('dashboard_business', 'Dashboard Business Tier', 'dashboard');
   const [dateFilter, setDateFilter] = useState<'7d' | '30d' | '90d' | '12m'>('30d');
 
-  // Real Multi-period sales trend data computed strictly from orders
+  const productLookup = useMemo(() => {
+    const byId = new Map<string, number>();
+    const bySku = new Map<string, number>();
+    products.forEach((p) => {
+      if (p.costPrice > 0) {
+        byId.set(p.id, p.costPrice);
+        if (p.sku) bySku.set(p.sku.toLowerCase(), p.costPrice);
+      }
+    });
+    return { byId, bySku };
+  }, [products]);
+
+  const computeOrderNetProfit = useMemo(() => {
+    return (o: (typeof orders)[number]): number => {
+      if (!o.items || o.items.length === 0) {
+        return Math.round(o.total * 0.35);
+      }
+      let itemMarginSum = 0;
+      for (const item of o.items) {
+        const unitCost =
+          productLookup.byId.get(item.productId) ??
+          (item.sku ? productLookup.bySku.get(item.sku.toLowerCase()) : undefined) ??
+          Math.round(item.price * 0.65);
+        itemMarginSum += (item.price - unitCost) * item.quantity;
+      }
+      return Math.max(0, Math.round(itemMarginSum - (o.discount || 0)));
+    };
+  }, [productLookup]);
+
+  // Real Multi-period sales trend data computed strictly from orders & item COGS
   const revenueData = useMemo(() => {
     const now = new Date();
     const buckets: { period: string; revenue: number; netProfit: number; orders: number }[] = [];
@@ -45,8 +78,7 @@ export const AnalyticsPage: React.FC = () => {
           (o) => o.createdAt.startsWith(dateStr) && o.status !== 'cancelled'
         );
         const rev = dayOrders.reduce((sum, o) => sum + o.total, 0);
-        // Estimate net profit based on product cost price if available, else standard 35% margin
-        const profit = dayOrders.reduce((sum, o) => sum + Math.round(o.total * 0.35), 0);
+        const profit = dayOrders.reduce((sum, o) => sum + computeOrderNetProfit(o), 0);
         buckets.push({ period: dayLabel, revenue: rev, netProfit: profit, orders: dayOrders.length });
       }
     } else if (dateFilter === '30d') {
@@ -62,7 +94,7 @@ export const AnalyticsPage: React.FC = () => {
           return orderDate >= start && orderDate <= end && o.status !== 'cancelled';
         });
         const rev = weekOrders.reduce((sum, o) => sum + o.total, 0);
-        const profit = weekOrders.reduce((sum, o) => sum + Math.round(o.total * 0.35), 0);
+        const profit = weekOrders.reduce((sum, o) => sum + computeOrderNetProfit(o), 0);
         buckets.push({ period: weekLabel, revenue: rev, netProfit: profit, orders: weekOrders.length });
       }
     } else if (dateFilter === '90d') {
@@ -77,7 +109,7 @@ export const AnalyticsPage: React.FC = () => {
           return od.getFullYear() === year && od.getMonth() === month && o.status !== 'cancelled';
         });
         const rev = monthOrders.reduce((sum, o) => sum + o.total, 0);
-        const profit = monthOrders.reduce((sum, o) => sum + Math.round(o.total * 0.35), 0);
+        const profit = monthOrders.reduce((sum, o) => sum + computeOrderNetProfit(o), 0);
         buckets.push({ period: monthLabel, revenue: rev, netProfit: profit, orders: monthOrders.length });
       }
     } else {
@@ -94,13 +126,13 @@ export const AnalyticsPage: React.FC = () => {
           return od >= start && od <= end && o.status !== 'cancelled';
         });
         const rev = qOrders.reduce((sum, o) => sum + o.total, 0);
-        const profit = qOrders.reduce((sum, o) => sum + Math.round(o.total * 0.35), 0);
+        const profit = qOrders.reduce((sum, o) => sum + computeOrderNetProfit(o), 0);
         buckets.push({ period: qLabel, revenue: rev, netProfit: profit, orders: qOrders.length });
       }
     }
 
     return buckets;
-  }, [orders, dateFilter]);
+  }, [orders, dateFilter, computeOrderNetProfit]);
 
   // Real acquisition channels from authentic orders
   const channelData = useMemo(() => {
@@ -129,8 +161,12 @@ export const AnalyticsPage: React.FC = () => {
     [orders]
   );
   const totalNetProfit = useMemo(
-    () => revenueData.reduce((acc, d) => acc + d.netProfit, 0),
-    [revenueData]
+    () => orders.reduce((acc, o) => (o.status !== 'cancelled' ? acc + computeOrderNetProfit(o) : acc), 0),
+    [orders, computeOrderNetProfit]
+  );
+  const realizedMarginPct = useMemo(
+    () => (totalGrossSales > 0 ? ((totalNetProfit / totalGrossSales) * 100).toFixed(1) : '0.0'),
+    [totalGrossSales, totalNetProfit]
   );
   const validOrderCount = useMemo(
     () => orders.filter((o) => o.status !== 'cancelled').length,
@@ -167,11 +203,18 @@ export const AnalyticsPage: React.FC = () => {
       {/* Title & Date Selector */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
-            Financial Analytics & Growth Reports
-          </h1>
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
+              Financial Analytics & Growth Reports
+            </h1>
+            <TrialStatusBadge
+              serviceId="dashboard_business"
+              serviceName="Dashboard Business Tier"
+              category="dashboard"
+            />
+          </div>
           <p className="text-xs text-slate-500 mt-1">
-            Examine gross revenue, net margins, order acquisition velocity, and retention.
+            Examine gross revenue, SKU-level COGS net margins, order acquisition velocity, and retention.
           </p>
         </div>
 
@@ -221,7 +264,7 @@ export const AnalyticsPage: React.FC = () => {
 
           <button
             onClick={handleExportReport}
-            disabled={!hasData}
+            disabled={!hasData || !serviceAccess.hasAccess}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer"
           >
             <Download className="w-3.5 h-3.5" />
@@ -230,27 +273,46 @@ export const AnalyticsPage: React.FC = () => {
         </div>
       </div>
 
-      {/* 4 Financial Metric Cards (Real values) */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
-          <span className="text-xs font-medium text-slate-500">Gross Sales</span>
-          <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white font-mono tabular-nums">
-            ৳{totalGrossSales.toLocaleString()}
-          </p>
-          <span className="text-[11px] text-slate-500 font-medium mt-1 block">
-            {validOrderCount} transaction{validOrderCount !== 1 ? 's' : ''}
-          </span>
-        </div>
+      {!serviceAccess.hasAccess ? (
+        <TrialGateBanner
+          serviceId="dashboard_business"
+          serviceName="Dashboard Business Tier"
+          category="dashboard"
+          serviceDescription="Unlock revenue & COGS profit trajectory charts, acquisition channel breakdowns, and CSV financial report exports with a 7-day free Dashboard trial."
+          features={[
+            'Gross Sales & SKU-Level COGS Net Profit Tracking',
+            '7D, 30D, 90D & 12M Interactive Trend Charts',
+            'Acquisition Channel Revenue Breakdown',
+            'Repeat Buyer Retention & AOV Benchmarks',
+            '1-Click Accounting CSV Export',
+            'Multi-Store Workspace Filtering',
+          ]}
+          subscribePath="/dashboard/billing"
+          subscribePriceLabel="From ৳299/mo"
+        />
+      ) : (
+        <>
+          {/* 4 Financial Metric Cards (Real values) */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
+              <span className="text-xs font-medium text-slate-500">Gross Sales</span>
+              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white font-mono tabular-nums">
+                ৳{totalGrossSales.toLocaleString()}
+              </p>
+              <span className="text-[11px] text-slate-500 font-medium mt-1 block">
+                {validOrderCount} transaction{validOrderCount !== 1 ? 's' : ''}
+              </span>
+            </div>
 
-        <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
-          <span className="text-xs font-medium text-slate-500">Estimated Net Profit</span>
-          <p className="mt-2 text-2xl font-bold text-emerald-600 font-mono tabular-nums">
-            ৳{totalNetProfit.toLocaleString()}
-          </p>
-          <span className="text-[11px] text-slate-400 mt-1 block">
-            {hasData ? '~35% operational margin' : '0 margin'}
-          </span>
-        </div>
+            <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
+              <span className="text-xs font-medium text-slate-500">Estimated Net Profit</span>
+              <p className="mt-2 text-2xl font-bold text-emerald-600 font-mono tabular-nums">
+                ৳{totalNetProfit.toLocaleString()}
+              </p>
+              <span className="text-[11px] text-slate-400 mt-1 block">
+                {hasData ? `${realizedMarginPct}% net margin (COGS-adjusted)` : '0% margin'}
+              </span>
+            </div>
 
         <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
           <span className="text-xs font-medium text-slate-500">Average Order Value (AOV)</span>
@@ -447,6 +509,8 @@ export const AnalyticsPage: React.FC = () => {
           </div>
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 };

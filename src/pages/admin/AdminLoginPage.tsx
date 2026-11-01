@@ -2,16 +2,13 @@ import React, { useEffect, useState } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ShieldCheck,
-  Lock,
-  Mail,
-  Eye,
-  EyeOff,
   Loader2,
   AlertCircle,
   KeyRound,
   WifiOff,
   Sun,
   Moon,
+  ExternalLink,
 } from 'lucide-react';
 import {
   supabase,
@@ -20,27 +17,32 @@ import {
   signInWithGoogle,
 } from '../../lib/supabase';
 import {
+  AUTHORIZED_ADMIN_EMAIL,
   UNIFORM_ADMIN_AUTH_ERROR,
   VerifiedAdminFactor,
   checkAdminLoginRateLimit,
   clearAdminLoginFailures,
   clearAdminSessionEvents,
   enforceMinimumAuthFloor,
+  isAuthorizedAdminEmail,
   recordAdminLoginFailure,
   recordAdminSessionEvent,
   verifyAdminTotpChallenge,
   verifyServerAdminSession,
 } from '../../lib/adminSecurity';
-import { useAdminPWA } from '../../hooks/useAdminPWA';
-import { AdminPWAInstallButton } from '../../components/admin/AdminPWAInstallBanner';
+import { notifyAdminServiceWorkerSignOut, useAdminPWA } from '../../hooks/useAdminPWA';
+import {
+  AdminPWAInstallButton,
+  AdminPWAInstallPrompt,
+} from '../../components/admin/AdminPWAInstallBanner';
 import { useApp } from '../../context/AppContext';
 
 export const AdminLoginPage: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
-  const { theme, toggleTheme, setAuthenticatedUser } = useApp();
-  const { isOnline } = useAdminPWA(theme);
+  const { theme, toggleTheme, setAuthenticatedUser, logout } = useApp();
+  const { isOnline, isEmbeddedIframe } = useAdminPWA(theme);
 
   const intendedDestination = (() => {
     const fromState = (location.state as { from?: string } | null)?.from;
@@ -51,24 +53,28 @@ export const AdminLoginPage: React.FC = () => {
   })();
 
   const isExpiredSession = searchParams.get('expired') === '1';
-  const isOauthUnauthorized = searchParams.get('unauthorized') === '1';
+  const isDeniedQuery =
+    searchParams.get('denied') === '1' || searchParams.get('unauthorized') === '1';
+  const isOauthErrorQuery =
+    searchParams.get('oauth_error') === '1' || Boolean(searchParams.get('error'));
 
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
   const [isCheckingExisting, setIsCheckingExisting] = useState(true);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isSubmittingMfa, setIsSubmittingMfa] = useState(false);
   const [isGoogleRedirecting, setIsGoogleRedirecting] = useState(false);
-  const [errorBanner, setErrorBanner] = useState<string | null>(
-    isOauthUnauthorized ? UNIFORM_ADMIN_AUTH_ERROR : null
-  );
+  const [errorBanner, setErrorBanner] = useState<string | null>(() => {
+    if (isDeniedQuery) return UNIFORM_ADMIN_AUTH_ERROR;
+    if (isOauthErrorQuery) {
+      return 'Google authentication could not be completed. Please try again with the authorized administrator account.';
+    }
+    return null;
+  });
   const [lockoutSeconds, setLockoutSeconds] = useState<number>(0);
 
-  // MFA step-up challenge right inside login if enrolled
+  // MFA step-up challenge right inside login when enrolled on the authorized admin account
   const [mfaChallengeFactor, setMfaChallengeFactor] = useState<VerifiedAdminFactor | null>(null);
   const [totpCode, setTotpCode] = useState('');
 
-  // Check if user already holds a valid server-verified admin session
+  // Check if user already holds a valid server-verified admin session, or purge any unauthorized session
   useEffect(() => {
     let active = true;
     void (async () => {
@@ -82,14 +88,20 @@ export const AdminLoginPage: React.FC = () => {
         return;
       }
 
+      const startedAt = Date.now();
       const res = await verifyServerAdminSession();
       if (!active) return;
 
-      if (res.status === 'authorized' && res.admin) {
+      if (
+        res.status === 'authorized' &&
+        res.admin &&
+        isAuthorizedAdminEmail(res.admin.email)
+      ) {
+        clearAdminLoginFailures();
         setAuthenticatedUser({
           id: res.admin.id,
           name: res.admin.name,
-          email: res.admin.email,
+          email: AUTHORIZED_ADMIN_EMAIL,
           role: 'admin',
           storeId: '',
         });
@@ -97,17 +109,45 @@ export const AdminLoginPage: React.FC = () => {
         return;
       }
 
-      if (res.status === 'mfa_required' && res.mfa.verifiedTotpFactors[0]) {
+      if (
+        res.status === 'mfa_required' &&
+        res.admin &&
+        isAuthorizedAdminEmail(res.admin.email) &&
+        res.mfa.verifiedTotpFactors[0]
+      ) {
         setMfaChallengeFactor(res.mfa.verifiedTotpFactors[0]);
+        setIsCheckingExisting(false);
+        return;
       }
 
-      setIsCheckingExisting(false);
+      // If an unauthorized Google or merchant session is present, immediately sign out and show generic denial
+      if (res.status === 'forbidden') {
+        await enforceMinimumAuthFloor(startedAt, 350);
+        clearAdminSessionEvents();
+        notifyAdminServiceWorkerSignOut();
+        await signOutFromSupabase();
+        await logout();
+        const failure = recordAdminLoginFailure();
+        if (!active) return;
+        if (failure.lockedOut) {
+          setLockoutSeconds(failure.retryAfterSeconds);
+          setErrorBanner(
+            `Too many unsuccessful sign-in attempts. Sign-in is temporarily locked for ${failure.retryAfterSeconds}s.`
+          );
+        } else {
+          setErrorBanner(UNIFORM_ADMIN_AUTH_ERROR);
+        }
+      }
+
+      if (active) {
+        setIsCheckingExisting(false);
+      }
     })();
 
     return () => {
       active = false;
     };
-  }, [intendedDestination, navigate, setAuthenticatedUser]);
+  }, [intendedDestination, logout, navigate, setAuthenticatedUser]);
 
   // Countdown timer when rate-limit lockout is active
   useEffect(() => {
@@ -119,121 +159,10 @@ export const AdminLoginPage: React.FC = () => {
     return () => window.clearInterval(timer);
   }, [lockoutSeconds]);
 
-  const handlePasswordSignIn = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (isSubmitting || isGoogleRedirecting) return;
-
-    if (!isOnline) {
-      setErrorBanner('Your device is offline. Reconnect to the internet to sign in.');
-      return;
-    }
-
-    const rate = checkAdminLoginRateLimit();
-    if (!rate.allowed) {
-      setLockoutSeconds(rate.retryAfterSeconds);
-      setErrorBanner(
-        `Too many unsuccessful sign-in attempts. Please wait ${rate.retryAfterSeconds}s before trying again.`
-      );
-      return;
-    }
-
-    if (!isSupabaseConfigured || !supabase) {
-      setErrorBanner('Administrative authentication service is not configured.');
-      return;
-    }
-
-    const cleanEmail = email.trim().toLowerCase();
-    if (!cleanEmail || !password) {
-      setErrorBanner('Enter both your email address and password.');
-      return;
-    }
-
-    setIsSubmitting(true);
-    setErrorBanner(null);
-    const startedAt = Date.now();
-
-    try {
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email: cleanEmail,
-        password,
-      });
-
-      if (error || !data.user) {
-        await enforceMinimumAuthFloor(startedAt, 500);
-        const failure = recordAdminLoginFailure();
-        if (failure.lockedOut) {
-          setLockoutSeconds(failure.retryAfterSeconds);
-          setErrorBanner(
-            `Too many unsuccessful sign-in attempts. Sign-in is temporarily locked for ${failure.retryAfterSeconds}s.`
-          );
-        } else {
-          setErrorBanner(UNIFORM_ADMIN_AUTH_ERROR);
-        }
-        return;
-      }
-
-      // Immediately verify platform admin status on the server (never leak whether account was valid non-admin)
-      const adminCheck = await verifyServerAdminSession();
-      await enforceMinimumAuthFloor(startedAt, 500);
-
-      if (adminCheck.status === 'forbidden' || adminCheck.status === 'unauthenticated') {
-        await signOutFromSupabase();
-        clearAdminSessionEvents();
-        const failure = recordAdminLoginFailure();
-        if (failure.lockedOut) {
-          setLockoutSeconds(failure.retryAfterSeconds);
-          setErrorBanner(
-            `Too many unsuccessful sign-in attempts. Sign-in is temporarily locked for ${failure.retryAfterSeconds}s.`
-          );
-        } else {
-          // Uniform non-enumerating error: never disclose that a valid merchant account exists vs admin account
-          setErrorBanner(UNIFORM_ADMIN_AUTH_ERROR);
-        }
-        return;
-      }
-
-      if (adminCheck.status === 'network_error') {
-        setErrorBanner(
-          adminCheck.message || 'Network error while verifying administrator permissions.'
-        );
-        return;
-      }
-
-      clearAdminLoginFailures();
-
-      if (adminCheck.status === 'mfa_required' && adminCheck.mfa.verifiedTotpFactors[0]) {
-        setMfaChallengeFactor(adminCheck.mfa.verifiedTotpFactors[0]);
-        setPassword('');
-        return;
-      }
-
-      if (adminCheck.status === 'authorized' && adminCheck.admin) {
-        setAuthenticatedUser({
-          id: adminCheck.admin.id,
-          name: adminCheck.admin.name,
-          email: adminCheck.admin.email,
-          role: 'admin',
-          storeId: '',
-        });
-        recordAdminSessionEvent({
-          adminId: adminCheck.admin.id,
-          action: 'admin_sign_in',
-          targetType: 'session',
-          targetId: 'admin_portal',
-          outcome: 'success',
-          summary: 'Verified administrator session established.',
-        });
-        navigate(intendedDestination, { replace: true });
-      }
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
   const handleTotpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!mfaChallengeFactor || isSubmitting) return;
-    setIsSubmitting(true);
+    if (!mfaChallengeFactor || isSubmittingMfa) return;
+    setIsSubmittingMfa(true);
     setErrorBanner(null);
 
     try {
@@ -244,11 +173,16 @@ export const AdminLoginPage: React.FC = () => {
       }
 
       const finalCheck = await verifyServerAdminSession();
-      if (finalCheck.status === 'authorized' && finalCheck.admin) {
+      if (
+        finalCheck.status === 'authorized' &&
+        finalCheck.admin &&
+        isAuthorizedAdminEmail(finalCheck.admin.email)
+      ) {
+        clearAdminLoginFailures();
         setAuthenticatedUser({
           id: finalCheck.admin.id,
           name: finalCheck.admin.name,
-          email: finalCheck.admin.email,
+          email: AUTHORIZED_ADMIN_EMAIL,
           role: 'admin',
           storeId: '',
         });
@@ -258,23 +192,30 @@ export const AdminLoginPage: React.FC = () => {
           targetType: 'session',
           targetId: mfaChallengeFactor.id,
           outcome: 'success',
-          summary: 'Verified administrator session with AAL2 TOTP MFA.',
+          summary: 'Verified administrator Google session with AAL2 TOTP MFA.',
         });
         navigate(intendedDestination, { replace: true });
       } else {
+        clearAdminSessionEvents();
+        notifyAdminServiceWorkerSignOut();
+        await signOutFromSupabase();
+        await logout();
+        setMfaChallengeFactor(null);
+        setTotpCode('');
         setErrorBanner(UNIFORM_ADMIN_AUTH_ERROR);
       }
     } finally {
-      setIsSubmitting(false);
+      setIsSubmittingMfa(false);
     }
   };
 
   const handleAdminGoogleSignIn = async () => {
-    if (isSubmitting || isGoogleRedirecting) return;
+    if (isSubmittingMfa || isGoogleRedirecting) return;
     if (!isOnline) {
-      setErrorBanner('Your device is offline. Reconnect to continue.');
+      setErrorBanner('Your device is offline. Reconnect to the internet to authenticate.');
       return;
     }
+
     const rate = checkAdminLoginRateLimit();
     if (!rate.allowed) {
       setLockoutSeconds(rate.retryAfterSeconds);
@@ -284,13 +225,25 @@ export const AdminLoginPage: React.FC = () => {
       return;
     }
 
+    if (!isSupabaseConfigured || !supabase) {
+      setErrorBanner('Administrative authentication service is not configured.');
+      return;
+    }
+
     setIsGoogleRedirecting(true);
     setErrorBanner(null);
-    const callbackUrl = `${window.location.origin}/auth/callback?next=/admin`;
-    const { error } = await signInWithGoogle(callbackUrl);
+
+    // Clean callback URL without query string guarantees exact allowlist match in Supabase GoTrue
+    const callbackUrl = `${window.location.origin}/auth/callback`;
+    const { error } = await signInWithGoogle(callbackUrl, {
+      isAdminFlow: true,
+      nextPath: intendedDestination,
+      loginHint: AUTHORIZED_ADMIN_EMAIL,
+    });
+
     if (error) {
       setIsGoogleRedirecting(false);
-      setErrorBanner('Unable to start Google sign-in. Please use email and password or retry.');
+      setErrorBanner(error.message || 'Unable to start Google sign-in. Please retry.');
     }
   };
 
@@ -304,6 +257,9 @@ export const AdminLoginPage: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col justify-between p-4 sm:p-6 antialiased">
+      {/* Automatic PWA Install Prompt when supported */}
+      <AdminPWAInstallPrompt theme={theme} />
+
       {/* Minimal Top Bar */}
       <header className="w-full max-w-5xl mx-auto flex items-center justify-between gap-4 py-2">
         <div className="flex items-center gap-2.5">
@@ -342,7 +298,7 @@ export const AdminLoginPage: React.FC = () => {
 
         {isExpiredSession && !errorBanner && (
           <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-200 text-xs">
-            Your administrator session expired. Please sign in again to continue.
+            Your administrator session expired. Sign in with Google again to continue.
           </div>
         )}
 
@@ -361,7 +317,7 @@ export const AdminLoginPage: React.FC = () => {
             <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
               {mfaChallengeFactor
                 ? `Enter the 6-digit code from ${mfaChallengeFactor.friendlyName}.`
-                : 'Restricted operations portal for authorized AMAAS Technologies administrators.'}
+                : 'Restricted operations console for AMAAS Technologies. Sign in exclusively with the authorized Google account.'}
             </p>
           </div>
 
@@ -403,153 +359,107 @@ export const AdminLoginPage: React.FC = () => {
 
               <button
                 type="submit"
-                disabled={isSubmitting || totpCode.length !== 6}
+                disabled={isSubmittingMfa || totpCode.length !== 6}
                 className="w-full min-h-[48px] rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold text-xs inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
               >
-                {isSubmitting && <Loader2 className="w-4 h-4 animate-spin" />}
+                {isSubmittingMfa && <Loader2 className="w-4 h-4 animate-spin" />}
                 <span>Verify &amp; Enter Console</span>
               </button>
 
               <button
                 type="button"
                 onClick={async () => {
+                  clearAdminSessionEvents();
+                  notifyAdminServiceWorkerSignOut();
                   await signOutFromSupabase();
+                  await logout();
                   setMfaChallengeFactor(null);
                   setTotpCode('');
                   setErrorBanner(null);
                 }}
                 className="w-full min-h-[44px] rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-semibold text-xs cursor-pointer"
               >
-                Use Different Credentials
+                Cancel &amp; Sign Out
               </button>
             </form>
           ) : (
             <div className="space-y-4">
-              <form onSubmit={(e) => void handlePasswordSignIn(e)} className="space-y-4">
-                <div>
-                  <label
-                    htmlFor="admin-email"
-                    className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5"
-                  >
-                    Administrator Email
-                  </label>
-                  <div className="relative">
-                    <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                    <input
-                      id="admin-email"
-                      type="email"
-                      autoComplete="username"
-                      required
-                      disabled={isSubmitting || lockoutSeconds > 0}
-                      value={email}
-                      onChange={(e) => {
-                        setEmail(e.target.value);
-                        if (errorBanner) setErrorBanner(null);
-                      }}
-                      placeholder="admin@amaas.xyz"
-                      className="w-full min-h-[48px] pl-10 pr-4 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-white text-xs focus:outline-hidden focus:border-blue-600 disabled:opacity-60"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label
-                    htmlFor="admin-password"
-                    className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5"
-                  >
-                    Password
-                  </label>
-                  <div className="relative">
-                    <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                    <input
-                      id="admin-password"
-                      type={showPassword ? 'text' : 'password'}
-                      autoComplete="current-password"
-                      required
-                      disabled={isSubmitting || lockoutSeconds > 0}
-                      value={password}
-                      onChange={(e) => {
-                        setPassword(e.target.value);
-                        if (errorBanner) setErrorBanner(null);
-                      }}
-                      placeholder="Enter administrator password"
-                      className="w-full min-h-[48px] pl-10 pr-12 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-white text-xs focus:outline-hidden focus:border-blue-600 disabled:opacity-60"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword((prev) => !prev)}
-                      className="min-h-[44px] min-w-[44px] absolute right-1 top-1/2 -translate-y-1/2 inline-flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
-                      aria-label={showPassword ? 'Hide password' : 'Show password'}
-                    >
-                      {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={isSubmitting || isGoogleRedirecting || lockoutSeconds > 0 || !isOnline}
-                  className="w-full min-h-[48px] rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold text-xs inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
-                >
-                  {isSubmitting ? (
-                    <>
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      <span>Verifying Access...</span>
-                    </>
-                  ) : lockoutSeconds > 0 ? (
-                    <span className="tabular-nums">Locked ({lockoutSeconds}s)</span>
-                  ) : (
-                    <span>Sign In to GoAMAAS Admin</span>
-                  )}
-                </button>
-              </form>
-
-              <div className="relative py-1">
-                <div className="absolute inset-0 flex items-center">
-                  <div className="w-full border-t border-slate-200 dark:border-slate-800" />
-                </div>
-                <div className="relative flex justify-center">
-                  <span className="px-3 bg-white dark:bg-slate-900 text-[11px] text-slate-400">
-                    or authorized workspace SSO
-                  </span>
-                </div>
+              <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-1">
+                <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                  Authorized Administrator Account
+                </p>
+                <p className="text-xs font-mono font-semibold text-slate-900 dark:text-white break-all">
+                  {AUTHORIZED_ADMIN_EMAIL}
+                </p>
               </div>
 
               <button
                 type="button"
-                disabled={isSubmitting || isGoogleRedirecting || lockoutSeconds > 0 || !isOnline}
+                disabled={isGoogleRedirecting || lockoutSeconds > 0 || !isOnline}
                 onClick={() => void handleAdminGoogleSignIn()}
-                className="w-full min-h-[48px] px-4 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-950 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-800 disabled:opacity-50 text-slate-800 dark:text-slate-200 font-semibold text-xs inline-flex items-center justify-center gap-2.5 transition-colors cursor-pointer"
+                className="w-full min-h-[48px] px-4 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold text-xs sm:text-sm inline-flex items-center justify-center gap-3 transition-colors shadow-xs cursor-pointer"
               >
                 {isGoogleRedirecting ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                    <span>Redirecting to Google...</span>
+                  </>
+                ) : lockoutSeconds > 0 ? (
+                  <span className="tabular-nums">Temporarily Locked ({lockoutSeconds}s)</span>
                 ) : (
-                  <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
-                    <path
-                      fill="#4285F4"
-                      d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"
-                    />
-                    <path
-                      fill="#34A853"
-                      d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24z"
-                    />
-                    <path
-                      fill="#FBBC05"
-                      d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14z"
-                    />
-                    <path
-                      fill="#EA4335"
-                      d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96z"
-                    />
-                  </svg>
+                  <>
+                    <span className="w-6 h-6 rounded-md bg-white flex items-center justify-center shrink-0">
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" aria-hidden="true">
+                        <path
+                          fill="#4285F4"
+                          d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"
+                        />
+                        <path
+                          fill="#34A853"
+                          d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24z"
+                        />
+                        <path
+                          fill="#FBBC05"
+                          d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14z"
+                        />
+                        <path
+                          fill="#EA4335"
+                          d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96z"
+                        />
+                      </svg>
+                    </span>
+                    <span>Sign in with Google</span>
+                  </>
                 )}
-                <span>Continue with Authorized Google Account</span>
               </button>
+
+              {isEmbeddedIframe && typeof window !== 'undefined' && (
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-[11px] text-slate-600 dark:text-slate-400 space-y-1.5 leading-relaxed">
+                  <p>
+                    Google blocks sign-in inside embedded preview frames. Open Admin Login in a
+                    dedicated browser tab to complete Google authentication:
+                  </p>
+                  <a
+                    href={window.location.href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 font-semibold text-blue-600 dark:text-blue-400 hover:underline"
+                  >
+                    <span>Open Admin Login in Full Tab</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+              )}
+
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 text-center leading-relaxed">
+                Any other Google account is automatically rejected and signed out. Server-side
+                administrator role verification is enforced on every request.
+              </p>
             </div>
           )}
         </div>
 
-        {/* Dedicated Android / Mobile PWA Install Card */}
+        {/* Dedicated Android / Desktop / iOS PWA Install Card */}
         <AdminPWAInstallButton theme={theme} variant="card" />
       </main>
 

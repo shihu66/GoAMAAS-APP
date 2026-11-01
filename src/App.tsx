@@ -1,6 +1,7 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AppProvider } from './context/AppContext';
+import { LanguageProvider } from './context/LanguageContext';
 import { validateSubdomainFormat } from './lib/supabase';
 
 // Layouts
@@ -67,9 +68,10 @@ export default function App() {
   })();
 
   return (
-    <AppProvider>
-      <BrowserRouter>
-        {isTenantSubdomain && (
+    <LanguageProvider>
+      <AppProvider>
+        <BrowserRouter>
+          {isTenantSubdomain && (
           <Routes>
             <Route path="*" element={<PublicTenantWebsitePage />} />
           </Routes>
@@ -158,6 +160,7 @@ export default function App() {
         </Routes>
         )}
       </BrowserRouter>
-    </AppProvider>
+      </AppProvider>
+    </LanguageProvider>
   );
 }

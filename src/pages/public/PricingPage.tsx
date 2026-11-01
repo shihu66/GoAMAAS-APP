@@ -1,27 +1,25 @@
 import React, { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { useApp } from '../../context/AppContext';
+import { useLanguage, usePageSeo } from '../../context/LanguageContext';
+import { Reveal } from '../../components/ui/MotionPrimitives';
 import {
-  CheckCircle2,
-  X,
-  HelpCircle,
-  Sparkles,
+  Check,
+  ChevronDown,
   ArrowRight,
   Globe2,
   Bot,
-  Zap,
   ShieldAlert,
   Info,
-  Calendar,
   Layers,
   AlertTriangle,
+  Code2,
 } from 'lucide-react';
 import {
   DASHBOARD_SUBSCRIPTION_PLANS,
   AI_AUTOMATION_PACKAGES,
   WEBSITE_DEVELOPMENT_PACKAGES,
-  THIRD_PARTY_DISCLOSURES,
-  SUBSCRIPTION_VS_ONETIME_COMPARISON,
   DashboardPlanConfig,
   AutomationPackageConfig,
   WebsitePackageConfig,
@@ -29,6 +27,15 @@ import {
 } from '../../data/pricingConfig';
 import { isSupabaseConfigured } from '../../lib/supabase';
 import { Modal } from '../../components/ui/Modal';
+
+type PricingCategory = 'webSubscription' | 'dashboard' | 'automations' | 'website';
+
+function resolveInitialTab(param: string | null): PricingCategory {
+  if (param === 'dashboard' || param === 'automations' || param === 'website' || param === 'webSubscription') {
+    return param;
+  }
+  return 'webSubscription';
+}
 
 export const PricingPage: React.FC = () => {
   const {
@@ -39,20 +46,31 @@ export const PricingPage: React.FC = () => {
     servicePricingCatalog,
     isPricingCatalogLoaded,
   } = useApp();
+  const { t } = useLanguage();
+  const pp = t.pricingPage;
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const prefersReducedMotion = useReducedMotion();
+
+  usePageSeo({
+    title: pp.seoTitle,
+    description: pp.seoDescription,
+  });
 
   const useLiveCatalog = isAuthenticated && isSupabaseConfigured && isPricingCatalogLoaded;
   const getPlanDisplayState = (plan: DashboardPlanConfig) =>
     resolveCatalogPlanState({
       serviceType: 'dashboard_plan',
       serviceId: plan.id,
-      fallbackLabel: plan.name,
+      fallbackLabel: pp.dashboardTab.plans[plan.id]?.name || plan.name,
       fallbackPriceBdt: plan.priceMonthly,
       catalog: useLiveCatalog ? servicePricingCatalog : undefined,
       requireCatalog: useLiveCatalog,
     });
 
-  const [activeCategory, setActiveCategory] = useState<'dashboard' | 'automations' | 'webSubscription' | 'website'>('dashboard');
+  const [activeCategory, setActiveCategory] = useState<PricingCategory>(() =>
+    resolveInitialTab(searchParams.get('tab'))
+  );
 
   // Confirmation modal state for choosing packages
   const [selectedDashboardPlan, setSelectedDashboardPlan] = useState<DashboardPlanConfig | null>(null);
@@ -61,29 +79,6 @@ export const PricingPage: React.FC = () => {
 
   // FAQ Accordion
   const [openFaqIndex, setOpenFaqIndex] = useState<number | null>(0);
-
-  const pricingFaqs = [
-    {
-      q: 'How does the 7-day free trial for Dashboard plans work?',
-      a: 'All four GoAMAAS dashboard plans (Starter, Business, Pro, Enterprise) come with an unrestricted 7-day free trial. You can test order workflows, inventory tracking, and page building without entering a credit card upfront.',
-    },
-    {
-      q: 'Are AI Automation fees monthly or one-time?',
-      a: 'AI Automation packages are recurring monthly service management fees for maintaining workflows, conversational bots, and CRM triggers. Separate one-time setup fees apply where indicated.',
-    },
-    {
-      q: 'Why are Meta and WhatsApp API costs billed separately?',
-      a: 'Meta charges per-conversation fees directly for official WhatsApp Business Cloud API interactions and boosted Messenger ad click-to-chat messaging. GoAMAAS charges for the software orchestration layer, keeping our pricing transparent and unbundled.',
-    },
-    {
-      q: 'Is the first-year domain and hosting really 100% free with websites?',
-      a: 'Yes. Every website package (Starter ৳8,000, Business ৳15,000, and Advanced ৳25,000) includes a standard top-level domain (.com) registration and 12 months of high-speed SSD cloud hosting at zero additional charge.',
-    },
-    {
-      q: 'When do Courier API and WhatsApp integrations start working?',
-      a: 'These integrations work once configured with your active merchant credentials (e.g. Steadfast API key, Pathao client secret, or WhatsApp Business account). They do not transmit live parcel orders until you enter your valid gateway keys in Settings.',
-    },
-  ];
 
   const handleConfirmDashboardPlan = () => {
     if (!selectedDashboardPlan) return;
@@ -98,7 +93,8 @@ export const PricingPage: React.FC = () => {
 
   const handleConfirmAutomation = () => {
     if (!selectedAutoPackage) return;
-    showToast(`Requested setup for ${selectedAutoPackage.name}. Our automation engineers will reach out to verify API access.`, 'success');
+    const localizedName = pp.automationsTab.packages[selectedAutoPackage.id]?.name || selectedAutoPackage.name;
+    showToast(pp.modals.autoToastSuccess(localizedName), 'success');
     setSelectedAutoPackage(null);
     if (isAuthenticated) {
       navigate('/dashboard/automations');
@@ -113,86 +109,337 @@ export const PricingPage: React.FC = () => {
     navigate('/dashboard/website-requests');
   };
 
+  const websitePrice = websiteSubscriptionPlan?.priceMonthly || 600;
+
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 py-16 transition-colors">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-16">
-        {/* Header */}
-        <div className="text-center max-w-3xl mx-auto space-y-4">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-50 dark:bg-blue-950/60 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300 text-xs font-semibold">
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>Clear, Honest Pricing in Bangladeshi Taka (৳)</span>
-          </div>
+    <div className="min-h-screen bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors">
+      {/* Header & Segmented Category Tabs */}
+      <section className="relative pt-14 pb-12 sm:pt-20 sm:pb-16 border-b border-slate-200/80 dark:border-slate-800/80 overflow-hidden">
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 bg-[radial-gradient(#cbd5e1_1px,transparent_1px)] dark:bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:28px_28px] opacity-40 [mask-image:radial-gradient(ellipse_70%_60%_at_50%_20%,#000_50%,transparent_100%)]"
+        />
+        <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center space-y-5">
+          <Reveal y={12}>
+            <p className="text-xs font-semibold text-blue-600 dark:text-blue-400">
+              {pp.eyebrow}
+            </p>
+          </Reveal>
 
-          <h1 className="text-3xl sm:text-5xl font-extrabold text-slate-900 dark:text-white tracking-tight">
-            Transparent Pricing for Growing Businesses
-          </h1>
-          <p className="text-sm sm:text-base text-slate-600 dark:text-slate-300 leading-relaxed max-w-2xl mx-auto">
-            Choose from flexible monthly SaaS dashboard tiers, managed AI automation workflows, or one-time custom website engineering by AMAAS.
-          </p>
+          <Reveal delay={0.05} y={16}>
+            <h1 className="text-3xl sm:text-5xl font-extrabold text-slate-950 dark:text-white tracking-tight leading-[1.12] max-w-3xl mx-auto text-balance">
+              {pp.title}
+            </h1>
+          </Reveal>
 
-          {/* Four Category Tabs */}
-          <div className="inline-flex p-1.5 rounded-xl bg-slate-200/80 dark:bg-slate-800/80 text-xs font-semibold mt-4 overflow-x-auto max-w-full">
-            <button
-              onClick={() => setActiveCategory('dashboard')}
-              className={`px-4 sm:px-5 py-2.5 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap ${
-                activeCategory === 'dashboard'
-                  ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs font-bold'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-              }`}
+          <Reveal delay={0.1} y={16}>
+            <p className="text-sm sm:text-base text-slate-600 dark:text-slate-300 leading-relaxed max-w-2xl mx-auto">
+              {pp.subtitle}
+            </p>
+          </Reveal>
+
+          {/* Four Interactive Segmented Category Tabs */}
+          <Reveal delay={0.14} y={14}>
+            <div
+              role="tablist"
+              aria-label={pp.title}
+              className="inline-flex p-1.5 rounded-2xl bg-slate-100 dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 text-xs font-semibold mt-3 overflow-x-auto max-w-full gap-1"
             >
-              <Layers className="w-3.5 h-3.5" />
-              <span>1. Dashboard Plans</span>
-            </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeCategory === 'webSubscription'}
+                onClick={() => setActiveCategory('webSubscription')}
+                className={`min-h-[42px] px-4 sm:px-5 py-2.5 rounded-xl transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer ${
+                  activeCategory === 'webSubscription'
+                    ? 'bg-blue-600 text-white font-bold shadow-xs'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-white'
+                }`}
+              >
+                <Globe2 className="w-3.5 h-3.5 shrink-0" />
+                <span>{pp.tabs.websiteSub}</span>
+              </button>
 
-            <button
-              onClick={() => setActiveCategory('automations')}
-              className={`px-4 sm:px-5 py-2.5 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap ${
-                activeCategory === 'automations'
-                  ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs font-bold'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-              }`}
-            >
-              <Bot className="w-3.5 h-3.5" />
-              <span>2. AI Automation</span>
-            </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeCategory === 'dashboard'}
+                onClick={() => setActiveCategory('dashboard')}
+                className={`min-h-[42px] px-4 sm:px-5 py-2.5 rounded-xl transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer ${
+                  activeCategory === 'dashboard'
+                    ? 'bg-white dark:bg-slate-800 text-slate-950 dark:text-white font-bold shadow-xs'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-white'
+                }`}
+              >
+                <Layers className="w-3.5 h-3.5 shrink-0" />
+                <span>{pp.tabs.dashboard}</span>
+              </button>
 
-            <button
-              onClick={() => setActiveCategory('webSubscription')}
-              className={`px-4 sm:px-5 py-2.5 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap ${
-                activeCategory === 'webSubscription'
-                  ? 'bg-blue-600 text-white shadow-xs font-bold'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400'
-              }`}
-            >
-              <Globe2 className="w-3.5 h-3.5" />
-              <span>3. Website Subscription (৳600/mo) ★</span>
-            </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeCategory === 'automations'}
+                onClick={() => setActiveCategory('automations')}
+                className={`min-h-[42px] px-4 sm:px-5 py-2.5 rounded-xl transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer ${
+                  activeCategory === 'automations'
+                    ? 'bg-white dark:bg-slate-800 text-slate-950 dark:text-white font-bold shadow-xs'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-white'
+                }`}
+              >
+                <Bot className="w-3.5 h-3.5 shrink-0" />
+                <span>{pp.tabs.automations}</span>
+              </button>
 
-            <button
-              onClick={() => setActiveCategory('website')}
-              className={`px-4 sm:px-5 py-2.5 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap ${
-                activeCategory === 'website'
-                  ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs font-bold'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-              }`}
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>4. Custom Dev (One-Time)</span>
-            </button>
-          </div>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeCategory === 'website'}
+                onClick={() => setActiveCategory('website')}
+                className={`min-h-[42px] px-4 sm:px-5 py-2.5 rounded-xl transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer ${
+                  activeCategory === 'website'
+                    ? 'bg-white dark:bg-slate-800 text-slate-950 dark:text-white font-bold shadow-xs'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-white'
+                }`}
+              >
+                <Code2 className="w-3.5 h-3.5 shrink-0" />
+                <span>{pp.tabs.customWeb}</span>
+              </button>
+            </div>
+          </Reveal>
         </div>
+      </section>
+
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16 sm:py-20 space-y-20">
+        {/* =========================================================================
+            CATEGORY 1: WEBSITE SUBSCRIPTION PLAN (GoAMAAS Website - ৳600/month)
+           ========================================================================= */}
+        {activeCategory === 'webSubscription' && (
+          <div className="space-y-16">
+            <div className="text-center space-y-2 max-w-2xl mx-auto">
+              <p className="text-xs font-semibold text-blue-600 dark:text-blue-400">
+                {pp.webSubTab.kicker}
+              </p>
+              <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-950 dark:text-white tracking-tight text-balance">
+                {pp.webSubTab.title}
+              </h2>
+              <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
+                {pp.webSubTab.subtitlePrefix}{' '}
+                <code className="font-mono text-blue-600 dark:text-blue-400 font-semibold">
+                  businessname.amaas.xyz
+                </code>{' '}
+                {pp.webSubTab.subtitleSuffix}
+              </p>
+            </div>
+
+            {/* Featured Flagship Plan Card */}
+            <div className="max-w-3xl mx-auto">
+              <div className="p-8 sm:p-10 rounded-2xl bg-slate-950 dark:bg-slate-900 text-white border border-slate-800 space-y-7">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-blue-400 font-semibold">
+                  <span>{pp.webSubTab.planTypeLabel}</span>
+                  <span className="text-emerald-400">{pp.webSubTab.bestBadge}</span>
+                </div>
+
+                <div className="space-y-2">
+                  <h3 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+                    {websiteSubscriptionPlan.name}
+                  </h3>
+                  <p className="text-xs sm:text-sm text-slate-300 max-w-xl leading-relaxed">
+                    {pp.webSubTab.planSubtitle}
+                  </p>
+                </div>
+
+                {/* Price Row */}
+                <div className="flex flex-wrap items-baseline justify-between gap-4 pt-2 pb-6 border-b border-slate-800">
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-4xl sm:text-5xl font-extrabold font-mono text-white tabular-nums">
+                      ৳{websitePrice.toLocaleString()}
+                    </span>
+                    <span className="text-sm text-slate-400">{pp.common.perMonth}</span>
+                  </div>
+                  <span className="text-xs font-semibold text-emerald-400">
+                    {pp.webSubTab.zeroUpfront}
+                  </span>
+                </div>
+
+                {/* Honest Subdomain & Custom Domain Row */}
+                <div className="p-4 rounded-xl bg-slate-900 dark:bg-slate-950/70 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5 text-xs text-slate-200">
+                    <Globe2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>
+                      {pp.webSubTab.freeSubdomainLabel}{' '}
+                      <code className="font-mono text-emerald-400 font-bold">
+                        businessname.amaas.xyz
+                      </code>
+                    </span>
+                  </div>
+                  <span className="text-[11px] text-slate-400">
+                    {pp.webSubTab.customDomainSeparate}
+                  </span>
+                </div>
+
+                {/* Included Features */}
+                <div className="space-y-3">
+                  <h4 className="text-xs font-semibold text-slate-300">
+                    {pp.webSubTab.includedHeading}
+                  </h4>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs text-slate-200">
+                    {pp.webSubTab.features.map((feat, idx) => (
+                      <div key={idx} className="flex items-start gap-2.5">
+                        <Check className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+                        <span className="leading-snug">{feat}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Resource Allowances */}
+                <div className="pt-5 border-t border-slate-800 space-y-3 text-xs">
+                  <span className="text-[11px] font-semibold text-slate-400 block">
+                    {pp.webSubTab.limitsHeading}
+                  </span>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-slate-300">
+                    <div>
+                      <span className="text-slate-500 block text-[11px]">{pp.webSubTab.limitPages}</span>
+                      <strong className="text-white font-mono tabular-nums">
+                        {pp.webSubTab.limitPagesVal(websiteSubscriptionPlan.limits.maxPages)}
+                      </strong>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 block text-[11px]">{pp.webSubTab.limitStorage}</span>
+                      <strong className="text-white font-mono tabular-nums">
+                        {pp.webSubTab.limitStorageVal(websiteSubscriptionPlan.limits.maxStorageMb)}
+                      </strong>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 block text-[11px]">{pp.webSubTab.limitBandwidth}</span>
+                      <strong className="text-white font-mono tabular-nums">
+                        {pp.webSubTab.limitBandwidthVal(websiteSubscriptionPlan.limits.maxBandwidthGb)}
+                      </strong>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 block text-[11px]">{pp.webSubTab.limitUpdates}</span>
+                      <strong className="text-white">
+                        {pp.webSubTab.limitUpdatesVal(websiteSubscriptionPlan.limits.monthlyUpdateRequests)}
+                      </strong>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Primary CTA */}
+                <div className="pt-2 space-y-2.5">
+                  <button
+                    type="button"
+                    onClick={() => navigate('/create-website')}
+                    className="w-full min-h-[48px] py-3.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-sm transition-colors flex items-center justify-center gap-2 group cursor-pointer"
+                  >
+                    <span>{pp.webSubTab.startCta(websitePrice)}</span>
+                    <ArrowRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
+                  </button>
+                  <p className="text-center text-[11px] text-slate-400">
+                    {pp.webSubTab.startSubnote}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* 3-Step Launch Workflow */}
+            <div className="space-y-8">
+              <div className="text-center space-y-1.5">
+                <p className="text-xs font-semibold text-blue-600 dark:text-blue-400">
+                  {pp.webSubTab.howKicker}
+                </p>
+                <h3 className="text-2xl font-bold text-slate-950 dark:text-white tracking-tight">
+                  {pp.webSubTab.howTitle}
+                </h3>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                {pp.webSubTab.howSteps.map((stepItem, sIdx) => (
+                  <div
+                    key={sIdx}
+                    className="p-7 rounded-2xl bg-slate-50/70 dark:bg-slate-900/70 border border-slate-200/90 dark:border-slate-800 space-y-3"
+                  >
+                    <h4 className="font-bold text-sm sm:text-base text-slate-950 dark:text-white">
+                      {stepItem.title}
+                    </h4>
+                    <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300 leading-relaxed">
+                      {stepItem.desc}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Comparison Table: Subscription vs One-Time Development */}
+            <div className="p-6 sm:p-8 rounded-2xl bg-slate-50/60 dark:bg-slate-900/60 border border-slate-200/90 dark:border-slate-800 space-y-6">
+              <div className="text-center max-w-xl mx-auto space-y-1">
+                <p className="text-xs font-semibold text-blue-600 dark:text-blue-400">
+                  {pp.webSubTab.compKicker}
+                </p>
+                <h3 className="text-xl font-bold text-slate-950 dark:text-white">
+                  {pp.webSubTab.compTitle}
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  {pp.webSubTab.compSubtitle}
+                </p>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs sm:text-[13px]">
+                  <thead className="border-b border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 font-semibold">
+                    <tr>
+                      <th className="py-3 px-4">{pp.webSubTab.compColFeature}</th>
+                      <th className="py-3 px-4 text-blue-600 dark:text-blue-400 font-bold">
+                        {pp.webSubTab.compColSub}
+                      </th>
+                      <th className="py-3 px-4">{pp.webSubTab.compColOneTime}</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800">
+                    {pp.webSubTab.compRows.map((row, idx) => (
+                      <tr key={idx} className="hover:bg-white/60 dark:hover:bg-slate-900/80">
+                        <td className="py-3.5 px-4 font-semibold text-slate-950 dark:text-white">
+                          {row.feature}
+                        </td>
+                        <td className="py-3.5 px-4 font-medium text-blue-700 dark:text-blue-300">
+                          {row.subscriptionPlan}
+                        </td>
+                        <td className="py-3.5 px-4 text-slate-600 dark:text-slate-400">
+                          {row.oneTimePackages}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Subscription Terms & Disclosures */}
+            <div className="p-6 rounded-2xl bg-slate-50/70 dark:bg-slate-900/70 border border-slate-200/90 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400 space-y-2.5">
+              <div className="flex items-center gap-2 font-bold text-slate-950 dark:text-white">
+                <ShieldAlert className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+                <span>{pp.webSubTab.termsHeading}</span>
+              </div>
+              <ul className="space-y-1.5 list-disc pl-5 leading-relaxed">
+                {pp.webSubTab.disclosures.map((d, dIdx) => (
+                  <li key={dIdx}>{d}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        )}
 
         {/* =========================================================================
-            CATEGORY 1: DASHBOARD SUBSCRIPTION PLANS
+            CATEGORY 2: DASHBOARD SUBSCRIPTION PLANS
            ========================================================================= */}
         {activeCategory === 'dashboard' && (
           <div className="space-y-12">
-            <div className="text-center space-y-1">
-              <span className="text-xs font-bold text-blue-600 dark:text-blue-400 tracking-wider uppercase">
-                Recurring Software Subscription
-              </span>
-              <p className="text-xs text-slate-500">
-                All plans include a full 7-day free trial. Cancel or change anytime.
+            <div className="text-center space-y-1.5">
+              <p className="text-xs font-semibold text-blue-600 dark:text-blue-400">
+                {pp.dashboardTab.kicker}
+              </p>
+              <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400">
+                {pp.dashboardTab.subnote}
               </p>
             </div>
 
@@ -201,41 +448,35 @@ export const PricingPage: React.FC = () => {
                 const isCurrent = isAuthenticated && currentPlan === plan.id;
                 const planState = getPlanDisplayState(plan);
                 const isUnavailable = useLiveCatalog && (!planState.isAvailable || planState.priceBdt === null);
+                const localized = pp.dashboardTab.plans[plan.id];
 
                 return (
                   <div
                     key={plan.id}
-                    className={`p-6 rounded-2xl flex flex-col justify-between transition-all ${
+                    className={`p-6 sm:p-7 rounded-2xl flex flex-col justify-between transition-colors ${
                       plan.isPopular && !isUnavailable
-                        ? 'bg-slate-900 text-white border-2 border-blue-500 shadow-xl relative'
-                        : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white shadow-xs'
+                        ? 'bg-slate-950 dark:bg-slate-900 text-white border-2 border-blue-600'
+                        : 'bg-slate-50/70 dark:bg-slate-900/70 border border-slate-200/90 dark:border-slate-800 text-slate-900 dark:text-white'
                     } ${isUnavailable ? 'opacity-70' : ''}`}
                   >
-                    {plan.isPopular && !isUnavailable && (
-                      <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full bg-blue-600 text-white font-semibold text-[10px] uppercase tracking-wider shadow-sm">
-                        Most Popular
-                      </div>
-                    )}
-
                     <div className="space-y-4">
                       <div>
-                        <div className="flex items-center justify-between">
-                          <h3 className="text-base font-bold tracking-tight">{planState.planTierLabel}</h3>
-                          <span
-                            className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                              plan.isPopular && !isUnavailable
-                                ? 'bg-blue-900/60 text-blue-300 border border-blue-700'
-                                : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
-                            }`}
-                          >
-                            7-Day Free Trial
+                        <div className="flex items-center justify-between gap-2 text-[11px] font-semibold mb-1.5">
+                          <span className={plan.isPopular && !isUnavailable ? 'text-emerald-400' : 'text-emerald-600 dark:text-emerald-400'}>
+                            {pp.common.freeTrialBadge}
                           </span>
+                          {plan.isPopular && !isUnavailable && (
+                            <span className="text-blue-400">{pp.common.mostPopular}</span>
+                          )}
                         </div>
-                        <p className={`text-xs mt-1 ${plan.isPopular && !isUnavailable ? 'text-blue-300 font-medium' : 'text-slate-500 font-medium'}`}>
-                          {plan.subtitle}
+                        <h3 className="text-lg font-bold tracking-tight">
+                          {useLiveCatalog ? planState.planTierLabel : localized?.name || plan.name}
+                        </h3>
+                        <p className={`text-xs mt-1 font-medium ${plan.isPopular && !isUnavailable ? 'text-blue-300' : 'text-slate-600 dark:text-slate-400'}`}>
+                          {localized?.subtitle || plan.subtitle}
                         </p>
-                        <p className={`text-[11px] mt-1 ${plan.isPopular && !isUnavailable ? 'text-slate-400' : 'text-slate-500'}`}>
-                          {plan.description}
+                        <p className={`text-xs mt-1.5 leading-relaxed ${plan.isPopular && !isUnavailable ? 'text-slate-400' : 'text-slate-500 dark:text-slate-400'}`}>
+                          {localized?.description || plan.description}
                         </p>
                       </div>
 
@@ -246,20 +487,22 @@ export const PricingPage: React.FC = () => {
                               ৳{planState.priceBdt.toLocaleString()}
                             </span>
                             <span className={`text-xs ${plan.isPopular && !isUnavailable ? 'text-slate-400' : 'text-slate-500'}`}>
-                              / month
+                              {pp.common.perMonth}
                             </span>
                           </>
                         ) : (
-                          <span className="text-lg font-bold text-slate-400">Currently unavailable</span>
+                          <span className="text-base font-bold text-slate-400">
+                            {pp.common.currentlyUnavailable}
+                          </span>
                         )}
                       </div>
 
-                      <div className={`pt-4 space-y-2 text-xs border-t ${plan.isPopular && !isUnavailable ? 'border-slate-800' : 'border-slate-100 dark:border-slate-800'}`}>
-                        {plan.features.map((feat, fIdx) => (
+                      <div className={`pt-4 space-y-2.5 text-xs border-t ${plan.isPopular && !isUnavailable ? 'border-slate-800' : 'border-slate-200/80 dark:border-slate-800'}`}>
+                        {(localized?.features || plan.features).map((feat, fIdx) => (
                           <div key={fIdx} className="flex items-start gap-2">
-                            <CheckCircle2
+                            <Check
                               className={`w-3.5 h-3.5 shrink-0 mt-0.5 ${
-                                plan.isPopular && !isUnavailable ? 'text-blue-400' : 'text-blue-600'
+                                plan.isPopular && !isUnavailable ? 'text-blue-400' : 'text-blue-600 dark:text-blue-400'
                               }`}
                             />
                             <span className={plan.isPopular && !isUnavailable ? 'text-slate-200' : 'text-slate-700 dark:text-slate-300'}>
@@ -272,25 +515,26 @@ export const PricingPage: React.FC = () => {
 
                     <div className="pt-6">
                       <button
+                        type="button"
                         disabled={isCurrent || isUnavailable}
                         onClick={() => {
                           if (!isUnavailable) setSelectedDashboardPlan(plan);
                         }}
-                        className={`w-full py-2.5 rounded-lg text-xs font-semibold transition-colors shadow-xs ${
+                        className={`w-full min-h-[44px] py-2.5 rounded-xl text-xs font-semibold transition-colors ${
                           isCurrent
                             ? 'bg-emerald-600 text-white cursor-default'
                             : isUnavailable
                             ? 'bg-slate-200 dark:bg-slate-800 text-slate-400 cursor-not-allowed'
                             : plan.isPopular
                             ? 'bg-blue-600 hover:bg-blue-500 text-white cursor-pointer'
-                            : 'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-900 dark:text-white cursor-pointer'
+                            : 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-900 dark:text-white cursor-pointer'
                         }`}
                       >
                         {isCurrent
-                          ? 'Current Active Plan'
+                          ? pp.common.currentActivePlan
                           : isUnavailable
-                          ? 'Currently Unavailable'
-                          : plan.ctaLabel}
+                          ? pp.common.currentlyUnavailable
+                          : localized?.ctaLabel || plan.ctaLabel}
                       </button>
                     </div>
                   </div>
@@ -298,589 +542,341 @@ export const PricingPage: React.FC = () => {
               })}
             </div>
 
-            <div className="p-4 rounded-xl bg-slate-100 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400 flex items-start gap-2.5">
-              <Info className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
+            <div className="p-4 sm:p-5 rounded-xl bg-slate-50 dark:bg-slate-900/70 border border-slate-200/90 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400 flex items-start gap-2.5 leading-relaxed">
+              <Info className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
               <span>
-                <strong>Integration Note:</strong> Courier APIs and WhatsApp notification modules require active merchant credentials with Steadfast, Pathao, RedX, or Meta before live data transmits. They do not operate prior to account configuration.
+                <strong className="text-slate-900 dark:text-white">{pp.dashboardTab.integrationNoteLabel}</strong>{' '}
+                {pp.dashboardTab.integrationNoteBody}
               </span>
             </div>
           </div>
         )}
 
         {/* =========================================================================
-            CATEGORY 2: AI AUTOMATION PACKAGES
+            CATEGORY 3: AI AUTOMATION PACKAGES
            ========================================================================= */}
         {activeCategory === 'automations' && (
           <div className="space-y-12">
-            <div className="text-center space-y-1">
-              <span className="text-xs font-bold text-blue-600 dark:text-blue-400 tracking-wider uppercase">
-                Monthly Managed Automation Services
-              </span>
-              <p className="text-xs text-slate-500">
-                Separate from Dashboard subscriptions. Managed monthly fees for conversational workflows and bots.
+            <div className="text-center space-y-1.5">
+              <p className="text-xs font-semibold text-blue-600 dark:text-blue-400">
+                {pp.automationsTab.kicker}
+              </p>
+              <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400">
+                {pp.automationsTab.subnote}
               </p>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-              {AI_AUTOMATION_PACKAGES.map((auto) => (
-                <div
-                  key={auto.id}
-                  className={`p-6 rounded-2xl flex flex-col justify-between transition-all ${
-                    auto.isPopular
-                      ? 'bg-slate-900 text-white border-2 border-purple-500 shadow-xl relative'
-                      : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white shadow-xs'
-                  }`}
-                >
-                  {auto.isPopular && (
-                    <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full bg-purple-600 text-white font-semibold text-[10px] uppercase tracking-wider shadow-sm">
-                      Recommended
-                    </div>
-                  )}
-
-                  <div className="space-y-4">
-                    <div>
-                      <h3 className="text-base font-bold tracking-tight">{auto.name}</h3>
-                      <p className={`text-xs mt-1 ${auto.isPopular ? 'text-slate-300' : 'text-slate-500'}`}>
-                        {auto.description}
-                      </p>
-                    </div>
-
-                    <div>
-                      <div className="flex items-baseline gap-1">
-                        <span className="text-3xl sm:text-4xl font-extrabold font-mono tabular-nums">
-                          ৳{auto.priceMonthly.toLocaleString()}
-                        </span>
-                        <span className={`text-xs ${auto.isPopular ? 'text-slate-400' : 'text-slate-500'}`}>
-                          / month
-                        </span>
+              {AI_AUTOMATION_PACKAGES.map((auto) => {
+                const localized = pp.automationsTab.packages[auto.id];
+                return (
+                  <div
+                    key={auto.id}
+                    className={`p-6 sm:p-7 rounded-2xl flex flex-col justify-between transition-colors ${
+                      auto.isPopular
+                        ? 'bg-slate-950 dark:bg-slate-900 text-white border-2 border-blue-600'
+                        : 'bg-slate-50/70 dark:bg-slate-900/70 border border-slate-200/90 dark:border-slate-800 text-slate-900 dark:text-white'
+                    }`}
+                  >
+                    <div className="space-y-4">
+                      <div>
+                        {auto.isPopular && (
+                          <p className="text-[11px] font-semibold text-blue-400 mb-1">
+                            {pp.common.recommended}
+                          </p>
+                        )}
+                        <h3 className="text-lg font-bold tracking-tight">
+                          {localized?.name || auto.name}
+                        </h3>
+                        <p className={`text-xs mt-1.5 leading-relaxed ${auto.isPopular ? 'text-slate-300' : 'text-slate-600 dark:text-slate-400'}`}>
+                          {localized?.description || auto.description}
+                        </p>
                       </div>
-                      <span className={`block text-[11px] font-mono mt-1 ${auto.isPopular ? 'text-purple-300' : 'text-slate-500'}`}>
-                        {auto.setupFeeLabel}
-                      </span>
-                    </div>
 
-                    <div className={`pt-4 space-y-2 text-xs border-t ${auto.isPopular ? 'border-slate-800' : 'border-slate-100 dark:border-slate-800'}`}>
-                      {auto.features.map((feat, fIdx) => (
-                        <div key={fIdx} className="flex items-start gap-2">
-                          <CheckCircle2
-                            className={`w-3.5 h-3.5 shrink-0 mt-0.5 ${
-                              auto.isPopular ? 'text-purple-400' : 'text-blue-600'
-                            }`}
-                          />
-                          <span className={auto.isPopular ? 'text-slate-200' : 'text-slate-700 dark:text-slate-300'}>
-                            {feat}
+                      <div>
+                        <div className="flex items-baseline gap-1">
+                          <span className="text-3xl sm:text-4xl font-extrabold font-mono tabular-nums">
+                            ৳{auto.priceMonthly.toLocaleString()}
+                          </span>
+                          <span className={`text-xs ${auto.isPopular ? 'text-slate-400' : 'text-slate-500'}`}>
+                            {pp.common.perMonth}
                           </span>
                         </div>
-                      ))}
+                        <span className={`block text-[11px] font-mono mt-1 ${auto.isPopular ? 'text-blue-300' : 'text-slate-500 dark:text-slate-400'}`}>
+                          {localized?.setupFeeLabel || auto.setupFeeLabel}
+                        </span>
+                      </div>
+
+                      <div className={`pt-4 space-y-2.5 text-xs border-t ${auto.isPopular ? 'border-slate-800' : 'border-slate-200/80 dark:border-slate-800'}`}>
+                        {(localized?.features || auto.features).map((feat, fIdx) => (
+                          <div key={fIdx} className="flex items-start gap-2">
+                            <Check
+                              className={`w-3.5 h-3.5 shrink-0 mt-0.5 ${
+                                auto.isPopular ? 'text-blue-400' : 'text-blue-600 dark:text-blue-400'
+                              }`}
+                            />
+                            <span className={auto.isPopular ? 'text-slate-200' : 'text-slate-700 dark:text-slate-300'}>
+                              {feat}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="pt-6">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedAutoPackage(auto)}
+                        className={`w-full min-h-[44px] py-2.5 rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
+                          auto.isPopular
+                            ? 'bg-blue-600 hover:bg-blue-500 text-white'
+                            : 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:bg-blue-600 hover:text-white hover:border-blue-600 text-slate-900 dark:text-white'
+                        }`}
+                      >
+                        {localized?.ctaLabel || auto.ctaLabel}
+                      </button>
                     </div>
                   </div>
-
-                  <div className="pt-6">
-                    <button
-                      onClick={() => setSelectedAutoPackage(auto)}
-                      className={`w-full py-2.5 rounded-lg text-xs font-semibold transition-colors shadow-xs ${
-                        auto.isPopular
-                          ? 'bg-purple-600 hover:bg-purple-500 text-white'
-                          : 'bg-slate-100 dark:bg-slate-800 hover:bg-blue-600 hover:text-white text-slate-900 dark:text-white'
-                      }`}
-                    >
-                      {auto.ctaLabel}
-                    </button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
 
-            {/* Third-Party Disclosure Callout */}
-            <div className="p-5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 text-xs text-amber-900 dark:text-amber-200 space-y-2">
+            <div className="p-5 rounded-xl bg-amber-50/80 dark:bg-amber-950/30 border border-amber-200/90 dark:border-amber-900/60 text-xs text-amber-900 dark:text-amber-200 space-y-1.5">
               <div className="flex items-center gap-2 font-bold text-sm">
-                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                <span>Important Third-Party Billing & Usage Disclosure</span>
+                <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                <span>{pp.automationsTab.disclosureTitle}</span>
               </div>
-              <p className="leading-relaxed">
-                WhatsApp Business Cloud API conversations (Meta charges per marketing, utility, or authentication thread), Facebook Messenger platform charges, external SMS gateways, and LLM model compute costs are billed directly by third-party providers. GoAMAAS service fees cover workflow setup, prompt logic maintenance, and orchestration. Unlimited AI consumption is never promised.
-              </p>
+              <p className="leading-relaxed">{pp.automationsTab.disclosureBody}</p>
             </div>
           </div>
         )}
 
         {/* =========================================================================
-            CATEGORY 3: WEBSITE SUBSCRIPTION PLAN (GoAMAAS Website - ৳600/month)
-           ========================================================================= */}
-        {activeCategory === 'webSubscription' && (
-          <div className="space-y-16">
-            {/* Category Header */}
-            <div className="text-center space-y-2 max-w-2xl mx-auto">
-              <span className="text-xs font-bold text-blue-600 dark:text-blue-400 tracking-wider uppercase">
-                One All-Inclusive Website Subscription
-              </span>
-              <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">
-                GoAMAAS Website — ৳600 BDT / Month
-              </h2>
-              <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
-                One transparent 30-day plan with free hosting on GoAMAAS infrastructure, your free{' '}
-                <code className="font-mono text-blue-600 font-semibold">businessname.amaas.xyz</code> subdomain, and optional custom domain support.
-              </p>
-            </div>
-
-            {/* Featured Pricing Card */}
-            <div className="max-w-3xl mx-auto">
-              <div className="p-8 sm:p-10 rounded-3xl bg-slate-900 text-white border-2 border-blue-500 shadow-2xl relative overflow-hidden">
-                {/* Best for Small Businesses Badge */}
-                <div className="absolute top-0 right-8 -translate-y-0 px-4 py-1 rounded-b-xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-extrabold text-xs uppercase tracking-wider shadow-md">
-                  ★ Best for Small Businesses
-                </div>
-
-                <div className="space-y-6">
-                  <div>
-                    <span className="text-xs font-bold text-blue-400 tracking-wider uppercase">
-                      Website Subscription Plan
-                    </span>
-                    <h3 className="text-2xl sm:text-3xl font-black text-white mt-1">
-                      {websiteSubscriptionPlan.name}
-                    </h3>
-                    <p className="text-xs sm:text-sm text-slate-300 mt-1 max-w-xl leading-relaxed">
-                      {websiteSubscriptionPlan.subtitle}
-                    </p>
-                  </div>
-
-                  {/* Price Block */}
-                  <div className="flex flex-wrap items-baseline gap-3 pt-2">
-                    <div className="flex items-baseline gap-1">
-                      <span className="text-4xl sm:text-5xl font-extrabold font-mono text-white tabular-nums">
-                        ৳{websiteSubscriptionPlan.priceMonthly.toLocaleString()}
-                      </span>
-                      <span className="text-sm text-slate-400">/ month</span>
-                    </div>
-
-                    <div className="px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-800 text-emerald-300 text-xs font-semibold">
-                      ৳0 Upfront Development Fee
-                    </div>
-                  </div>
-
-                  {/* Free Subdomain Callout */}
-                  <div className="p-4 rounded-xl bg-slate-800/80 border border-slate-700/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div className="flex items-center gap-2.5 text-xs text-slate-200">
-                      <Globe2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                      <span>
-                        Free Subdomain Included:{' '}
-                        <code className="font-mono text-emerald-400 font-bold bg-slate-900 px-2 py-0.5 rounded">
-                          businessname.amaas.xyz
-                        </code>
-                      </span>
-                    </div>
-                    <span className="text-[11px] text-slate-400">
-                      Optional custom domain supported (paid separately)
-                    </span>
-                  </div>
-
-                  {/* Included Features Grid */}
-                  <div className="space-y-3 pt-4 border-t border-slate-800">
-                    <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
-                      Everything Included in Your ৳600/Month Subscription:
-                    </h4>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs text-slate-200">
-                      {websiteSubscriptionPlan.features.map((feat, idx) => (
-                        <div key={idx} className="flex items-start gap-2">
-                          <CheckCircle2 className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
-                          <span className="leading-snug">{feat}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Configured Limits Box */}
-                  <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800 text-xs space-y-2">
-                    <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
-                      Plan Resource Limits & Fair Usage:
-                    </span>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-slate-300">
-                      <div>
-                        <span className="text-slate-500 block text-[10px]">Pages:</span>
-                        <strong className="text-white">Up to {websiteSubscriptionPlan.limits.maxPages} Pages</strong>
-                      </div>
-                      <div>
-                        <span className="text-slate-500 block text-[10px]">Media Storage:</span>
-                        <strong className="text-white">{websiteSubscriptionPlan.limits.maxStorageMb} MB (1 GB)</strong>
-                      </div>
-                      <div>
-                        <span className="text-slate-500 block text-[10px]">Monthly Bandwidth:</span>
-                        <strong className="text-white">{websiteSubscriptionPlan.limits.maxBandwidthGb} GB / month</strong>
-                      </div>
-                      <div>
-                        <span className="text-slate-500 block text-[10px]">Content Updates:</span>
-                        <strong className="text-white">{websiteSubscriptionPlan.limits.monthlyUpdateRequests} Requests / mo</strong>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Primary CTA */}
-                  <div className="pt-4">
-                    <button
-                      onClick={() => navigate('/create-website')}
-                      className="w-full py-3.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-extrabold text-sm transition-all shadow-lg flex items-center justify-center gap-2 group cursor-pointer"
-                    >
-                      <Sparkles className="w-4 h-4 text-amber-300" />
-                      <span>Start Your Website — ৳600/month</span>
-                      <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-                    </button>
-                    <p className="text-center text-[11px] text-slate-400 mt-2">
-                      Zero upfront development fee • Instant preview • 7-day grace period on lapsed payments
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* How It Works (3 Steps) */}
-            <div className="space-y-8">
-              <div className="text-center space-y-1">
-                <span className="text-xs font-bold text-blue-600 dark:text-blue-400 tracking-wider uppercase">
-                  Simple 3-Step Process
-                </span>
-                <h3 className="text-2xl font-extrabold text-slate-900 dark:text-white tracking-tight">
-                  How It Works
-                </h3>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
-                  <div className="w-10 h-10 rounded-xl bg-blue-50 dark:bg-blue-950 text-blue-600 dark:text-blue-400 flex items-center justify-center font-bold text-base">
-                    1
-                  </div>
-                  <h4 className="font-bold text-sm text-slate-900 dark:text-white">
-                    Activate GoAMAAS Website
-                  </h4>
-                  <p className="text-xs text-slate-500 leading-relaxed">
-                    Subscribe to the single GoAMAAS Website plan at ৳600 BDT/month (30-day cycle) with free hosting on GoAMAAS infrastructure included.
-                  </p>
-                </div>
-
-                <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
-                  <div className="w-10 h-10 rounded-xl bg-blue-50 dark:bg-blue-950 text-blue-600 dark:text-blue-400 flex items-center justify-center font-bold text-base">
-                    2
-                  </div>
-                  <h4 className="font-bold text-sm text-slate-900 dark:text-white">
-                    Customize Your Website
-                  </h4>
-                  <p className="text-xs text-slate-500 leading-relaxed">
-                    Enter your business details, niche, brand colors, contact info, and catalog items. Select a design template and test your real-time draft.
-                  </p>
-                </div>
-
-                <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
-                  <div className="w-10 h-10 rounded-xl bg-blue-50 dark:bg-blue-950 text-blue-600 dark:text-blue-400 flex items-center justify-center font-bold text-base">
-                    3
-                  </div>
-                  <h4 className="font-bold text-sm text-slate-900 dark:text-white">
-                    Publish Your Business Online
-                  </h4>
-                  <p className="text-xs text-slate-500 leading-relaxed">
-                    Claim your available <code className="font-mono text-blue-600">businessname.amaas.xyz</code> subdomain and launch live with direct WhatsApp customer ordering.
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            {/* Comparison Table: Subscription vs One-Time Development */}
-            <div className="p-6 sm:p-8 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-6">
-              <div className="text-center max-w-xl mx-auto space-y-1">
-                <span className="text-xs font-bold text-blue-600 dark:text-blue-400 tracking-wider uppercase">
-                  Transparent Comparison
-                </span>
-                <h3 className="text-xl font-bold text-slate-900 dark:text-white">
-                  Website Subscription vs. One-Time Web Development
-                </h3>
-                <p className="text-xs text-slate-500">
-                  Compare our monthly subscription model against custom bespoke agency packages.
-                </p>
-              </div>
-
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-50 dark:bg-slate-850 border-b border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 font-semibold">
-                    <tr>
-                      <th className="py-3 px-4">Feature / Aspect</th>
-                      <th className="py-3 px-4 text-blue-600 dark:text-blue-400 font-bold bg-blue-50/50 dark:bg-blue-950/30">
-                        GoAMAAS Website (৳600/mo)
-                      </th>
-                      <th className="py-3 px-4">One-Time Web Development (৳8,000+)</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                    {SUBSCRIPTION_VS_ONETIME_COMPARISON.map((row, idx) => (
-                      <tr key={idx} className="hover:bg-slate-50/50 dark:hover:bg-slate-850/50">
-                        <td className="py-3 px-4 font-semibold text-slate-900 dark:text-white">
-                          {row.feature}
-                        </td>
-                        <td className="py-3 px-4 font-medium text-blue-700 dark:text-blue-300 bg-blue-50/30 dark:bg-blue-950/20">
-                          {row.subscriptionPlan}
-                        </td>
-                        <td className="py-3 px-4 text-slate-600 dark:text-slate-400">
-                          {row.oneTimePackages}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            {/* Subdomain & Grace Period Disclosures */}
-            <div className="p-5 rounded-2xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400 space-y-2">
-              <div className="flex items-center gap-2 font-bold text-slate-900 dark:text-white">
-                <ShieldAlert className="w-4 h-4 text-blue-600 shrink-0" />
-                <span>Important Subscription Terms & Infrastructure Transparency</span>
-              </div>
-              <ul className="space-y-1.5 list-disc pl-5 leading-relaxed text-[11px]">
-                {websiteSubscriptionPlan.disclosures.map((d, dIdx) => (
-                  <li key={dIdx}>{d}</li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        )}
-
-        {/* =========================================================================
-            CATEGORY 4: WEBSITE DEVELOPMENT PACKAGES (ONE-TIME)
+            CATEGORY 4: CUSTOM WEBSITE DEVELOPMENT PACKAGES (ONE-TIME)
            ========================================================================= */}
         {activeCategory === 'website' && (
           <div className="space-y-12">
-            <div className="text-center space-y-1">
-              <span className="text-xs font-bold text-blue-600 dark:text-blue-400 tracking-wider uppercase">
-                One-Time Project Engagements
-              </span>
-              <p className="text-xs text-slate-500">
-                Turnkey web engineering by AMAAS. Not a monthly subscription.
+            <div className="text-center space-y-1.5">
+              <p className="text-xs font-semibold text-blue-600 dark:text-blue-400">
+                {pp.customWebTab.kicker}
+              </p>
+              <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400">
+                {pp.customWebTab.subnote}
               </p>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-              {WEBSITE_DEVELOPMENT_PACKAGES.map((web) => (
-                <div
-                  key={web.id}
-                  className={`p-8 rounded-2xl flex flex-col justify-between transition-all ${
-                    web.isPopular
-                      ? 'bg-slate-900 text-white border-2 border-blue-500 shadow-xl relative'
-                      : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white shadow-xs'
-                  }`}
-                >
-                  {web.isPopular && (
-                    <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full bg-blue-600 text-white font-semibold text-[10px] uppercase tracking-wider shadow-sm">
-                      Most Popular
-                    </div>
-                  )}
-
-                  <div className="space-y-4">
-                    <div>
-                      <h3 className="text-lg font-bold tracking-tight">{web.name}</h3>
-                      <p className={`text-xs mt-1 ${web.isPopular ? 'text-slate-300' : 'text-slate-500'}`}>
-                        {web.description}
-                      </p>
-                    </div>
-
-                    <div>
-                      <div className="flex items-baseline gap-1">
-                        <span className="text-3xl sm:text-4xl font-extrabold font-mono tabular-nums">
-                          ৳{web.priceOneTime.toLocaleString()}
-                        </span>
-                        <span className={`text-xs ${web.isPopular ? 'text-slate-400' : 'text-slate-500'}`}>
-                          one-time project fee
-                        </span>
-                      </div>
-                      <span className={`block text-[11px] font-mono mt-1 ${web.isPopular ? 'text-blue-300' : 'text-slate-500'}`}>
-                        {web.estimatedTimeline}
-                      </span>
-                    </div>
-
-                    {/* Prominent Free Domain & Hosting Badge */}
-                    <div className={`p-3 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-7">
+              {WEBSITE_DEVELOPMENT_PACKAGES.map((web) => {
+                const localized = pp.customWebTab.packages[web.id];
+                return (
+                  <div
+                    key={web.id}
+                    className={`p-7 sm:p-8 rounded-2xl flex flex-col justify-between transition-colors ${
                       web.isPopular
-                        ? 'bg-blue-950/80 border-blue-700 text-blue-200'
-                        : 'bg-blue-50 dark:bg-blue-950/40 border-blue-200 dark:border-blue-900 text-blue-900 dark:text-blue-300'
-                    }`}>
-                      <Sparkles className="w-4 h-4 text-blue-500 shrink-0" />
-                      <span>{web.domainHostingBenefit}</span>
-                    </div>
+                        ? 'bg-slate-950 dark:bg-slate-900 text-white border-2 border-blue-600'
+                        : 'bg-slate-50/70 dark:bg-slate-900/70 border border-slate-200/90 dark:border-slate-800 text-slate-900 dark:text-white'
+                    }`}
+                  >
+                    <div className="space-y-4">
+                      <div>
+                        {web.isPopular && (
+                          <p className="text-[11px] font-semibold text-blue-400 mb-1">
+                            {pp.common.mostPopular}
+                          </p>
+                        )}
+                        <h3 className="text-lg sm:text-xl font-bold tracking-tight">
+                          {localized?.name || web.name}
+                        </h3>
+                        <p className={`text-xs mt-1.5 leading-relaxed ${web.isPopular ? 'text-slate-300' : 'text-slate-600 dark:text-slate-400'}`}>
+                          {localized?.description || web.description}
+                        </p>
+                      </div>
 
-                    <div className={`pt-4 space-y-2 text-xs border-t ${web.isPopular ? 'border-slate-800' : 'border-slate-100 dark:border-slate-800'}`}>
-                      {web.features.map((feat, fIdx) => (
-                        <div key={fIdx} className="flex items-start gap-2">
-                          <CheckCircle2
-                            className={`w-3.5 h-3.5 shrink-0 mt-0.5 ${
-                              web.isPopular ? 'text-blue-400' : 'text-blue-600'
-                            }`}
-                          />
-                          <span className={web.isPopular ? 'text-slate-200' : 'text-slate-700 dark:text-slate-300'}>
-                            {feat}
+                      <div>
+                        <div className="flex items-baseline gap-1.5">
+                          <span className="text-3xl sm:text-4xl font-extrabold font-mono tabular-nums">
+                            ৳{web.priceOneTime.toLocaleString()}
+                          </span>
+                          <span className={`text-xs ${web.isPopular ? 'text-slate-400' : 'text-slate-500'}`}>
+                            {pp.customWebTab.oneTimeFeeLabel}
                           </span>
                         </div>
-                      ))}
+                        <span className={`block text-[11px] font-mono mt-1 ${web.isPopular ? 'text-blue-300' : 'text-slate-500 dark:text-slate-400'}`}>
+                          {localized?.estimatedTimeline || web.estimatedTimeline}
+                        </span>
+                      </div>
+
+                      <p
+                        className={`text-xs font-medium pt-3 border-t ${
+                          web.isPopular
+                            ? 'border-slate-800 text-blue-300'
+                            : 'border-slate-200/80 dark:border-slate-800 text-blue-700 dark:text-blue-400'
+                        }`}
+                      >
+                        {localized?.domainHostingBenefit || web.domainHostingBenefit}
+                      </p>
+
+                      <div className={`pt-3 space-y-2.5 text-xs border-t ${web.isPopular ? 'border-slate-800' : 'border-slate-200/80 dark:border-slate-800'}`}>
+                        {(localized?.features || web.features).map((feat, fIdx) => (
+                          <div key={fIdx} className="flex items-start gap-2">
+                            <Check
+                              className={`w-3.5 h-3.5 shrink-0 mt-0.5 ${
+                                web.isPopular ? 'text-blue-400' : 'text-blue-600 dark:text-blue-400'
+                              }`}
+                            />
+                            <span className={web.isPopular ? 'text-slate-200' : 'text-slate-700 dark:text-slate-300'}>
+                              {feat}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+
+                      {(localized?.scopeNote || web.scopeNote) && (
+                        <p
+                          className={`text-[11px] leading-relaxed pt-3 border-t ${
+                            web.isPopular
+                              ? 'text-slate-400 border-slate-800'
+                              : 'text-slate-500 dark:text-slate-400 border-slate-200/80 dark:border-slate-800'
+                          }`}
+                        >
+                          {localized?.scopeNote || web.scopeNote}
+                        </p>
+                      )}
                     </div>
 
-                    {web.scopeNote && (
-                      <p className={`text-[10px] leading-relaxed pt-2 border-t ${
-                        web.isPopular ? 'text-slate-400 border-slate-800' : 'text-slate-500 border-slate-100 dark:border-slate-800'
-                      }`}>
-                        {web.scopeNote}
-                      </p>
-                    )}
+                    <div className="pt-6">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedWebPackage(web)}
+                        className={`w-full min-h-[44px] py-2.5 rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
+                          web.isPopular
+                            ? 'bg-blue-600 hover:bg-blue-500 text-white'
+                            : 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:bg-blue-600 hover:text-white hover:border-blue-600 text-slate-900 dark:text-white'
+                        }`}
+                      >
+                        {localized?.ctaLabel || web.ctaLabel}
+                      </button>
+                    </div>
                   </div>
-
-                  <div className="pt-6">
-                    <button
-                      onClick={() => setSelectedWebPackage(web)}
-                      className={`w-full py-2.5 rounded-lg text-xs font-semibold transition-colors shadow-xs ${
-                        web.isPopular
-                          ? 'bg-blue-600 hover:bg-blue-500 text-white'
-                          : 'bg-slate-100 dark:bg-slate-800 hover:bg-blue-600 hover:text-white text-slate-900 dark:text-white'
-                      }`}
-                    >
-                      {web.ctaLabel}
-                    </button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
 
         {/* =========================================================================
-            PLAN COMPARISON SECTION
+            DASHBOARD PLAN COMPARISON MATRIX
            ========================================================================= */}
-        <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 sm:p-8 shadow-xs space-y-6">
+        <div className="rounded-2xl bg-slate-50/60 dark:bg-slate-900/60 border border-slate-200/90 dark:border-slate-800 p-6 sm:p-8 space-y-6">
           <div className="text-center max-w-xl mx-auto space-y-1">
-            <h2 className="text-xl font-bold text-slate-900 dark:text-white">
-              Dashboard Plan Comparison Matrix
+            <h2 className="text-xl sm:text-2xl font-bold text-slate-950 dark:text-white tracking-tight">
+              {pp.matrix.title}
             </h2>
-            <p className="text-xs text-slate-500">
-              Clear limits and capabilities across all four SaaS tiers.
+            <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400">
+              {pp.matrix.subtitle}
             </p>
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 font-semibold">
+            <table className="w-full text-left text-xs sm:text-[13px]">
+              <thead className="border-b border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 font-semibold">
                 <tr>
-                  <th className="py-3 px-4">Feature / Capability</th>
-                  <th className="py-3 px-4">Starter (৳299)</th>
-                  <th className="py-3 px-4 text-blue-600 dark:text-blue-400">Business (৳599) ★</th>
-                  <th className="py-3 px-4">Pro (৳999)</th>
-                  <th className="py-3 px-4">Enterprise (৳1,999)</th>
+                  <th className="py-3 px-4">{pp.matrix.colCapability}</th>
+                  <th className="py-3 px-4 font-mono tabular-nums">Starter (৳299)</th>
+                  <th className="py-3 px-4 font-mono tabular-nums text-blue-600 dark:text-blue-400">
+                    Business (৳599)
+                  </th>
+                  <th className="py-3 px-4 font-mono tabular-nums">Pro (৳999)</th>
+                  <th className="py-3 px-4 font-mono tabular-nums">Enterprise (৳1,999)</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                <tr>
-                  <td className="py-3 px-4 font-semibold text-slate-900 dark:text-white">Monthly Order Volume</td>
-                  <td className="py-3 px-4 font-mono">300 orders</td>
-                  <td className="py-3 px-4 font-mono font-bold text-blue-600 dark:text-blue-400">Unlimited</td>
-                  <td className="py-3 px-4 font-mono font-bold">Unlimited</td>
-                  <td className="py-3 px-4 font-mono font-bold">Unlimited</td>
-                </tr>
-                <tr>
-                  <td className="py-3 px-4 font-semibold text-slate-900 dark:text-white">Staff User Accounts</td>
-                  <td className="py-3 px-4 font-mono">1 User</td>
-                  <td className="py-3 px-4 font-mono font-bold text-blue-600 dark:text-blue-400">3 Users</td>
-                  <td className="py-3 px-4 font-mono">10 Users</td>
-                  <td className="py-3 px-4 font-mono">Unlimited</td>
-                </tr>
-                <tr>
-                  <td className="py-3 px-4 font-semibold text-slate-900 dark:text-white">Inventory & Stock Tracking</td>
-                  <td className="py-3 px-4 text-slate-400">—</td>
-                  <td className="py-3 px-4 text-emerald-600 font-bold">Included</td>
-                  <td className="py-3 px-4 text-emerald-600 font-bold">Included</td>
-                  <td className="py-3 px-4 text-emerald-600 font-bold">Included</td>
-                </tr>
-                <tr>
-                  <td className="py-3 px-4 font-semibold text-slate-900 dark:text-white">Courier Management</td>
-                  <td className="py-3 px-4 text-slate-400">Manual tracking</td>
-                  <td className="py-3 px-4 text-emerald-600 font-bold">Included</td>
-                  <td className="py-3 px-4 text-emerald-600 font-bold">API Sync (when configured)</td>
-                  <td className="py-3 px-4 text-emerald-600 font-bold">API Sync (when configured)</td>
-                </tr>
-                <tr>
-                  <td className="py-3 px-4 font-semibold text-slate-900 dark:text-white">Multiple Stores / Branches</td>
-                  <td className="py-3 px-4 text-slate-400">Single store</td>
-                  <td className="py-3 px-4 text-slate-400">Single store</td>
-                  <td className="py-3 px-4 text-blue-600 font-bold">Multiple stores</td>
-                  <td className="py-3 px-4 text-blue-600 font-bold">Multiple branches & outlets</td>
-                </tr>
-                <tr>
-                  <td className="py-3 px-4 font-semibold text-slate-900 dark:text-white">WhatsApp & SMS Integration</td>
-                  <td className="py-3 px-4 text-slate-400">—</td>
-                  <td className="py-3 px-4 text-slate-400">—</td>
-                  <td className="py-3 px-4 text-emerald-600 font-bold">When configured</td>
-                  <td className="py-3 px-4 text-emerald-600 font-bold">When configured</td>
-                </tr>
-                <tr>
-                  <td className="py-3 px-4 font-semibold text-slate-900 dark:text-white">AI Assistant & Automation</td>
-                  <td className="py-3 px-4 text-slate-400">—</td>
-                  <td className="py-3 px-4 text-slate-400">—</td>
-                  <td className="py-3 px-4 text-slate-400">—</td>
-                  <td className="py-3 px-4 text-emerald-600 font-bold">Included</td>
-                </tr>
-                <tr>
-                  <td className="py-3 px-4 font-semibold text-slate-900 dark:text-white">Free Trial Period</td>
-                  <td className="py-3 px-4 font-bold text-emerald-600">7 Days Free</td>
-                  <td className="py-3 px-4 font-bold text-emerald-600">7 Days Free</td>
-                  <td className="py-3 px-4 font-bold text-emerald-600">7 Days Free</td>
-                  <td className="py-3 px-4 font-bold text-emerald-600">7 Days Free</td>
-                </tr>
+              <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800">
+                {pp.matrix.rows.map((row, rIdx) => (
+                  <tr key={rIdx} className="hover:bg-white/60 dark:hover:bg-slate-900/80">
+                    <td className="py-3.5 px-4 font-semibold text-slate-950 dark:text-white">
+                      {row.label}
+                    </td>
+                    <td className="py-3.5 px-4 text-slate-600 dark:text-slate-400 font-mono tabular-nums">
+                      {row.starter}
+                    </td>
+                    <td className="py-3.5 px-4 font-semibold text-blue-600 dark:text-blue-400 font-mono tabular-nums">
+                      {row.business}
+                    </td>
+                    <td className="py-3.5 px-4 text-slate-700 dark:text-slate-300 font-mono tabular-nums">
+                      {row.pro}
+                    </td>
+                    <td className="py-3.5 px-4 text-slate-700 dark:text-slate-300 font-mono tabular-nums">
+                      {row.enterprise}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
         </div>
 
         {/* =========================================================================
-            THIRD-PARTY DISCLOSURES FOOTER SECTION
+            COMMERCIAL DISCLOSURES
            ========================================================================= */}
-        <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3 text-xs text-slate-600 dark:text-slate-400">
-          <div className="flex items-center gap-2 font-bold text-slate-900 dark:text-white">
-            <ShieldAlert className="w-4 h-4 text-blue-600" />
-            <span>General Commercial Disclosures & Service Boundaries</span>
+        <div className="p-6 sm:p-7 rounded-2xl bg-slate-50/70 dark:bg-slate-900/70 border border-slate-200/90 dark:border-slate-800 space-y-3 text-xs text-slate-600 dark:text-slate-400">
+          <div className="flex items-center gap-2 font-bold text-slate-950 dark:text-white">
+            <ShieldAlert className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+            <span>{pp.commercialDisclosuresTitle}</span>
           </div>
-          <ul className="space-y-1.5 list-disc pl-5">
-            {THIRD_PARTY_DISCLOSURES.map((item, idx) => (
-              <li key={idx} className="leading-relaxed">
-                {item}
-              </li>
+          <ul className="space-y-1.5 list-disc pl-5 leading-relaxed">
+            {pp.commercialDisclosures.map((item, idx) => (
+              <li key={idx}>{item}</li>
             ))}
           </ul>
         </div>
 
         {/* =========================================================================
-            FAQ SECTION
+            PRICING & BILLING FAQ
            ========================================================================= */}
-        <div className="max-w-4xl mx-auto space-y-6">
+        <div className="max-w-3xl mx-auto space-y-6">
           <div className="text-center space-y-2">
-            <h2 className="text-2xl font-bold text-slate-900 dark:text-white">
-              Pricing & Billing FAQ
+            <h2 className="text-2xl font-bold text-slate-950 dark:text-white tracking-tight">
+              {pp.faqTitle}
             </h2>
-            <p className="text-xs text-slate-500">
-              Clear answers on billing cadences, free trial, and third-party platform policies.
+            <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400">
+              {pp.faqSubtitle}
             </p>
           </div>
 
           <div className="space-y-3">
-            {pricingFaqs.map((faq, idx) => {
+            {pp.faqs.map((faq, idx) => {
               const isOpen = openFaqIndex === idx;
               return (
                 <div
                   key={idx}
-                  className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden"
+                  className="rounded-2xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden"
                 >
                   <button
+                    type="button"
+                    aria-expanded={isOpen}
                     onClick={() => setOpenFaqIndex(isOpen ? null : idx)}
-                    className="w-full p-4 text-left font-semibold text-xs text-slate-900 dark:text-white flex items-center justify-between hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors"
+                    className="w-full min-h-[52px] px-5 py-4 text-left font-semibold text-xs sm:text-sm text-slate-950 dark:text-white flex items-center justify-between gap-4 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors cursor-pointer"
                   >
                     <span>{faq.q}</span>
-                    <span className="text-slate-400 ml-2">{isOpen ? '−' : '+'}</span>
+                    <ChevronDown
+                      className={`w-4 h-4 text-slate-400 shrink-0 transition-transform duration-200 ${
+                        isOpen ? 'rotate-180' : ''
+                      }`}
+                    />
                   </button>
-                  {isOpen && (
-                    <div className="p-4 pt-1 text-xs text-slate-600 dark:text-slate-300 border-t border-slate-100 dark:border-slate-800 leading-relaxed">
-                      {faq.a}
-                    </div>
-                  )}
+                  <AnimatePresence initial={false}>
+                    {isOpen && (
+                      <motion.div
+                        initial={prefersReducedMotion ? { opacity: 1 } : { opacity: 0, y: -4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -4 }}
+                        transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
+                        className="px-5 pb-4 pt-1 text-xs sm:text-sm text-slate-600 dark:text-slate-300 border-t border-slate-100 dark:border-slate-800/80 leading-relaxed"
+                      >
+                        {faq.a}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </div>
               );
             })}
@@ -889,178 +885,208 @@ export const PricingPage: React.FC = () => {
       </div>
 
       {/* Confirmation Modal for Dashboard Plan */}
-      {selectedDashboardPlan && (() => {
-        const selectedState = getPlanDisplayState(selectedDashboardPlan);
-        return (
-          <Modal
-            isOpen={!!selectedDashboardPlan}
-            onClose={() => setSelectedDashboardPlan(null)}
-            title={`Confirm Plan Selection — ${selectedState.planTierLabel}`}
-            maxWidth="md"
-          >
-            <div className="space-y-4 text-xs">
-              <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800 space-y-2">
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-500">Billing Type:</span>
-                  <span className="font-semibold text-slate-900 dark:text-white">Monthly Subscription</span>
+      {selectedDashboardPlan &&
+        (() => {
+          const selectedState = getPlanDisplayState(selectedDashboardPlan);
+          const localized = pp.dashboardTab.plans[selectedDashboardPlan.id];
+          const displayLabel = useLiveCatalog
+            ? selectedState.planTierLabel
+            : localized?.name || selectedDashboardPlan.name;
+
+          return (
+            <Modal
+              isOpen={!!selectedDashboardPlan}
+              onClose={() => setSelectedDashboardPlan(null)}
+              title={pp.modals.confirmPlanTitle(displayLabel)}
+              maxWidth="md"
+            >
+              <div className="space-y-4 text-xs">
+                <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800 space-y-2">
+                  <div className="flex justify-between items-center gap-2">
+                    <span className="text-slate-500">{pp.modals.billingType}</span>
+                    <span className="font-semibold text-slate-900 dark:text-white">
+                      {pp.modals.monthlySubscription}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center gap-2">
+                    <span className="text-slate-500">{pp.modals.subscriptionPrice}</span>
+                    <span className="font-bold text-base font-mono tabular-nums text-blue-600 dark:text-blue-400">
+                      {selectedState.priceBdt !== null
+                        ? `৳${selectedState.priceBdt.toLocaleString()} ${pp.common.perMonth}`
+                        : pp.common.currentlyUnavailable}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center gap-2">
+                    <span className="text-slate-500">{pp.modals.trialPeriod}</span>
+                    <span className="font-semibold text-emerald-600 dark:text-emerald-400">
+                      {pp.common.freeTrialBadge}
+                    </span>
+                  </div>
                 </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-500">Subscription Price:</span>
-                  <span className="font-bold text-base font-mono text-blue-600">
-                    {selectedState.priceBdt !== null
-                      ? `৳${selectedState.priceBdt.toLocaleString()} / month`
-                      : 'Currently Unavailable'}
+
+                <div>
+                  <span className="font-bold text-slate-900 dark:text-white block mb-1.5">
+                    {pp.modals.includedFeatures}
                   </span>
+                  <ul className="space-y-1.5 text-slate-600 dark:text-slate-300">
+                    {(localized?.features || selectedDashboardPlan.features).map((f, i) => (
+                      <li key={i} className="flex items-center gap-2">
+                        <Check className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
+                        <span>{f}</span>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-500">Trial Period:</span>
-                  <span className="font-semibold text-emerald-600">7-Day Free Trial</span>
+
+                <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedDashboardPlan(null)}
+                    className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium cursor-pointer"
+                  >
+                    {pp.common.cancel}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={
+                      useLiveCatalog && (!selectedState.isAvailable || selectedState.priceBdt === null)
+                    }
+                    onClick={handleConfirmDashboardPlan}
+                    className="min-h-[40px] px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold cursor-pointer"
+                  >
+                    {isAuthenticated ? pp.modals.confirmApplyPlan : pp.modals.proceedTrialSignup}
+                  </button>
                 </div>
               </div>
-
-              <div>
-                <span className="font-bold text-slate-900 dark:text-white block mb-1">
-                  Included Features:
-                </span>
-                <ul className="space-y-1 text-slate-600 dark:text-slate-300">
-                  {selectedDashboardPlan.features.map((f, i) => (
-                    <li key={i} className="flex items-center gap-1.5">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-                      <span>{f}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-
-              <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setSelectedDashboardPlan(null)}
-                  className="px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  disabled={useLiveCatalog && (!selectedState.isAvailable || selectedState.priceBdt === null)}
-                  onClick={handleConfirmDashboardPlan}
-                  className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-semibold"
-                >
-                  {isAuthenticated ? 'Confirm & Apply Plan' : 'Proceed to Free Trial Sign Up'}
-                </button>
-              </div>
-            </div>
-          </Modal>
-        );
-      })()}
+            </Modal>
+          );
+        })()}
 
       {/* Confirmation Modal for AI Automation */}
-      {selectedAutoPackage && (
-        <Modal
-          isOpen={!!selectedAutoPackage}
-          onClose={() => setSelectedAutoPackage(null)}
-          title={`Confirm Automation Request — ${selectedAutoPackage.name}`}
-          maxWidth="md"
-        >
-          <div className="space-y-4 text-xs">
-            <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800 space-y-2">
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Billing Type:</span>
-                <span className="font-semibold text-purple-600">Monthly Managed Service Fee</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Service Fee:</span>
-                <span className="font-bold text-base font-mono text-slate-900 dark:text-white">
-                  ৳{selectedAutoPackage.priceMonthly.toLocaleString()} / month
-                </span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Setup Fee:</span>
-                <span className="font-semibold text-slate-700 dark:text-slate-300 font-mono">
-                  {selectedAutoPackage.setupFeeLabel}
-                </span>
-              </div>
-            </div>
+      {selectedAutoPackage &&
+        (() => {
+          const localized = pp.automationsTab.packages[selectedAutoPackage.id];
+          const displayName = localized?.name || selectedAutoPackage.name;
 
-            <div className="p-3 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 text-amber-900 dark:text-amber-200 text-[11px]">
-              Note: WhatsApp Cloud API messaging and Meta platform fees are billed separately by Meta based on conversation volume.
-            </div>
+          return (
+            <Modal
+              isOpen={!!selectedAutoPackage}
+              onClose={() => setSelectedAutoPackage(null)}
+              title={pp.modals.confirmAutoTitle(displayName)}
+              maxWidth="md"
+            >
+              <div className="space-y-4 text-xs">
+                <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800 space-y-2">
+                  <div className="flex justify-between items-center gap-2">
+                    <span className="text-slate-500">{pp.modals.billingType}</span>
+                    <span className="font-semibold text-blue-600 dark:text-blue-400">
+                      {pp.modals.monthlyManagedFee}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center gap-2">
+                    <span className="text-slate-500">{pp.modals.serviceFee}</span>
+                    <span className="font-bold text-base font-mono tabular-nums text-slate-900 dark:text-white">
+                      ৳{selectedAutoPackage.priceMonthly.toLocaleString()} {pp.common.perMonth}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center gap-2">
+                    <span className="text-slate-500">{pp.modals.setupFee}</span>
+                    <span className="font-semibold text-slate-700 dark:text-slate-300 font-mono">
+                      {localized?.setupFeeLabel || selectedAutoPackage.setupFeeLabel}
+                    </span>
+                  </div>
+                </div>
 
-            <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setSelectedAutoPackage(null)}
-                className="px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmAutomation}
-                className="px-5 py-2 rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-semibold"
-              >
-                Submit Setup Request
-              </button>
-            </div>
-          </div>
-        </Modal>
-      )}
+                <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 text-amber-900 dark:text-amber-200 text-[11px] leading-relaxed">
+                  {pp.modals.metaBillingNote}
+                </div>
 
-      {/* Confirmation Modal for Website Package */}
-      {selectedWebPackage && (
-        <Modal
-          isOpen={!!selectedWebPackage}
-          onClose={() => setSelectedWebPackage(null)}
-          title={`Website Development Brief — ${selectedWebPackage.name}`}
-          maxWidth="md"
-        >
-          <div className="space-y-4 text-xs">
-            <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800 space-y-2">
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Billing Type:</span>
-                <span className="font-semibold text-blue-600">One-Time Project Fee</span>
+                <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedAutoPackage(null)}
+                    className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium cursor-pointer"
+                  >
+                    {pp.common.cancel}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmAutomation}
+                    className="min-h-[40px] px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold cursor-pointer"
+                  >
+                    {pp.modals.submitSetupRequest}
+                  </button>
+                </div>
               </div>
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Total Project Price:</span>
-                <span className="font-bold text-base font-mono text-slate-900 dark:text-white">
-                  ৳{selectedWebPackage.priceOneTime.toLocaleString()}
-                </span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Domain & Hosting:</span>
-                <span className="font-bold text-emerald-600">First-year domain + hosting FREE</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Timeline:</span>
-                <span className="font-semibold text-slate-700 dark:text-slate-300 font-mono">
-                  {selectedWebPackage.estimatedTimeline}
-                </span>
-              </div>
-            </div>
+            </Modal>
+          );
+        })()}
 
-            <p className="text-[11px] text-slate-500 leading-relaxed">
-              Clicking below will direct you to our Website Requirements Specification Form to choose pages and integrations.
-            </p>
+      {/* Confirmation Modal for Custom Website Package */}
+      {selectedWebPackage &&
+        (() => {
+          const localized = pp.customWebTab.packages[selectedWebPackage.id];
+          const displayName = localized?.name || selectedWebPackage.name;
 
-            <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setSelectedWebPackage(null)}
-                className="px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmWebsite}
-                className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold"
-              >
-                Proceed to Requirements Form &rarr;
-              </button>
-            </div>
-          </div>
-        </Modal>
-      )}
+          return (
+            <Modal
+              isOpen={!!selectedWebPackage}
+              onClose={() => setSelectedWebPackage(null)}
+              title={pp.modals.webBriefTitle(displayName)}
+              maxWidth="md"
+            >
+              <div className="space-y-4 text-xs">
+                <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800 space-y-2">
+                  <div className="flex justify-between items-center gap-2">
+                    <span className="text-slate-500">{pp.modals.billingType}</span>
+                    <span className="font-semibold text-blue-600 dark:text-blue-400">
+                      {pp.modals.oneTimeProjectFee}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center gap-2">
+                    <span className="text-slate-500">{pp.modals.totalProjectPrice}</span>
+                    <span className="font-bold text-base font-mono tabular-nums text-slate-900 dark:text-white">
+                      ৳{selectedWebPackage.priceOneTime.toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center gap-2">
+                    <span className="text-slate-500">{pp.modals.hostingAndDomain}</span>
+                    <span className="font-semibold text-slate-800 dark:text-slate-200 text-right">
+                      {pp.modals.hostingSetupIncluded}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center gap-2">
+                    <span className="text-slate-500">{pp.modals.timeline}</span>
+                    <span className="font-semibold text-slate-700 dark:text-slate-300 font-mono">
+                      {localized?.estimatedTimeline || selectedWebPackage.estimatedTimeline}
+                    </span>
+                  </div>
+                </div>
+
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                  {pp.modals.webBriefHelper}
+                </p>
+
+                <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedWebPackage(null)}
+                    className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium cursor-pointer"
+                  >
+                    {pp.common.cancel}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmWebsite}
+                    className="min-h-[40px] px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold cursor-pointer"
+                  >
+                    {pp.modals.proceedRequirements}
+                  </button>
+                </div>
+              </div>
+            </Modal>
+          );
+        })()}
     </div>
   );
 };

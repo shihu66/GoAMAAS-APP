@@ -5,17 +5,19 @@ import {
   Loader2,
   Lock,
   WifiOff,
-  LogOut,
   RefreshCw,
-  ArrowLeft,
   KeyRound,
 } from 'lucide-react';
 import { supabase, isSupabaseConfigured, signOutFromSupabase } from '../../lib/supabase';
 import {
+  AUTHORIZED_ADMIN_EMAIL,
   AdminMfaState,
   AdminVerificationResult,
+  UNIFORM_ADMIN_AUTH_ERROR,
   VerifiedAdminIdentity,
   clearAdminSessionEvents,
+  isAuthorizedAdminEmail,
+  recordAdminLoginFailure,
   recordAdminSessionEvent,
   verifyAdminTotpChallenge,
   verifyServerAdminSession,
@@ -53,12 +55,32 @@ export const AdminProtectedRoute: React.FC<AdminProtectedRouteProps> = ({ childr
 
   const [verification, setVerification] = useState<AdminVerificationResult | null>(null);
   const [isChecking, setIsChecking] = useState<boolean>(true);
+  const [forbiddenSignedOut, setForbiddenSignedOut] = useState<boolean>(false);
   const hadAuthorizedSessionRef = useRef<boolean>(false);
+  const purgingForbiddenRef = useRef<boolean>(false);
 
   // Step-up MFA challenge state
   const [totpCode, setTotpCode] = useState<string>('');
   const [totpError, setTotpError] = useState<string | null>(null);
   const [isVerifyingTotp, setIsVerifyingTotp] = useState<boolean>(false);
+
+  const purgeUnauthorizedSession = useCallback(async () => {
+    if (purgingForbiddenRef.current) return;
+    purgingForbiddenRef.current = true;
+    try {
+      hadAuthorizedSessionRef.current = false;
+      clearAdminSessionEvents();
+      notifyAdminServiceWorkerSignOut();
+      if (isSupabaseConfigured) {
+        await signOutFromSupabase();
+      }
+      await logout();
+      recordAdminLoginFailure();
+    } finally {
+      setForbiddenSignedOut(true);
+      purgingForbiddenRef.current = false;
+    }
+  }, [logout]);
 
   const runVerification = useCallback(
     async (options?: { silent?: boolean }): Promise<AdminVerificationResult> => {
@@ -67,22 +89,28 @@ export const AdminProtectedRoute: React.FC<AdminProtectedRouteProps> = ({ childr
       }
       const result = await verifyServerAdminSession();
       setVerification(result);
-      if (result.status === 'authorized' && result.admin) {
+      if (
+        result.status === 'authorized' &&
+        result.admin &&
+        isAuthorizedAdminEmail(result.admin.email)
+      ) {
         hadAuthorizedSessionRef.current = true;
         setAuthenticatedUser({
           id: result.admin.id,
           name: result.admin.name,
-          email: result.admin.email,
+          email: AUTHORIZED_ADMIN_EMAIL,
           role: 'admin',
           storeId: '',
         });
+      } else if (result.status === 'forbidden') {
+        await purgeUnauthorizedSession();
       }
       if (!options?.silent) {
         setIsChecking(false);
       }
       return result;
     },
-    [setAuthenticatedUser]
+    [purgeUnauthorizedSession, setAuthenticatedUser]
   );
 
   const secureSignOut = useCallback(async () => {
@@ -111,22 +139,30 @@ export const AdminProtectedRoute: React.FC<AdminProtectedRouteProps> = ({ childr
       const res = await verifyServerAdminSession();
       if (!active) return;
       setVerification(res);
-      if (res.status === 'authorized' && res.admin) {
+      if (
+        res.status === 'authorized' &&
+        res.admin &&
+        isAuthorizedAdminEmail(res.admin.email)
+      ) {
         hadAuthorizedSessionRef.current = true;
         setAuthenticatedUser({
           id: res.admin.id,
           name: res.admin.name,
-          email: res.admin.email,
+          email: AUTHORIZED_ADMIN_EMAIL,
           role: 'admin',
           storeId: '',
         });
+      } else if (res.status === 'forbidden') {
+        await purgeUnauthorizedSession();
       }
-      setIsChecking(false);
+      if (active) {
+        setIsChecking(false);
+      }
     })();
     return () => {
       active = false;
     };
-  }, [location.pathname, setAuthenticatedUser]);
+  }, [location.pathname, purgeUnauthorizedSession, setAuthenticatedUser]);
 
   // Revalidate session on window focus, visibility change, auth state changes, and 2-minute heartbeat
   useEffect(() => {
@@ -251,43 +287,30 @@ export const AdminProtectedRoute: React.FC<AdminProtectedRouteProps> = ({ childr
     );
   }
 
-  // 5. Logged-in Non-Admin (Merchant) -> Strict 403 Access Denied Screen (Zero Admin Data Exposed)
+  // 5. Unauthorized Account -> Immediately sign out & redirect to /admin/login?denied=1 (Zero Admin Data Exposed)
   if (currentStatus === 'forbidden') {
+    if (forbiddenSignedOut) {
+      return (
+        <Navigate
+          to="/admin/login?denied=1"
+          state={{ from: location.pathname }}
+          replace
+        />
+      );
+    }
+
     return (
       <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex items-center justify-center p-6">
-        <div className="w-full max-w-md rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-7 space-y-5">
-          <div className="w-12 h-12 rounded-2xl bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-900 text-rose-600 dark:text-rose-400 flex items-center justify-center">
+        <div className="w-full max-w-md rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-7 space-y-4 text-center">
+          <div className="w-12 h-12 rounded-2xl bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-900 text-rose-600 dark:text-rose-400 flex items-center justify-center mx-auto">
             <ShieldAlert className="w-6 h-6" />
           </div>
-
-          <div className="space-y-1.5">
-            <h1 className="text-lg font-bold text-slate-900 dark:text-white">
-              Access Restricted
-            </h1>
-            <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-              Your current account does not hold platform administrator permissions. Administrative routes and operations are verified on the server and cannot be accessed from merchant accounts.
-            </p>
-          </div>
-
-          <div className="space-y-2.5 pt-1">
-            <button
-              type="button"
-              onClick={() => void secureSignOut()}
-              className="w-full min-h-[46px] px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
-            >
-              <LogOut className="w-4 h-4" />
-              <span>Sign Out &amp; Use Administrator Account</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => navigate('/', { replace: true })}
-              className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-semibold text-xs inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
-            >
-              <ArrowLeft className="w-4 h-4" />
-              <span>Return to GoAMAAS</span>
-            </button>
-          </div>
+          <h1 className="text-base font-bold text-slate-900 dark:text-white">
+            Access Restricted
+          </h1>
+          <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+            {UNIFORM_ADMIN_AUTH_ERROR}
+          </p>
         </div>
       </div>
     );
@@ -396,9 +419,9 @@ export const AdminProtectedRoute: React.FC<AdminProtectedRouteProps> = ({ childr
     );
   }
 
-  // 7. Verified Platform Admin (authorized)
-  if (!verification?.admin) {
-    return <Navigate to="/admin/login" replace />;
+  // 7. Verified Platform Admin (authorized + email match)
+  if (!verification?.admin || !isAuthorizedAdminEmail(verification.admin.email)) {
+    return <Navigate to="/admin/login?denied=1" replace />;
   }
 
   return (

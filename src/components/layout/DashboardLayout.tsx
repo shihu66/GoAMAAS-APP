@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Link, useLocation, useNavigate, Outlet } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
 import {
@@ -49,6 +49,9 @@ export const DashboardLayout: React.FC = () => {
     resetDemoData,
     trialDaysLeft,
     currentPlan,
+    products,
+    orders,
+    customers,
   } = useApp();
 
   const location = useLocation();
@@ -61,23 +64,82 @@ export const DashboardLayout: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearchModal, setShowSearchModal] = useState(false);
 
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setShowSearchModal((prev) => !prev);
+      } else if (e.key === 'Escape') {
+        setShowSearchModal(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
   const unreadNotifCount = notifications.filter((n) => !n.read).length;
 
-  const navItems = [
-    { label: 'Overview', path: '/dashboard', icon: LayoutDashboard },
-    { label: 'Products', path: '/dashboard/products', icon: Package },
-    { label: 'Orders', path: '/dashboard/orders', icon: ShoppingCart },
-    { label: 'Customers', path: '/dashboard/customers', icon: Users },
-    { label: 'Inventory', path: '/dashboard/inventory', icon: Boxes },
-    { label: 'Page Builder', path: '/dashboard/landing-pages', icon: Layers },
-    { label: 'AI Automations', path: '/dashboard/automations', icon: Bot },
-    { label: 'My Website', path: '/dashboard/subscribed-website', icon: Globe2 },
-    { label: 'Create New Website', path: '/create-website', icon: Sparkles },
-    { label: 'Bespoke Dev', path: '/dashboard/website-requests', icon: Sparkles },
-    { label: 'Billing & Plans', path: '/dashboard/billing', icon: CreditCard },
-    { label: 'Team & Settings', path: '/dashboard/settings', icon: Settings },
-    { label: 'Support & Help', path: '/dashboard/support', icon: HelpCircle },
-  ];
+  const navItems = useMemo(
+    () => [
+      { label: 'Overview', path: '/dashboard', icon: LayoutDashboard },
+      { label: 'Products', path: '/dashboard/products', icon: Package },
+      { label: 'Orders', path: '/dashboard/orders', icon: ShoppingCart },
+      { label: 'Customers', path: '/dashboard/customers', icon: Users },
+      { label: 'Inventory', path: '/dashboard/inventory', icon: Boxes },
+      { label: 'Analytics', path: '/dashboard/analytics', icon: BarChart3 },
+      { label: 'Page Builder', path: '/dashboard/landing-pages', icon: Layers },
+      { label: 'AI Automations', path: '/dashboard/automations', icon: Bot },
+      { label: 'My Website', path: '/dashboard/subscribed-website', icon: Globe2 },
+      { label: 'Create New Website', path: '/create-website', icon: Sparkles },
+      { label: 'Bespoke Dev', path: '/dashboard/website-requests', icon: Sparkles },
+      { label: 'Billing & Plans', path: '/dashboard/billing', icon: CreditCard },
+      { label: 'Team & Settings', path: '/dashboard/settings', icon: Settings },
+      { label: 'Support & Help', path: '/dashboard/support', icon: HelpCircle },
+    ],
+    []
+  );
+
+  const normalizedQuery = searchQuery.trim().toLowerCase();
+  const matchedNavItems = useMemo(() => {
+    if (!normalizedQuery) return navItems;
+    return navItems.filter((item) => item.label.toLowerCase().includes(normalizedQuery));
+  }, [navItems, normalizedQuery]);
+
+  const matchedProducts = useMemo(() => {
+    if (!normalizedQuery) return [];
+    return products
+      .filter(
+        (p) =>
+          p.name.toLowerCase().includes(normalizedQuery) ||
+          p.sku.toLowerCase().includes(normalizedQuery) ||
+          p.category.toLowerCase().includes(normalizedQuery)
+      )
+      .slice(0, 4);
+  }, [products, normalizedQuery]);
+
+  const matchedOrders = useMemo(() => {
+    if (!normalizedQuery) return [];
+    return orders
+      .filter(
+        (o) =>
+          o.orderNumber.toLowerCase().includes(normalizedQuery) ||
+          o.customerName.toLowerCase().includes(normalizedQuery) ||
+          o.customerPhone.includes(normalizedQuery)
+      )
+      .slice(0, 4);
+  }, [orders, normalizedQuery]);
+
+  const matchedCustomers = useMemo(() => {
+    if (!normalizedQuery) return [];
+    return customers
+      .filter(
+        (c) =>
+          c.name.toLowerCase().includes(normalizedQuery) ||
+          c.phone.includes(normalizedQuery) ||
+          c.email.toLowerCase().includes(normalizedQuery)
+      )
+      .slice(0, 4);
+  }, [customers, normalizedQuery]);
 
   const isActive = (path: string) => {
     if (path === '/dashboard') return location.pathname === '/dashboard';
@@ -321,7 +383,14 @@ export const DashboardLayout: React.FC = () => {
               {/* Quick Search Button */}
               <button
                 onClick={() => setShowSearchModal(true)}
-                className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors"
+                className="sm:hidden p-2 text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                aria-label="Open quick search"
+              >
+                <Search className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setShowSearchModal(true)}
+                className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors cursor-pointer"
               >
                 <Search className="w-3.5 h-3.5" />
                 <span className="truncate">Search products, orders...</span>
@@ -472,7 +541,7 @@ export const DashboardLayout: React.FC = () => {
 
       {/* Global Quick Search Modal */}
       {showSearchModal && (
-        <div className="fixed inset-0 z-50 flex items-start justify-center pt-20 p-4">
+        <div className="fixed inset-0 z-50 flex items-start justify-center pt-16 sm:pt-20 p-4">
           <div
             className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs"
             onClick={() => setShowSearchModal(false)}
@@ -484,37 +553,152 @@ export const DashboardLayout: React.FC = () => {
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Jump to products, orders, inventory, customers..."
+                placeholder="Search products, orders, customers, or jump to a page..."
                 className="w-full bg-transparent text-sm focus:outline-hidden text-slate-900 dark:text-white"
                 autoFocus
               />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="text-xs text-slate-400 hover:text-slate-600 p-1"
+                  aria-label="Clear search"
+                >
+                  Clear
+                </button>
+              )}
               <button
                 onClick={() => setShowSearchModal(false)}
-                className="text-xs text-slate-400 hover:text-slate-600 p-1"
+                className="text-[11px] font-mono text-slate-400 hover:text-slate-600 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700"
               >
                 ESC
               </button>
             </div>
-            <div className="p-3 max-h-72 overflow-y-auto space-y-1 text-xs">
-              <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider px-2 py-1">
-                Quick Navigation
-              </p>
-              {navItems.map((item) => (
-                <button
-                  key={item.path}
-                  onClick={() => {
-                    navigate(item.path);
-                    setShowSearchModal(false);
-                  }}
-                  className="w-full flex items-center justify-between p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-left transition-colors"
-                >
-                  <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300">
-                    <item.icon className="w-4 h-4 text-blue-500" />
-                    <span>{item.label}</span>
+            <div className="p-3 max-h-80 overflow-y-auto space-y-3 text-xs">
+              {matchedProducts.length > 0 && (
+                <div className="space-y-1">
+                  <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider px-2 py-0.5">
+                    Products ({matchedProducts.length})
+                  </p>
+                  {matchedProducts.map((p) => (
+                    <button
+                      key={p.id}
+                      onClick={() => {
+                        navigate('/dashboard/products');
+                        setShowSearchModal(false);
+                        setSearchQuery('');
+                      }}
+                      className="w-full flex items-center justify-between p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-left transition-colors cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <Package className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                        <span className="font-medium text-slate-800 dark:text-slate-200 truncate">
+                          {p.name}
+                        </span>
+                        <span className="font-mono text-[10px] text-slate-400 shrink-0">
+                          {p.sku}
+                        </span>
+                      </div>
+                      <span className="font-mono font-semibold text-slate-700 dark:text-slate-300 shrink-0">
+                        ৳{p.price.toLocaleString()}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {matchedOrders.length > 0 && (
+                <div className="space-y-1">
+                  <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider px-2 py-0.5">
+                    Orders ({matchedOrders.length})
+                  </p>
+                  {matchedOrders.map((o) => (
+                    <button
+                      key={o.id}
+                      onClick={() => {
+                        navigate('/dashboard/orders');
+                        setShowSearchModal(false);
+                        setSearchQuery('');
+                      }}
+                      className="w-full flex items-center justify-between p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-left transition-colors cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <ShoppingCart className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                        <span className="font-mono font-semibold text-slate-800 dark:text-slate-200">
+                          {o.orderNumber}
+                        </span>
+                        <span className="text-slate-500 truncate">{o.customerName}</span>
+                      </div>
+                      <span className="font-mono font-semibold text-slate-700 dark:text-slate-300 shrink-0">
+                        ৳{o.total.toLocaleString()}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {matchedCustomers.length > 0 && (
+                <div className="space-y-1">
+                  <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider px-2 py-0.5">
+                    Customers ({matchedCustomers.length})
+                  </p>
+                  {matchedCustomers.map((c) => (
+                    <button
+                      key={c.id}
+                      onClick={() => {
+                        navigate('/dashboard/customers');
+                        setShowSearchModal(false);
+                        setSearchQuery('');
+                      }}
+                      className="w-full flex items-center justify-between p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-left transition-colors cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <Users className="w-3.5 h-3.5 text-purple-500 shrink-0" />
+                        <span className="font-medium text-slate-800 dark:text-slate-200 truncate">
+                          {c.name}
+                        </span>
+                      </div>
+                      <span className="font-mono text-[11px] text-slate-400 shrink-0">
+                        {c.phone}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {matchedNavItems.length > 0 && (
+                <div className="space-y-1">
+                  <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider px-2 py-0.5">
+                    Quick Navigation
+                  </p>
+                  {matchedNavItems.map((item) => (
+                    <button
+                      key={item.path}
+                      onClick={() => {
+                        navigate(item.path);
+                        setShowSearchModal(false);
+                        setSearchQuery('');
+                      }}
+                      className="w-full flex items-center justify-between p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-left transition-colors cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300">
+                        <item.icon className="w-4 h-4 text-blue-500" />
+                        <span>{item.label}</span>
+                      </div>
+                      <span className="text-[11px] text-slate-400">Go to page →</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {normalizedQuery &&
+                matchedProducts.length === 0 &&
+                matchedOrders.length === 0 &&
+                matchedCustomers.length === 0 &&
+                matchedNavItems.length === 0 && (
+                  <div className="py-6 text-center text-slate-400">
+                    No matching products, orders, customers, or pages for &ldquo;{searchQuery}&rdquo;.
                   </div>
-                  <span className="text-[11px] text-slate-400">Go to page →</span>
-                </button>
-              ))}
+                )}
             </div>
           </div>
         </div>

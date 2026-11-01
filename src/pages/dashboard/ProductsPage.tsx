@@ -22,6 +22,8 @@ import {
 } from 'lucide-react';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
+import { TrialStatusBadge } from '../../components/ui/TrialStatusBadge';
+import { TrialGateBanner } from '../../components/ui/TrialGateBanner';
 
 export const ProductsPage: React.FC = () => {
   const {
@@ -34,7 +36,11 @@ export const ProductsPage: React.FC = () => {
     adjustProductStock,
     uploadWebsiteAsset,
     showToast,
+    getServiceAccess,
   } = useApp();
+  const dashboardAccess = getServiceAccess('dashboard_business', 'Dashboard Business Tier', 'dashboard');
+  const websiteAccess = getServiceAccess('website_subscription', 'GoAMAAS Website', 'website');
+  const hasCatalogAccess = dashboardAccess.hasAccess || websiteAccess.hasAccess;
 
   const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
   const [search, setSearch] = useState('');
@@ -270,9 +276,18 @@ export const ProductsPage: React.FC = () => {
       {/* Title & Action Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
-            Products & Inventory Catalog
-          </h1>
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
+              Products & Inventory Catalog
+            </h1>
+            {!websiteAccess.hasAccess && (
+              <TrialStatusBadge
+                serviceId="dashboard_business"
+                serviceName="Dashboard Business Tier"
+                category="dashboard"
+              />
+            )}
+          </div>
           <p className="text-xs text-slate-500 mt-1">
             Manage product pricing, images, website storefront visibility, and stock thresholds.
           </p>
@@ -307,7 +322,8 @@ export const ProductsPage: React.FC = () => {
 
           <button
             onClick={handleOpenAdd}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer"
+            disabled={!hasCatalogAccess}
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer"
           >
             <Plus className="w-4 h-4" />
             <span>Add New Product</span>
@@ -315,6 +331,25 @@ export const ProductsPage: React.FC = () => {
         </div>
       </div>
 
+      {!hasCatalogAccess ? (
+        <TrialGateBanner
+          serviceId="dashboard_business"
+          serviceName="Dashboard Business Tier"
+          category="dashboard"
+          serviceDescription="Manage unlimited product SKUs, wholesale cost prices (COGS), product photography, stock thresholds, and live storefront visibility with a 7-day free Dashboard trial or an active GoAMAAS Website subscription."
+          features={[
+            'Unlimited Product SKUs & Category Organization',
+            'Wholesale Cost Price (COGS) & Margin Tracking',
+            'Direct Storefront Visibility & Sort Ordering',
+            'High-Resolution Product Image Uploads',
+            'Real-Time Stock Balances & Low-Stock Thresholds',
+            'Instant Sync Across Orders & Storefront Pages',
+          ]}
+          subscribePath="/dashboard/billing"
+          subscribePriceLabel="From ৳299/mo"
+        />
+      ) : (
+        <>
       {/* Filter and Search Bar */}
       <div className="p-4 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col md:flex-row items-center justify-between gap-3 text-xs">
         {/* Search */}
@@ -736,6 +771,8 @@ export const ProductsPage: React.FC = () => {
             </button>
           </div>
         </div>
+      )}
+        </>
       )}
 
       {/* Add / Edit Product Modal */}

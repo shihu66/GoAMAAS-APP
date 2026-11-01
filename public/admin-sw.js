@@ -1,11 +1,12 @@
 /* GoAMAAS Admin — Strictly Scoped Service Worker (/admin)
  * Security Invariants:
- * 1. NEVER intercepts or caches Supabase REST, Auth, Storage, Realtime, or /api/* requests.
- * 2. NEVER caches authenticated responses, admin HTML documents, customer data, or payment records.
+ * 1. NEVER intercepts or caches Supabase REST, Auth, Storage, Realtime, Functions, or /api/* requests.
+ * 2. NEVER caches authenticated responses, admin HTML documents, auth tokens, customer data, or payment records.
  * 3. Precaches ONLY the static offline shell (/admin-offline.html) and static brand icons.
+ * 4. Purges all dynamic admin caches immediately on ADMIN_SIGN_OUT.
  */
 
-const SHELL_CACHE = 'goamaas-admin-shell-v1';
+const SHELL_CACHE = 'goamaas-admin-shell-v2';
 const SAFE_STATIC_ASSETS = [
   '/admin-offline.html',
   '/admin-manifest.webmanifest',
@@ -68,17 +69,19 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Strictly ignore cross-origin traffic (Supabase Auth/REST/Storage, CDNs, etc.)
+  // Strictly ignore cross-origin traffic (Supabase Auth/REST/Storage/Realtime, Google OAuth, CDNs)
   if (url.origin !== self.location.origin) {
     return;
   }
 
-  // Never intercept API routes, Supabase proxy paths, or any request carrying credentials/API headers
+  // Never intercept API routes, OAuth callbacks, Supabase proxy paths, or any request carrying credentials/API headers
   if (
     url.pathname.startsWith('/api/') ||
+    url.pathname.startsWith('/auth/') ||
     url.pathname.includes('/rest/v1/') ||
     url.pathname.includes('/auth/v1/') ||
     url.pathname.includes('/storage/v1/') ||
+    url.pathname.includes('/realtime/v1/') ||
     url.pathname.includes('/functions/v1/') ||
     request.headers.has('authorization') ||
     request.headers.has('apikey')
@@ -86,13 +89,13 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Navigation requests inside /admin: always fetch live from network; fall back to static offline notice on network failure
+  // Navigation requests inside /admin: always fetch live from network with no-store; fall back to static offline notice on network failure
   if (
     request.mode === 'navigate' &&
     (url.pathname === '/admin' || url.pathname.startsWith('/admin/'))
   ) {
     event.respondWith(
-      fetch(request).catch(async () => {
+      fetch(request, { cache: 'no-store' }).catch(async () => {
         const cachedOffline = await caches.match('/admin-offline.html');
         if (cachedOffline) {
           return cachedOffline;

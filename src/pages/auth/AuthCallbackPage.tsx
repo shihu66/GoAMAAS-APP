@@ -1,34 +1,84 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams, Link } from 'react-router-dom';
-import { supabase, isSupabaseConfigured, UUID_REGEX, getUserProfile, upsertUserProfile } from '../../lib/supabase';
+import {
+  supabase,
+  isSupabaseConfigured,
+  UUID_REGEX,
+  getUserProfile,
+  upsertUserProfile,
+  consumeAdminOAuthIntent,
+  signOutFromSupabase,
+} from '../../lib/supabase';
+import {
+  AUTHORIZED_ADMIN_EMAIL,
+  clearAdminLoginFailures,
+  clearAdminSessionEvents,
+  isAuthorizedAdminEmail,
+  recordAdminLoginFailure,
+  recordAdminSessionEvent,
+  verifyServerAdminSession,
+} from '../../lib/adminSecurity';
+import { notifyAdminServiceWorkerSignOut } from '../../hooks/useAdminPWA';
 import { useApp } from '../../context/AppContext';
 import { Loader2, AlertCircle, CheckCircle2, ArrowRight } from 'lucide-react';
 
 export const AuthCallbackPage: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { setAuthenticatedUser, showToast } = useApp();
+  const { setAuthenticatedUser, logout, showToast } = useApp();
+  const processedRef = useRef(false);
 
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isAdminFlowState, setIsAdminFlowState] = useState<boolean>(false);
 
   useEffect(() => {
+    if (processedRef.current) return;
+    processedRef.current = true;
+
+    const nextFromQuery = (searchParams.get('next') || '').trim();
+    const nextFromIntent = consumeAdminOAuthIntent();
+    const effectiveNext = nextFromQuery || nextFromIntent || '';
+    const isAdminAuthFlow =
+      effectiveNext === '/admin' || effectiveNext.startsWith('/admin/');
+    setIsAdminFlowState(isAdminAuthFlow);
+
     const errorParam = searchParams.get('error');
     const errorDescription = searchParams.get('error_description');
 
     if (errorParam) {
+      if (isAdminAuthFlow) {
+        void (async () => {
+          clearAdminSessionEvents();
+          notifyAdminServiceWorkerSignOut();
+          await signOutFromSupabase();
+          await logout();
+          navigate('/admin/login?oauth_error=1', { replace: true });
+        })();
+        return;
+      }
       setStatus('error');
       if (errorParam === 'access_denied') {
-        setErrorMessage('Google authentication was cancelled. You can try again or use your email and password.');
+        setErrorMessage(
+          'Google authentication was cancelled. You can try again or use your email and password.'
+        );
       } else {
-        setErrorMessage(errorDescription || errorParam || 'Authentication was cancelled or encountered an error.');
+        setErrorMessage(
+          errorDescription || errorParam || 'Authentication was cancelled or encountered an error.'
+        );
       }
       return;
     }
 
     if (!isSupabaseConfigured || !supabase) {
+      if (isAdminAuthFlow) {
+        navigate('/admin/login?oauth_error=1', { replace: true });
+        return;
+      }
       setStatus('error');
-      setErrorMessage('Supabase credentials are not configured in this environment. Unable to verify authentication session.');
+      setErrorMessage(
+        'Supabase credentials are not configured in this environment. Unable to verify authentication session.'
+      );
       return;
     }
 
@@ -38,20 +88,34 @@ export const AuthCallbackPage: React.FC = () => {
         setErrorMessage('Supabase client is not available.');
         return;
       }
-      const nextParam = (searchParams.get('next') || '').trim();
-      const isAdminAuthFlow = nextParam === '/admin' || nextParam.startsWith('/admin/');
 
       try {
+        // 1. Check whether detectSessionInUrl already redeemed the PKCE code or implicit hash
+        let {
+          data: { session },
+          error: sessionError,
+        } = await supabase.auth.getSession();
+
+        // 2. Only exchange ?code= manually if session is not yet populated
         const code = searchParams.get('code');
-        if (code) {
-          // PKCE flow code exchange
-          const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
-          if (exchangeError) {
-            throw exchangeError;
+        if (!session?.user && code) {
+          const { data: exchangeData, error: exchangeError } =
+            await supabase.auth.exchangeCodeForSession(code);
+          if (exchangeData?.session?.user) {
+            session = exchangeData.session;
+            sessionError = null;
+          } else if (exchangeError) {
+            // Re-check getSession() in case detectSessionInUrl completed concurrently
+            const retryRes = await supabase.auth.getSession();
+            if (retryRes.data.session?.user) {
+              session = retryRes.data.session;
+              sessionError = null;
+            } else {
+              throw exchangeError;
+            }
           }
         }
 
-        const { data: { session }, error: sessionError } = await supabase.auth.getSession();
         if (sessionError) {
           throw sessionError;
         }
@@ -59,7 +123,6 @@ export const AuthCallbackPage: React.FC = () => {
         let authenticatedUser = session?.user;
 
         if (!authenticatedUser) {
-          // If implicit flow token in hash, allow Supabase client to parse it
           const hash = window.location.hash;
           if (hash && hash.includes('access_token')) {
             const { data: userData, error: userError } = await supabase.auth.getUser();
@@ -72,51 +135,94 @@ export const AuthCallbackPage: React.FC = () => {
           }
         }
 
-        const userMeta = authenticatedUser.user_metadata || {};
-        const fullName = userMeta.full_name || userMeta.name || authenticatedUser.email?.split('@')[0] || 'Merchant';
-        const email = authenticatedUser.email || '';
-        const userId = authenticatedUser.id;
-
-        // Check profile in Supabase PostgreSQL
-        const { profile } = await getUserProfile(userId);
-
-        // Dedicated /admin OAuth flow: strictly verify server-side admin role; never auto-provision or leak account status
+        // Dedicated /admin OAuth flow: strictly verify official email + email_verified + server-side admin role
         if (isAdminAuthFlow) {
-          const { data: rpcIsAdmin, error: rpcErr } = await supabase.rpc('is_admin');
-          if (rpcErr || rpcIsAdmin !== true || !profile || profile.role !== 'admin') {
-            await supabase.auth.signOut({ scope: 'local' });
-            navigate('/admin/login?unauthorized=1', { replace: true });
+          const adminVerification = await verifyServerAdminSession();
+
+          if (
+            adminVerification.status === 'forbidden' ||
+            adminVerification.status === 'unauthenticated'
+          ) {
+            clearAdminSessionEvents();
+            notifyAdminServiceWorkerSignOut();
+            await signOutFromSupabase();
+            await logout();
+            recordAdminLoginFailure();
+            navigate('/admin/login?denied=1', { replace: true });
             return;
           }
 
-          const candidateAdminStoreId = String(profile.store_id || '').trim();
-          const resolvedAdminStoreId = UUID_REGEX.test(candidateAdminStoreId) ? candidateAdminStoreId : '';
+          if (adminVerification.status === 'network_error') {
+            navigate('/admin/login?oauth_error=1', { replace: true });
+            return;
+          }
 
-          setAuthenticatedUser({
-            id: userId,
-            name: profile.full_name || fullName,
-            email,
-            role: 'admin',
-            storeId: resolvedAdminStoreId,
-          });
-
-          setStatus('success');
           const safeAdminTarget =
-            nextParam.startsWith('/admin') && nextParam !== '/admin/login' ? nextParam : '/admin';
-          setTimeout(() => {
+            effectiveNext.startsWith('/admin') && effectiveNext !== '/admin/login'
+              ? effectiveNext
+              : '/admin';
+
+          if (adminVerification.status === 'mfa_required') {
+            clearAdminLoginFailures();
+            navigate('/admin/login', {
+              state: { from: safeAdminTarget },
+              replace: true,
+            });
+            return;
+          }
+
+          if (
+            adminVerification.status === 'authorized' &&
+            adminVerification.admin &&
+            isAuthorizedAdminEmail(adminVerification.admin.email)
+          ) {
+            clearAdminLoginFailures();
+            setAuthenticatedUser({
+              id: adminVerification.admin.id,
+              name: adminVerification.admin.name,
+              email: AUTHORIZED_ADMIN_EMAIL,
+              role: 'admin',
+              storeId: '',
+            });
+            recordAdminSessionEvent({
+              adminId: adminVerification.admin.id,
+              action: 'admin_sign_in_google',
+              targetType: 'session',
+              targetId: 'admin_portal',
+              outcome: 'success',
+              summary: 'Verified Google OAuth administrator session established.',
+            });
+            setStatus('success');
             navigate(safeAdminTarget, { replace: true });
-          }, 300);
+            return;
+          }
+
+          clearAdminSessionEvents();
+          notifyAdminServiceWorkerSignOut();
+          await signOutFromSupabase();
+          await logout();
+          navigate('/admin/login?denied=1', { replace: true });
           return;
         }
 
+        // Standard Customer / Merchant OAuth Flow
+        const userMeta = authenticatedUser.user_metadata || {};
+        const fullName =
+          userMeta.full_name ||
+          userMeta.name ||
+          authenticatedUser.email?.split('@')[0] ||
+          'Merchant';
+        const email = authenticatedUser.email || '';
+        const userId = authenticatedUser.id;
+
+        const { profile } = await getUserProfile(userId);
         let onboardingCompleted = false;
 
         if (!profile) {
-          // Auto-provision merchant profile record
           const { error: upsertErr } = await upsertUserProfile({
             id: userId,
             full_name: fullName,
-            email: email,
+            email,
             role: 'merchant',
             onboarding_completed: Boolean(userMeta.onboarding_completed),
           });
@@ -131,20 +237,18 @@ export const AuthCallbackPage: React.FC = () => {
         const candidateStoreId = String(profile?.store_id || userMeta.store_id || '').trim();
         const resolvedStoreId = UUID_REGEX.test(candidateStoreId) ? candidateStoreId : '';
 
-        // Verify admin role via RPC if profile claims admin
         let verifiedRole: 'merchant' | 'admin' = 'merchant';
-        if (profile?.role === 'admin') {
+        if (profile?.role === 'admin' && isAuthorizedAdminEmail(email)) {
           const { data: rpcAdmin } = await supabase.rpc('is_admin');
           if (rpcAdmin === true) {
             verifiedRole = 'admin';
           }
         }
 
-        // Sync into AppContext
         setAuthenticatedUser({
           id: userId,
           name: fullName,
-          email: email,
+          email,
           role: verifiedRole,
           storeId: resolvedStoreId,
         });
@@ -152,27 +256,31 @@ export const AuthCallbackPage: React.FC = () => {
         setStatus('success');
         showToast(`Welcome, ${fullName}!`, 'success');
 
-        // Redirect: existing users -> /dashboard, new users -> /onboarding
         setTimeout(() => {
           if (onboardingCompleted) {
             navigate('/dashboard', { replace: true });
           } else {
             navigate('/onboarding', { replace: true });
           }
-        }, 500);
+        }, 400);
       } catch (err: unknown) {
         if (isAdminAuthFlow) {
-          await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
-          navigate('/admin/login?unauthorized=1', { replace: true });
+          clearAdminSessionEvents();
+          notifyAdminServiceWorkerSignOut();
+          await signOutFromSupabase().catch(() => {});
+          await logout().catch(() => {});
+          navigate('/admin/login?oauth_error=1', { replace: true });
           return;
         }
         setStatus('error');
-        setErrorMessage(err instanceof Error ? err.message : 'Failed to finalize authentication session.');
+        setErrorMessage(
+          err instanceof Error ? err.message : 'Failed to finalize authentication session.'
+        );
       }
     };
 
-    processAuth();
-  }, [navigate, searchParams, setAuthenticatedUser, showToast]);
+    void processAuth();
+  }, [logout, navigate, searchParams, setAuthenticatedUser, showToast]);
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex flex-col justify-center items-center p-6 text-center">
@@ -181,10 +289,14 @@ export const AuthCallbackPage: React.FC = () => {
           <div className="space-y-4">
             <Loader2 className="w-10 h-10 text-blue-600 animate-spin mx-auto" />
             <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-              Authenticating with Google...
+              {isAdminFlowState
+                ? 'Verifying Administrator Authorization...'
+                : 'Authenticating with Google...'}
             </h2>
             <p className="text-xs text-slate-500">
-              Verifying your session and synchronizing your merchant workspace.
+              {isAdminFlowState
+                ? 'Confirming verified Google identity and server-side administrator permissions.'
+                : 'Verifying your session and synchronizing your merchant workspace.'}
             </p>
           </div>
         )}
@@ -196,7 +308,7 @@ export const AuthCallbackPage: React.FC = () => {
               Authentication Confirmed
             </h2>
             <p className="text-xs text-slate-500">
-              Session established. Redirecting to your workspace...
+              Session established. Redirecting...
             </p>
           </div>
         )}
@@ -212,7 +324,7 @@ export const AuthCallbackPage: React.FC = () => {
             </div>
             <div className="pt-2">
               <Link
-                to="/login"
+                to={isAdminFlowState ? '/admin/login' : '/login'}
                 className="w-full py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs transition-colors flex items-center justify-center gap-2"
               >
                 <span>Return to Sign In</span>

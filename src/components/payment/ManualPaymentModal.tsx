@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useApp } from '../../context/AppContext';
+import { useLanguage } from '../../context/LanguageContext';
 import { PaymentMethodType } from '../../types';
 import {
   hasDuplicateActiveTransactionReference,
@@ -7,6 +8,7 @@ import {
   normalizeTransactionReference,
   validateManualPaymentSubmissionInput,
 } from '../../lib/paymentWorkflow';
+import { getNagadManualSteps } from '../../data/paymentGatewaysConfig';
 import { Modal } from '../ui/Modal';
 import {
   Copy,
@@ -15,6 +17,9 @@ import {
   Loader2,
   ArrowRight,
   Globe,
+  ShieldCheck,
+  Clock,
+  XCircle,
 } from 'lucide-react';
 
 interface ManualPaymentModalProps {
@@ -49,6 +54,8 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
     submitPaymentRequest,
     showToast,
   } = useApp();
+  const { lang, t } = useLanguage();
+  const pm = t.paymentModal;
 
   const [selectedWebsiteId, setSelectedWebsiteId] = useState<string>(serviceId);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethodType>('bKash');
@@ -71,7 +78,9 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
   const userWebsites = useMemo(
     () =>
       subscribedWebsites.filter(
-        (site) => (!user?.id || !site.userId || site.userId === user.id) && site.subscriptionStatus !== 'cancelled'
+        (site) =>
+          (!user?.id || !site.userId || site.userId === user.id) &&
+          site.subscriptionStatus !== 'cancelled'
       ),
     [subscribedWebsites, user?.id]
   );
@@ -97,6 +106,8 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
       ? boundWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly || amount
       : amount;
 
+  const formattedAmount = `৳${effectiveAmount.toLocaleString()}`;
+
   const bkashConfig = paymentGatewayConfigs.find((c) => c.id === 'bkash');
   const nagadConfig = paymentGatewayConfigs.find((c) => c.id === 'nagad');
   const bankConfig = paymentGatewayConfigs.find((c) => c.id === 'bank_transfer');
@@ -105,6 +116,13 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
   const isBkashReady = Boolean(bkashConfig?.isEnabled && bkashConfig?.accountNumber?.trim());
   const isNagadReady = Boolean(nagadConfig?.isEnabled && nagadConfig?.accountNumber?.trim());
   const isBankReady = Boolean(bankConfig?.isEnabled && bankConfig?.accountNumber?.trim());
+
+  // Read recipient number strictly from dynamic gateway configuration (no hardcoded fallback)
+  const nagadRecipientNumber = nagadConfig?.accountNumber?.trim() || '';
+  const nagadSteps = useMemo(
+    () => (nagadRecipientNumber ? getNagadManualSteps(lang, formattedAmount, nagadRecipientNumber) : []),
+    [lang, formattedAmount, nagadRecipientNumber]
+  );
 
   useEffect(() => {
     if (!isOpen) return;
@@ -125,16 +143,21 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
     normalizedTypedTrx.length >= 4 &&
     hasDuplicateActiveTransactionReference(paymentRequests, normalizedTypedTrx);
 
-  const hasExistingPendingForTarget = useMemo(() => {
-    if (!user?.id || !effectiveServiceId) return false;
-    return paymentRequests.some(
-      (r) =>
-        r.userId === user.id &&
-        r.serviceType === serviceType &&
-        r.serviceId.trim().toLowerCase() === effectiveServiceId.trim().toLowerCase() &&
-        r.status === 'pending'
-    );
+  const matchingTargetRequests = useMemo(() => {
+    if (!user?.id || !effectiveServiceId) return [];
+    const targetKey = effectiveServiceId.trim().toLowerCase();
+    return paymentRequests
+      .filter(
+        (r) =>
+          r.userId === user.id &&
+          r.serviceType === serviceType &&
+          r.serviceId.trim().toLowerCase() === targetKey
+      )
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }, [paymentRequests, user?.id, serviceType, effectiveServiceId]);
+
+  const latestTargetRequest = matchingTargetRequests[0];
+  const hasExistingPendingForTarget = matchingTargetRequests.some((r) => r.status === 'pending');
 
   const handleClose = () => {
     if (loading || submittingRef.current) return;
@@ -146,7 +169,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
     if (!text) return;
     navigator.clipboard.writeText(text);
     setCopiedKey(key);
-    showToast('Copied to clipboard!', 'info');
+    showToast(pm.copiedToast, 'info');
     setTimeout(() => setCopiedKey(null), 2000);
   };
 
@@ -158,26 +181,26 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
     setSubmitError(null);
 
     if (!isValidAmount) {
-      const msg = 'This plan or service does not currently have a valid active price.';
+      const msg = pm.errors.invalidPrice;
       setSubmitError(msg);
       showToast(msg, 'error');
       return;
     }
 
     if (paymentMethod === 'bKash' && !isBkashReady) {
-      const msg = 'bKash payment channel is currently unavailable. Please choose an active payment method.';
+      const msg = pm.errors.bkashUnavailable;
       setSubmitError(msg);
       showToast(msg, 'warning');
       return;
     }
     if (paymentMethod === 'Nagad' && !isNagadReady) {
-      const msg = 'Nagad payment channel is currently unavailable. Please choose bKash or Bank Transfer.';
+      const msg = pm.errors.nagadUnavailable;
       setSubmitError(msg);
       showToast(msg, 'warning');
       return;
     }
     if (paymentMethod === 'Bank Transfer' && !isBankReady) {
-      const msg = 'Bank Transfer channel is currently unavailable. Please choose an active payment method.';
+      const msg = pm.errors.bankUnavailable;
       setSubmitError(msg);
       showToast(msg, 'warning');
       return;
@@ -193,21 +216,21 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
     });
 
     if (!validation.valid) {
-      const msg = validation.error || 'Please fill in all required payment fields.';
+      const msg = validation.error || pm.errors.requiredFields;
       setSubmitError(msg);
       showToast(msg, 'warning');
       return;
     }
 
     if (hasDuplicateActiveTransactionReference(paymentRequests, validation.normalizedReference)) {
-      const msg = `Transaction ID "${validation.normalizedReference}" has already been submitted and is pending or approved.`;
+      const msg = pm.errors.duplicateTrx(validation.normalizedReference);
       setSubmitError(msg);
       showToast(msg, 'warning');
       return;
     }
 
     if (hasExistingPendingForTarget) {
-      const msg = 'A payment request for this subscription is already pending admin verification.';
+      const msg = pm.errors.alreadyPending;
       setSubmitError(msg);
       showToast(msg, 'warning');
       return;
@@ -240,11 +263,10 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
         if (onSuccess) onSuccess();
         onClose();
       } else {
-        setSubmitError(res.message || 'Failed to submit payment request. Please try again.');
+        setSubmitError(res.message || pm.errors.submitFailed);
       }
     } catch (err: unknown) {
-      const msg =
-        err instanceof Error ? err.message : 'Failed to submit payment request. Please try again.';
+      const msg = err instanceof Error ? err.message : pm.errors.submitFailed;
       setSubmitError(msg);
     } finally {
       submittingRef.current = false;
@@ -256,8 +278,8 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
     <Modal
       isOpen={isOpen}
       onClose={handleClose}
-      title="Submit Manual Payment Verification"
-      description="Transfer the exact payable amount to a verified GoAMAAS account, then submit your Transaction ID and sender phone number."
+      title={pm.title}
+      description={pm.description}
       maxWidth="xl"
     >
       <div className="space-y-5 text-slate-800 dark:text-slate-200 text-xs">
@@ -266,7 +288,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
           {allowWebsiteSelection && serviceType === 'website_subscription' && userWebsites.length > 1 && (
             <div>
               <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
-                Target Website Subscription *
+                {pm.targetWebsiteLabel}
               </label>
               <select
                 value={effectiveServiceId}
@@ -285,7 +307,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="min-w-0">
               <span className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400 block tracking-wider">
-                {isWebsiteService ? 'Website Subscription' : 'Selected Plan'}
+                {isWebsiteService ? pm.websiteSubscriptionLabel : pm.selectedPlanLabel}
               </span>
               <span className="text-sm font-extrabold text-slate-900 dark:text-white block mt-0.5 truncate">
                 {boundWebsite ? boundWebsite.businessName : effectiveServiceName}
@@ -303,31 +325,76 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
 
             <div className="sm:text-right pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-200 dark:border-slate-700">
               <span className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400 block tracking-wider">
-                Exact Payable Amount
+                {pm.exactPayableLabel}
               </span>
               <span className="text-2xl font-black text-blue-600 dark:text-blue-400 font-mono tabular-nums">
-                ৳{effectiveAmount.toLocaleString()}
+                {formattedAmount}
               </span>
             </div>
           </div>
         </div>
 
-        {hasExistingPendingForTarget && (
+        {/* Current Payment Status Display: Pending Verification / Approved / Rejected (+ reason & resubmission) */}
+        {hasExistingPendingForTarget ? (
           <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-900 dark:text-amber-200 flex items-start gap-2.5">
-            <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-            <div>
-              <strong className="block font-bold">Pending Verification Already Submitted</strong>
-              <span className="text-[11px] leading-relaxed block mt-0.5">
-                A payment request for this subscription is already awaiting admin verification. Once reviewed, your dashboard will update automatically.
-              </span>
+            <Clock className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1 space-y-1">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <strong className="font-bold">{pm.pendingAlreadyTitle}</strong>
+                <span className="text-[10px] font-bold uppercase tracking-wider text-amber-700 dark:text-amber-300">
+                  {pm.statusPendingBadge}
+                </span>
+              </div>
+              <p className="text-[11px] leading-relaxed">{pm.pendingAlreadyBody}</p>
             </div>
           </div>
-        )}
+        ) : latestTargetRequest?.status === 'rejected' ? (
+          <div className="p-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-900 dark:text-rose-200 flex items-start gap-2.5">
+            <XCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1 space-y-1">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <strong className="font-bold">
+                  {pm.statusLabel}: {pm.statusRejectedBadge}
+                </strong>
+                {latestTargetRequest.transactionId && (
+                  <span className="font-mono text-[11px] text-rose-700 dark:text-rose-300">
+                    TrxID: {latestTargetRequest.transactionId}
+                  </span>
+                )}
+              </div>
+              {latestTargetRequest.adminNotes && (
+                <p className="text-[11px] leading-relaxed font-medium">
+                  <strong>{pm.statusRejectedReasonLabel}</strong> {latestTargetRequest.adminNotes}
+                </p>
+              )}
+              <p className="text-[11px] leading-relaxed text-rose-700 dark:text-rose-300">
+                {pm.statusRejectedResubmitHint}
+              </p>
+            </div>
+          </div>
+        ) : latestTargetRequest?.status === 'approved' ? (
+          <div className="p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200 flex items-start gap-2.5">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1 space-y-1">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <strong className="font-bold">
+                  {pm.statusLabel}: {pm.statusApprovedBadge}
+                </strong>
+                {latestTargetRequest.transactionId && (
+                  <span className="font-mono text-[11px] text-emerald-700 dark:text-emerald-300">
+                    TrxID: {latestTargetRequest.transactionId}
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] leading-relaxed">{pm.statusApprovedBody}</p>
+            </div>
+          </div>
+        ) : null}
 
         {/* Payment Method Selector */}
         <div>
           <label className="font-semibold block mb-2 text-slate-700 dark:text-slate-300">
-            1. Choose Payment Method *
+            {pm.step1ChooseMethod}
           </label>
           <div className="grid grid-cols-3 gap-2">
             <button
@@ -341,7 +408,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
             >
               <div className="font-bold text-xs whitespace-nowrap">bKash</div>
               <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 truncate">
-                {isBkashReady ? 'Send Money' : 'Unavailable'}
+                {isBkashReady ? pm.sendMoney : pm.unavailable}
               </div>
             </button>
 
@@ -356,7 +423,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
             >
               <div className="font-bold text-xs whitespace-nowrap">Nagad</div>
               <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 truncate">
-                {isNagadReady ? 'Send Money' : 'Unavailable'}
+                {isNagadReady ? `${pm.sendMoney} · Personal` : pm.unavailable}
               </div>
             </button>
 
@@ -371,7 +438,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
             >
               <div className="font-bold text-xs whitespace-nowrap">Bank Transfer</div>
               <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 truncate">
-                {isBankReady ? bankConfig?.bankName?.trim() || 'Bank A/C' : 'Unavailable'}
+                {isBankReady ? bankConfig?.bankName?.trim() || pm.bankAc : pm.unavailable}
               </div>
             </button>
           </div>
@@ -385,10 +452,8 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                 <div className="p-4 rounded-xl bg-pink-50/60 dark:bg-pink-950/20 border border-pink-200 dark:border-pink-900/50 text-pink-800 dark:text-pink-300 flex items-start gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                   <div>
-                    <span className="font-bold block">bKash Channel Unavailable</span>
-                    <p className="text-[11px] mt-0.5">
-                      bKash recipient details are currently disabled. Please select an active payment method above.
-                    </p>
+                    <span className="font-bold block">{pm.bkashUnavailableTitle}</span>
+                    <p className="text-[11px] mt-0.5">{pm.bkashUnavailableBody}</p>
                   </div>
                 </div>
               ) : (
@@ -396,7 +461,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <span className="text-[10px] font-bold text-pink-600 dark:text-pink-400 uppercase tracking-wider block">
-                        Recipient bKash Number
+                        {pm.recipientBkashLabel}
                         {bkashConfig?.accountName?.trim() ? ` · ${bkashConfig.accountName.trim()}` : ''}
                       </span>
                       <span className="font-mono font-bold text-base text-slate-900 dark:text-white mt-0.5 block tabular-nums">
@@ -413,12 +478,19 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                       ) : (
                         <Copy className="w-3.5 h-3.5" />
                       )}
-                      <span>{copiedKey === 'bkash' ? 'Copied' : 'Copy Number'}</span>
+                      <span>{copiedKey === 'bkash' ? pm.copied : pm.copyNumber}</span>
                     </button>
                   </div>
+                  {copiedKey === 'bkash' && bkashConfig?.accountNumber && (
+                    <p
+                      role="status"
+                      className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-400"
+                    >
+                      {pm.copiedAccountSuccess(bkashConfig.accountNumber)}
+                    </p>
+                  )}
                   <p className="text-[11px] text-pink-900 dark:text-pink-200 leading-relaxed">
-                    {bkashConfig?.instructions?.trim() ||
-                      `Send exactly ৳${effectiveAmount.toLocaleString()} to the bKash number above, then enter your TrxID and sender wallet number below.`}
+                    {bkashConfig?.instructions?.trim() || pm.bkashDefaultInstruction(formattedAmount)}
                   </p>
                 </div>
               )}
@@ -431,27 +503,29 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                 <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-300 flex items-start gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                   <div>
-                    <span className="font-bold block">Nagad Channel Unavailable</span>
-                    <p className="text-[11px] mt-0.5">
-                      Nagad recipient details are not active right now. Please choose bKash or Bank Transfer.
-                    </p>
+                    <span className="font-bold block">{pm.nagadUnavailableTitle}</span>
+                    <p className="text-[11px] mt-0.5">{pm.nagadUnavailableBody}</p>
                   </div>
                 </div>
               ) : (
-                <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 space-y-2.5">
-                  <div className="flex items-center justify-between gap-3">
+                <div className="p-4 rounded-xl bg-amber-50/80 dark:bg-amber-950/35 border border-amber-200 dark:border-amber-900/70 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <span className="text-[10px] font-bold text-amber-700 dark:text-amber-400 uppercase tracking-wider block">
-                        Recipient Nagad Number
-                        {nagadConfig?.accountName?.trim() ? ` · ${nagadConfig.accountName.trim()}` : ''}
-                      </span>
-                      <span className="font-mono font-bold text-base text-slate-900 dark:text-white mt-0.5 block tabular-nums">
-                        {nagadConfig?.accountNumber}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[10px] font-bold text-amber-700 dark:text-amber-400 uppercase tracking-wider">
+                          {pm.recipientNagadLabel}
+                        </span>
+                        <span className="text-[10px] font-bold text-amber-900 dark:text-amber-200">
+                          · {nagadConfig?.accountName?.trim() || pm.nagadAccountTypeBadge}
+                        </span>
+                      </div>
+                      <span className="font-mono font-extrabold text-base text-slate-900 dark:text-white mt-1 block tabular-nums">
+                        {nagadRecipientNumber}
                       </span>
                     </div>
                     <button
                       type="button"
-                      onClick={() => handleCopy(nagadConfig?.accountNumber ?? '', 'nagad')}
+                      onClick={() => handleCopy(nagadRecipientNumber, 'nagad')}
                       className="min-h-[44px] px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs flex items-center gap-1.5 cursor-pointer shrink-0 whitespace-nowrap"
                     >
                       {copiedKey === 'nagad' ? (
@@ -459,13 +533,34 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                       ) : (
                         <Copy className="w-3.5 h-3.5" />
                       )}
-                      <span>{copiedKey === 'nagad' ? 'Copied' : 'Copy Number'}</span>
+                      <span>{copiedKey === 'nagad' ? pm.copied : pm.copyNumber}</span>
                     </button>
                   </div>
-                  <p className="text-[11px] text-amber-900 dark:text-amber-200 leading-relaxed">
-                    {nagadConfig?.instructions?.trim() ||
-                      `Send exactly ৳${effectiveAmount.toLocaleString()} to the Nagad number above, then enter your TrxID and sender wallet number below.`}
-                  </p>
+
+                  {copiedKey === 'nagad' && nagadRecipientNumber && (
+                    <p
+                      role="status"
+                      className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-400"
+                    >
+                      {pm.copiedAccountSuccess(nagadRecipientNumber)}
+                    </p>
+                  )}
+
+                  <div className="pt-2 border-t border-amber-200/70 dark:border-amber-900/60 space-y-1.5">
+                    <span className="block font-bold text-[11px] text-amber-900 dark:text-amber-200">
+                      {pm.nagadStepsTitle}
+                    </span>
+                    <ol className="list-decimal pl-4 space-y-1 text-[11px] text-amber-950 dark:text-amber-100 leading-relaxed">
+                      {nagadSteps.map((stepText, idx) => (
+                        <li key={idx}>{stepText}</li>
+                      ))}
+                    </ol>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 text-[11px] text-amber-800 dark:text-amber-300 pt-1">
+                    <ShieldCheck className="w-3.5 h-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                    <span>{pm.nagadManualOnlyNote}</span>
+                  </div>
                 </div>
               )}
             </div>
@@ -477,10 +572,8 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                 <div className="p-4 rounded-xl bg-blue-50/60 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-900/50 text-blue-800 dark:text-blue-300 flex items-start gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                   <div>
-                    <span className="font-bold block">Bank Transfer Channel Unavailable</span>
-                    <p className="text-[11px] mt-0.5">
-                      Bank recipient account details are currently disabled. Please select another active payment method.
-                    </p>
+                    <span className="font-bold block">{pm.bankUnavailableTitle}</span>
+                    <p className="text-[11px] mt-0.5">{pm.bankUnavailableBody}</p>
                   </div>
                 </div>
               ) : (
@@ -488,7 +581,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                   <div className="grid grid-cols-2 gap-3 text-xs">
                     <div>
                       <span className="text-[10px] text-slate-500 dark:text-slate-400 uppercase font-bold block">
-                        Bank Name
+                        {pm.bankNameLabel}
                       </span>
                       <span className="font-bold text-slate-900 dark:text-white">
                         {bankConfig?.bankName?.trim() || '—'}
@@ -496,7 +589,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                     </div>
                     <div>
                       <span className="text-[10px] text-slate-500 dark:text-slate-400 uppercase font-bold block">
-                        Account Name
+                        {pm.accountNameLabel}
                       </span>
                       <span className="font-bold text-slate-900 dark:text-white">
                         {bankConfig?.accountName?.trim() || '—'}
@@ -505,7 +598,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                     <div className="col-span-2 flex items-center justify-between gap-3 bg-white dark:bg-slate-900 p-3 rounded-xl border border-slate-200 dark:border-slate-800">
                       <div>
                         <span className="text-[10px] text-slate-500 dark:text-slate-400 uppercase font-bold block">
-                          Recipient Account Number
+                          {pm.recipientAcNumberLabel}
                         </span>
                         <span className="font-mono font-bold text-sm text-blue-600 dark:text-blue-400 tabular-nums">
                           {bankConfig?.accountNumber}
@@ -521,12 +614,20 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                         ) : (
                           <Copy className="w-3.5 h-3.5" />
                         )}
-                        <span>{copiedKey === 'bank' ? 'Copied' : 'Copy A/C'}</span>
+                        <span>{copiedKey === 'bank' ? pm.copied : pm.copyAc}</span>
                       </button>
                     </div>
+                    {copiedKey === 'bank' && bankConfig?.accountNumber && (
+                      <p
+                        role="status"
+                        className="col-span-2 text-[11px] font-semibold text-emerald-700 dark:text-emerald-400"
+                      >
+                        {pm.copiedAccountSuccess(bankConfig.accountNumber)}
+                      </p>
+                    )}
                     <div>
                       <span className="text-[10px] text-slate-500 dark:text-slate-400 uppercase font-bold block">
-                        Branch
+                        {pm.branchLabel}
                       </span>
                       <span className="text-slate-800 dark:text-slate-200 font-medium">
                         {bankConfig?.branchName?.trim() || '—'}
@@ -534,7 +635,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                     </div>
                     <div>
                       <span className="text-[10px] text-slate-500 dark:text-slate-400 uppercase font-bold block">
-                        Routing Number
+                        {pm.routingLabel}
                       </span>
                       <span className="text-slate-800 dark:text-slate-200 font-mono tabular-nums">
                         {bankConfig?.routingNumber?.trim() || '—'}
@@ -550,7 +651,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
 
                   {whatsappConfig?.isEnabled && whatsappConfig?.accountNumber?.trim() && (
                     <div className="p-3 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-900 dark:text-amber-200 text-[11px] leading-relaxed">
-                      <strong>Deposit Slip Support:</strong> You may also share your transfer receipt via WhatsApp at{' '}
+                      <strong>{pm.depositSlipSupportLabel}</strong> {pm.depositSlipSupportBody}{' '}
                       <strong className="font-mono">{whatsappConfig.accountNumber.trim()}</strong>.
                     </div>
                   )}
@@ -562,15 +663,13 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
           {/* Verification Inputs */}
           <div className="space-y-3 pt-1">
             <span className="font-semibold block text-slate-700 dark:text-slate-300">
-              2. Enter Transfer Proof *
+              {pm.step2ProofTitle}
             </span>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="block text-slate-700 dark:text-slate-300 font-semibold mb-1">
-                  {paymentMethod === 'Bank Transfer'
-                    ? 'Transaction ID / Bank Reference *'
-                    : 'Transaction ID (TrxID) *'}
+                  {paymentMethod === 'Bank Transfer' ? pm.trxIdBankLabel : pm.trxIdWalletLabel}
                 </label>
                 <input
                   type="text"
@@ -582,7 +681,11 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                     if (submitError) setSubmitError(null);
                   }}
                   placeholder={
-                    paymentMethod === 'Bank Transfer' ? 'e.g. NPSB-91028471' : 'e.g. BKA79X2910'
+                    paymentMethod === 'Bank Transfer'
+                      ? pm.trxPlaceholderBank
+                      : paymentMethod === 'Nagad'
+                      ? pm.trxPlaceholderNagad
+                      : pm.trxPlaceholderBkash
                   }
                   className={`w-full min-h-[44px] px-3 py-2.5 rounded-lg border bg-white dark:bg-slate-800 font-mono text-xs uppercase text-slate-900 dark:text-white ${
                     isDuplicateTypedTrx
@@ -592,7 +695,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                 />
                 {isDuplicateTypedTrx && (
                   <span className="text-[11px] text-rose-600 dark:text-rose-400 font-medium mt-1 block">
-                    This Transaction ID has already been submitted and is pending or approved.
+                    {pm.duplicateTrxWarning}
                   </span>
                 )}
               </div>
@@ -600,8 +703,8 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
               <div>
                 <label className="block text-slate-700 dark:text-slate-300 font-semibold mb-1">
                   {paymentMethod === 'Bank Transfer'
-                    ? 'Sender Phone Number *'
-                    : `Sender ${paymentMethod} Phone Number *`}
+                    ? pm.senderPhoneBankLabel
+                    : pm.senderPhoneWalletLabel(paymentMethod)}
                 </label>
                 <input
                   type="tel"
@@ -612,19 +715,19 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                     setSenderNumber(e.target.value);
                     if (submitError) setSubmitError(null);
                   }}
-                  placeholder="e.g. 017XXXXXXXX"
+                  placeholder="017XXXXXXXX"
                   className="w-full min-h-[44px] px-3 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 font-mono text-xs text-slate-900 dark:text-white tabular-nums"
                 />
               </div>
 
               <div>
                 <label className="block text-slate-700 dark:text-slate-300 font-semibold mb-1">
-                  Payable Amount (BDT ৳) *
+                  {pm.payableAmountInputLabel}
                 </label>
                 <input
                   type="text"
                   readOnly
-                  value={`৳${effectiveAmount.toLocaleString()}`}
+                  value={formattedAmount}
                   aria-label="Exact Payable Amount"
                   className="w-full min-h-[44px] px-3 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800/80 font-mono font-bold text-xs text-slate-900 dark:text-white tabular-nums cursor-not-allowed"
                 />
@@ -632,12 +735,16 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
 
               <div>
                 <label className="block text-slate-700 dark:text-slate-300 font-semibold mb-1">
-                  Related Plan / Website
+                  {pm.relatedPlanInputLabel}
                 </label>
                 <input
                   type="text"
                   readOnly
-                  value={boundWebsite ? `${boundWebsite.businessName} (${boundWebsite.subdomain}.amaas.xyz)` : effectiveServiceName}
+                  value={
+                    boundWebsite
+                      ? `${boundWebsite.businessName} (${boundWebsite.subdomain}.amaas.xyz)`
+                      : effectiveServiceName
+                  }
                   className="w-full min-h-[44px] px-3 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800/80 text-xs font-medium text-slate-700 dark:text-slate-300 truncate cursor-not-allowed"
                 />
               </div>
@@ -646,25 +753,25 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                 <>
                   <div>
                     <label className="block text-slate-700 dark:text-slate-300 font-semibold mb-1">
-                      Sender Bank Name (Optional)
+                      {pm.senderBankOptional}
                     </label>
                     <input
                       type="text"
                       value={bankName}
                       onChange={(e) => setBankName(e.target.value)}
-                      placeholder="e.g. BRAC Bank / City Bank"
+                      placeholder="BRAC Bank / City Bank"
                       className="w-full min-h-[44px] px-3 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs text-slate-900 dark:text-white"
                     />
                   </div>
                   <div>
                     <label className="block text-slate-700 dark:text-slate-300 font-semibold mb-1">
-                      Sender Account Holder Name (Optional)
+                      {pm.senderHolderOptional}
                     </label>
                     <input
                       type="text"
                       value={bankAccountName}
                       onChange={(e) => setBankAccountName(e.target.value)}
-                      placeholder="e.g. Account Holder Name"
+                      placeholder="Account Holder Name"
                       className="w-full min-h-[44px] px-3 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs text-slate-900 dark:text-white"
                     />
                   </div>
@@ -691,7 +798,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
               onClick={handleClose}
               className="min-h-[44px] px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 text-slate-700 dark:text-slate-300 font-semibold text-xs transition-colors cursor-pointer"
             >
-              Cancel
+              {pm.cancel}
             </button>
             <button
               type="submit"
@@ -707,14 +814,14 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
               className="min-h-[44px] px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs shadow-sm transition-colors flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer whitespace-nowrap"
             >
               {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-              <span>Submit ৳{effectiveAmount.toLocaleString()} for Verification</span>
+              <span>{pm.submitVerificationBtn(formattedAmount)}</span>
               <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>
         </form>
 
         <p className="text-[11px] text-slate-500 dark:text-slate-400 text-center">
-          Status starts as <strong>Pending Verification</strong>. Once verified by an administrator, your subscription activates and eligible websites publish immediately.
+          {pm.statusFooterNote}
         </p>
       </div>
     </Modal>

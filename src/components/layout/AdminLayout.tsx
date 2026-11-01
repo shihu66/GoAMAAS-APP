@@ -14,7 +14,10 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAdminSecurity } from '../auth/AdminProtectedRoute';
-import { AdminPWAInstallButton } from '../admin/AdminPWAInstallBanner';
+import {
+  AdminPWAInstallButton,
+  AdminPWAInstallPrompt,
+} from '../admin/AdminPWAInstallBanner';
 import { ToastContainer } from '../ui/Toast';
 
 export const AdminLayout: React.FC = () => {
@@ -100,6 +103,7 @@ export const AdminLayout: React.FC = () => {
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex antialiased">
       <ToastContainer />
+      <AdminPWAInstallPrompt theme={theme} />
 
       {/* Desktop Left Sidebar (256px, hidden on mobile/tablet) */}
       <aside className="hidden lg:flex lg:w-64 lg:flex-col lg:fixed lg:inset-y-0 border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 z-30">

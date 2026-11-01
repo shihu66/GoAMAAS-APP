@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
+import { useLanguage, usePageSeo } from '../../context/LanguageContext';
 import {
   SubscribedWebsite,
   WebsiteProductItem,
@@ -27,7 +28,17 @@ import {
   Image as ImageIcon,
   Upload,
   XCircle,
+  Check,
 } from 'lucide-react';
+
+const GROUP_FILTER_KEYS = [
+  'All',
+  'Commerce',
+  'Food & Hospitality',
+  'Property & Construction',
+  'Health & Personal Care',
+  'Professional Services',
+] as const;
 
 export const CreateWebsitePage: React.FC = () => {
   const navigate = useNavigate();
@@ -49,6 +60,14 @@ export const CreateWebsitePage: React.FC = () => {
     paymentGatewayConfigs,
     showToast,
   } = useApp();
+
+  const { t } = useLanguage();
+  const cw = t.createWebsitePage;
+
+  usePageSeo({
+    title: cw.seoTitle,
+    description: cw.seoDescription,
+  });
 
   // Wizard Step
   const [step, setStep] = useState<1 | 2 | 3 | 4 | 5>(1);
@@ -161,6 +180,13 @@ export const CreateWebsitePage: React.FC = () => {
   const effectivePlanName = persistedSite?.planName || 'GoAMAAS Website';
   const effectiveMonthlyFee = persistedSite?.monthlyFee || websiteSubscriptionPlan.priceMonthly;
 
+  const localizedSelectedCat = cw.categories[selectedCategory.id] || {
+    label: selectedCategory.label,
+    groupLabel: selectedCategory.group,
+    shortDesc: selectedCategory.shortDesc,
+    itemTypeLabel: selectedCategory.itemTypeLabel,
+  };
+
   // Update defaults when category changes
   const handleSelectCategory = (cat: CategorySpec) => {
     setSelectedCategory(cat);
@@ -202,14 +228,14 @@ export const CreateWebsitePage: React.FC = () => {
       return;
     }
     if (clean.length < 3) {
-      setSubdomainError('Subdomain must be at least 3 characters.');
+      setSubdomainError(cw.step2.subdomainMinChars);
       setIsSubdomainChecking(false);
       return;
     }
 
     const localCheck = checkSubdomainAvailability(clean, createdSiteId || undefined);
     if (!localCheck.available) {
-      setSubdomainError(localCheck.reason || 'This subdomain is already taken or reserved.');
+      setSubdomainError(localCheck.reason || cw.step2.subdomainTaken);
       setIsSubdomainChecking(false);
       return;
     }
@@ -221,14 +247,14 @@ export const CreateWebsitePage: React.FC = () => {
         const remoteCheck = await checkSubdomainAvailabilityAsync(clean, createdSiteId || undefined);
         if (active) {
           if (!remoteCheck.available) {
-            setSubdomainError(remoteCheck.reason || 'This subdomain is already taken or reserved.');
+            setSubdomainError(remoteCheck.reason || cw.step2.subdomainTaken);
           } else {
             setSubdomainError(null);
           }
         }
       } catch {
         if (active) {
-          setSubdomainError('Could not verify subdomain uniqueness. Please try again.');
+          setSubdomainError(cw.step2.subdomainVerifyError);
         }
       } finally {
         if (active) {
@@ -241,9 +267,16 @@ export const CreateWebsitePage: React.FC = () => {
       active = false;
       clearTimeout(timer);
     };
-  }, [subdomain, createdSiteId, checkSubdomainAvailability, checkSubdomainAvailabilityAsync]);
+  }, [
+    subdomain,
+    createdSiteId,
+    checkSubdomainAvailability,
+    checkSubdomainAvailabilityAsync,
+    cw.step2.subdomainMinChars,
+    cw.step2.subdomainTaken,
+    cw.step2.subdomainVerifyError,
+  ]);
 
-  // Auto-generate compact subdomain from business name (e.g. "Urban Fashion" -> "urbanfashion")
   const handleNameChange = (val: string) => {
     setBusinessName(val);
     if (!isSubdomainManual && !createdSiteId) {
@@ -260,7 +293,7 @@ export const CreateWebsitePage: React.FC = () => {
   ) => {
     if (!file) return;
     if (!isAuthenticated) {
-      showToast('Please sign in first to upload media to cloud storage.', 'warning');
+      showToast(cw.toasts.signInUpload, 'warning');
       navigate('/login?redirect=/create-website');
       return;
     }
@@ -272,11 +305,11 @@ export const CreateWebsitePage: React.FC = () => {
         websiteId: createdSiteId || undefined,
       });
       if (error || !publicUrl) {
-        showToast(error?.message || 'Failed to upload image.', 'error');
+        showToast(error?.message || cw.toasts.uploadFailed, 'error');
         return;
       }
       onUploaded(publicUrl);
-      showToast('Image uploaded to cloud storage.', 'success');
+      showToast(cw.toasts.uploadSuccess, 'success');
     } finally {
       setUploadingAssetKey(null);
     }
@@ -299,7 +332,7 @@ export const CreateWebsitePage: React.FC = () => {
 
   const handleRemoveItem = (id: string) => {
     if (items.length <= 1) {
-      showToast('Keep at least one product or offering, or edit the existing item.', 'warning');
+      showToast(cw.toasts.keepOneItem, 'warning');
       return;
     }
     setItems((prev) => prev.filter((item) => item.id !== id));
@@ -360,28 +393,28 @@ export const CreateWebsitePage: React.FC = () => {
     setSubmitError(null);
 
     if (!isAuthenticated) {
-      showToast('Please sign in to save and publish your website.', 'warning');
+      showToast(cw.toasts.signInSave, 'warning');
       navigate('/login?redirect=/create-website');
       return;
     }
     if (!businessName.trim()) {
-      showToast('Please enter your business name.', 'warning');
+      showToast(cw.toasts.enterBusinessName, 'warning');
       setStep(2);
       return;
     }
     if (isSubdomainChecking) {
-      showToast('Verifying subdomain availability, please wait a moment.', 'info');
+      showToast(cw.toasts.checkingSubdomain, 'info');
       return;
     }
     if (!subdomain.trim() || subdomainError) {
-      showToast('Please choose an available .amaas.xyz subdomain.', 'warning');
+      showToast(cw.toasts.chooseValidSubdomain, 'warning');
       setStep(2);
       return;
     }
 
     for (let i = 0; i < items.length; i++) {
       if (!items[i].name.trim()) {
-        showToast(`Item #${i + 1} needs a product or service name.`, 'warning');
+        showToast(cw.toasts.itemNeedsName(i + 1), 'warning');
         setStep(3);
         return;
       }
@@ -480,7 +513,7 @@ export const CreateWebsitePage: React.FC = () => {
 
       const subCheck = await checkSubdomainAvailabilityAsync(subdomain);
       if (!subCheck.available) {
-        const reason = subCheck.reason || 'This subdomain is already taken or reserved.';
+        const reason = subCheck.reason || cw.step2.subdomainTaken;
         setSubdomainError(reason);
         setSubmitError(reason);
         showToast(reason, 'error');
@@ -544,160 +577,164 @@ export const CreateWebsitePage: React.FC = () => {
     }
   };
 
+  const normalizedQuery = categorySearch.trim().toLowerCase();
   const filteredCategories = CATEGORY_SPECS.filter((cat) => {
+    const loc = cw.categories[cat.id];
     const matchesSearch =
-      cat.label.toLowerCase().includes(categorySearch.toLowerCase()) ||
-      cat.shortDesc.toLowerCase().includes(categorySearch.toLowerCase());
+      !normalizedQuery ||
+      cat.label.toLowerCase().includes(normalizedQuery) ||
+      cat.shortDesc.toLowerCase().includes(normalizedQuery) ||
+      (loc?.label || '').toLowerCase().includes(normalizedQuery) ||
+      (loc?.shortDesc || '').toLowerCase().includes(normalizedQuery);
     const matchesGroup = selectedGroup === 'All' || cat.group === selectedGroup;
     return matchesSearch && matchesGroup;
   });
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 py-10 transition-colors">
+    <div className="min-h-screen bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 py-10 sm:py-14 transition-colors">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
-        {/* Top Plan Identity Bar */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-slate-600 dark:text-slate-400">
-          <div>
-            <strong className="text-slate-900 dark:text-white font-bold">GoAMAAS Website</strong>
-            <span className="mx-2">·</span>
-            <span className="font-mono font-semibold text-blue-600 dark:text-blue-400">
-              ৳{websiteSubscriptionPlan.priceMonthly} BDT / month
+        {/* Top Plan Identity Bar (clean unboxed metadata) */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-4 border-b border-slate-200/80 dark:border-slate-800/80 text-xs text-slate-600 dark:text-slate-400">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <strong className="text-slate-950 dark:text-white font-bold">GoAMAAS Website</strong>
+            <span aria-hidden="true">·</span>
+            <span className="font-mono font-bold text-blue-600 dark:text-blue-400 tabular-nums">
+              ৳{websiteSubscriptionPlan.priceMonthly} BDT
             </span>
-            <span className="mx-2">·</span>
-            <span>30-day billing period · Free GoAMAAS hosting &amp; subdomain</span>
+            <span aria-hidden="true">·</span>
+            <span>{cw.planBarPeriod}</span>
           </div>
           {isAuthenticated && (
             <Link
               to="/dashboard/subscribed-website"
-              className="text-blue-600 dark:text-blue-400 font-semibold hover:underline"
+              className="text-blue-600 dark:text-blue-400 font-semibold hover:underline whitespace-nowrap"
             >
-              Open Visual Website Editor →
+              {cw.openVisualEditor}
             </Link>
           )}
         </div>
 
         {/* Wizard Progress Stepper */}
-        <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
-          <div className="flex items-center justify-between max-w-3xl mx-auto text-xs font-semibold">
-            {[
-              { num: 1, label: '1. Industry' },
-              { num: 2, label: '2. Business & Domain' },
-              { num: 3, label: '3. Products' },
-              { num: 4, label: '4. Design & Preview' },
-              { num: 5, label: '5. Activate & Publish' },
-            ].map((s) => (
-              <button
-                key={s.num}
-                type="button"
-                onClick={() => {
-                  if (s.num <= step) setStep(s.num as any);
-                }}
-                className={`flex items-center gap-2 py-1 px-2 rounded-lg transition-colors cursor-pointer ${
-                  step === s.num
-                    ? 'text-blue-600 dark:text-blue-400 font-bold bg-blue-50 dark:bg-blue-950/60'
-                    : step > s.num
-                    ? 'text-emerald-600 dark:text-emerald-400'
-                    : 'text-slate-400 opacity-60'
-                }`}
-              >
-                <span
-                  className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] ${
-                    step === s.num
-                      ? 'bg-blue-600 text-white'
-                      : step > s.num
-                      ? 'bg-emerald-600 text-white'
-                      : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
+        <div className="p-3 sm:p-4 rounded-2xl bg-slate-50/80 dark:bg-slate-900/80 border border-slate-200/90 dark:border-slate-800">
+          <div className="flex items-center justify-between max-w-3xl mx-auto text-xs font-semibold gap-1">
+            {[1, 2, 3, 4, 5].map((num) => {
+              const label = cw.steps[num - 1];
+              const isCurrent = step === num;
+              const isDone = step > num;
+              return (
+                <button
+                  key={num}
+                  type="button"
+                  onClick={() => {
+                    if (num <= step) setStep(num as 1 | 2 | 3 | 4 | 5);
+                  }}
+                  className={`min-h-[38px] flex items-center gap-2 py-1.5 px-2.5 rounded-xl transition-colors whitespace-nowrap ${
+                    isCurrent
+                      ? 'text-blue-600 dark:text-blue-400 font-bold bg-white dark:bg-slate-950 shadow-xs cursor-pointer'
+                      : isDone
+                      ? 'text-emerald-600 dark:text-emerald-400 cursor-pointer'
+                      : 'text-slate-400 dark:text-slate-500 cursor-default'
                   }`}
                 >
-                  {step > s.num ? '✓' : s.num}
-                </span>
-                <span className="hidden sm:inline">{s.label}</span>
-              </button>
-            ))}
+                  <span
+                    className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-mono tabular-nums shrink-0 ${
+                      isCurrent
+                        ? 'bg-blue-600 text-white'
+                        : isDone
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
+                    }`}
+                  >
+                    {isDone ? <Check className="w-3 h-3" /> : num}
+                  </span>
+                  <span className="hidden md:inline">{label}</span>
+                </button>
+              );
+            })}
           </div>
         </div>
 
         {/* STEP 1: CATEGORY SELECTION */}
         {step === 1 && (
-          <div className="space-y-6">
+          <div className="space-y-7">
             <div className="text-center max-w-2xl mx-auto space-y-2">
-              <span className="text-xs font-semibold text-blue-600">Step 1 of 5</span>
-              <h1 className="text-2xl sm:text-3xl font-black text-slate-900 dark:text-white tracking-tight">
-                Select Your Business Category
+              <p className="text-xs font-semibold text-blue-600 dark:text-blue-400">
+                {cw.stepOf(1, 5)}
+              </p>
+              <h1 className="text-2xl sm:text-4xl font-extrabold text-slate-950 dark:text-white tracking-tight text-balance">
+                {cw.step1.title}
               </h1>
-              <p className="text-xs sm:text-sm text-slate-500">
-                Choose the industry layout that best fits your business. You can customize every section, image, and product later in the Visual Website Editor.
+              <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
+                {cw.step1.subtitle}
               </p>
             </div>
 
-            <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-              <div className="relative w-full sm:w-80">
-                <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
+            <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-4">
+              <div className="relative w-full lg:w-80 shrink-0">
+                <Search className="w-4 h-4 absolute left-3.5 top-3 text-slate-400 pointer-events-none" />
                 <input
                   type="text"
-                  placeholder="Search industries (e.g. fashion, cafe, clinic)..."
+                  placeholder={cw.step1.searchPlaceholder}
                   value={categorySearch}
                   onChange={(e) => setCategorySearch(e.target.value)}
-                  className="w-full pl-9 pr-4 py-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-xs"
+                  className="w-full min-h-[42px] pl-10 pr-4 py-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900 text-xs sm:text-sm focus:outline-hidden focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500"
                 />
               </div>
 
-              <div className="flex items-center gap-1 overflow-x-auto w-full sm:w-auto pb-1 text-xs">
-                {[
-                  'All',
-                  'Commerce',
-                  'Food & Hospitality',
-                  'Property & Construction',
-                  'Health & Personal Care',
-                  'Professional Services',
-                ].map((grp) => (
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs">
+                {GROUP_FILTER_KEYS.map((grp) => (
                   <button
                     key={grp}
                     type="button"
                     onClick={() => setSelectedGroup(grp)}
-                    className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors cursor-pointer ${
+                    className={`min-h-[38px] px-3.5 py-1.5 rounded-xl whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
                       selectedGroup === grp
                         ? 'bg-blue-600 text-white font-semibold'
-                        : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-50'
+                        : 'bg-slate-50 dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
                     }`}
                   >
-                    {grp}
+                    {cw.groups[grp] || grp}
                   </button>
                 ))}
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
               {filteredCategories.map((cat) => {
                 const isSelected = selectedCategory.id === cat.id;
+                const loc = cw.categories[cat.id];
                 return (
-                  <div
+                  <button
                     key={cat.id}
+                    type="button"
                     onClick={() => handleSelectCategory(cat)}
-                    className={`p-5 rounded-2xl bg-white dark:bg-slate-900 border transition-all cursor-pointer flex flex-col justify-between space-y-4 hover:shadow-md ${
+                    className={`p-6 rounded-2xl text-left border transition-colors cursor-pointer flex flex-col justify-between gap-5 ${
                       isSelected
-                        ? 'border-blue-600 ring-2 ring-blue-500/20 shadow-sm'
-                        : 'border-slate-200 dark:border-slate-800 hover:border-slate-300'
+                        ? 'border-blue-600 bg-blue-50/30 dark:bg-blue-950/20'
+                        : 'border-slate-200/90 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-900/60 hover:border-slate-300 dark:hover:border-slate-700'
                     }`}
                   >
                     <div className="space-y-2">
-                      <div className="flex items-center justify-between text-[11px] text-slate-400">
-                        <span>{cat.group}</span>
+                      <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
+                        <span>{loc?.groupLabel || cat.group}</span>
+                        <span aria-hidden="true">·</span>
                         <span className="text-blue-600 dark:text-blue-400 font-medium">
-                          {cat.itemTypeLabel}
+                          {loc?.itemTypeLabel || cat.itemTypeLabel}
                         </span>
                       </div>
-                      <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                        {cat.label}
-                      </h3>
-                      <p className="text-xs text-slate-500 leading-relaxed">{cat.shortDesc}</p>
+                      <h2 className="text-base font-bold text-slate-950 dark:text-white tracking-tight">
+                        {loc?.label || cat.label}
+                      </h2>
+                      <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                        {loc?.shortDesc || cat.shortDesc}
+                      </p>
                     </div>
 
-                    <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-xs font-semibold text-blue-600">
-                      <span>Select &amp; Continue</span>
+                    <div className="pt-3 border-t border-slate-200/70 dark:border-slate-800 w-full flex items-center justify-between text-xs font-semibold text-blue-600 dark:text-blue-400">
+                      <span>{cw.step1.selectContinue}</span>
                       <ArrowRight className="w-3.5 h-3.5" />
                     </div>
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -708,39 +745,43 @@ export const CreateWebsitePage: React.FC = () => {
         {step === 2 && (
           <div className="space-y-6 max-w-2xl mx-auto">
             <div className="text-center space-y-2">
-              <span className="text-xs font-semibold text-blue-600">
-                Step 2 of 5 · {selectedCategory.label}
-              </span>
-              <h2 className="text-2xl font-bold text-slate-900 dark:text-white">
-                Business Identity &amp; Free Subdomain
+              <p className="text-xs font-semibold text-blue-600 dark:text-blue-400">
+                {cw.stepOf(2, 5)} · {localizedSelectedCat.label}
+              </p>
+              <h2 className="text-2xl sm:text-3xl font-bold text-slate-950 dark:text-white tracking-tight">
+                {cw.step2.title}
               </h2>
-              <p className="text-xs text-slate-500">
-                Claim your free <code className="font-mono text-blue-600">businessname.amaas.xyz</code> subdomain. Optional contact fields left blank are cleanly omitted from your published site.
+              <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
+                {cw.step2.subtitlePrefix}{' '}
+                <code className="font-mono text-blue-600 dark:text-blue-400">
+                  businessname.amaas.xyz
+                </code>{' '}
+                {cw.step2.subtitleSuffix}
               </p>
             </div>
 
-            <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+            <div className="p-6 sm:p-8 rounded-2xl bg-slate-50/70 dark:bg-slate-900/70 border border-slate-200/90 dark:border-slate-800 space-y-5">
               <div>
-                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  Business / Brand Name *
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                  {cw.step2.businessNameLabel}
                 </label>
                 <input
                   type="text"
                   required
                   value={businessName}
                   onChange={(e) => handleNameChange(e.target.value)}
-                  placeholder="e.g. Urban Fashion"
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-semibold"
+                  placeholder={cw.step2.businessNamePlaceholder}
+                  className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm font-semibold focus:outline-hidden focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500"
                 />
               </div>
 
               {/* Subdomain Input */}
               <div>
-                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  Free GoAMAAS Subdomain (businessname.amaas.xyz) *
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                  {cw.step2.subdomainLabel}
                 </label>
-                <div className="flex items-center rounded-xl border border-slate-300 dark:border-slate-700 overflow-hidden bg-white dark:bg-slate-800">
-                  <span className="px-3 text-slate-400 font-mono text-xs">https://</span>
+                <div className="flex items-center min-h-[44px] rounded-xl border border-slate-300 dark:border-slate-700 overflow-hidden bg-white dark:bg-slate-800">
+                  <span className="px-3 text-slate-400 font-mono text-xs select-none">https://</span>
                   <input
                     type="text"
                     required
@@ -753,105 +794,106 @@ export const CreateWebsitePage: React.FC = () => {
                       }
                     }}
                     placeholder="urbanfashion"
-                    className={`flex-1 py-2.5 bg-transparent font-mono text-xs font-bold text-blue-600 outline-none ${
+                    className={`flex-1 py-2.5 bg-transparent font-mono text-xs sm:text-sm font-bold text-blue-600 dark:text-blue-400 outline-none ${
                       createdSiteId ? 'opacity-75 cursor-not-allowed' : ''
                     }`}
                   />
-                  <span className="px-3 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 font-mono text-xs border-l border-slate-200 dark:border-slate-600">
+                  <span className="px-3 py-3 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 font-mono text-xs border-l border-slate-200 dark:border-slate-600 select-none">
                     .amaas.xyz
                   </span>
                 </div>
                 {createdSiteId ? (
-                  <p className="text-[11px] text-slate-500 mt-1 flex items-center gap-1">
-                    <Lock className="w-3 h-3 text-blue-600" />
-                    <span>Subdomain https://{subdomain}.amaas.xyz is reserved for your saved website.</span>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1.5 flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
+                    <span>{cw.step2.subdomainReserved(subdomain)}</span>
                   </p>
                 ) : isSubdomainChecking ? (
-                  <p className="text-[11px] text-slate-500 mt-1 flex items-center gap-1">
-                    <Loader2 className="w-3 h-3 animate-spin text-blue-600" />
-                    <span>Checking availability...</span>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1.5 flex items-center gap-1.5">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600 dark:text-blue-400 shrink-0" />
+                    <span>{cw.step2.subdomainChecking}</span>
                   </p>
                 ) : subdomainError ? (
-                  <p className="text-[11px] text-rose-500 mt-1 flex items-center gap-1">
-                    <AlertCircle className="w-3 h-3" />
+                  <p className="text-[11px] text-rose-600 dark:text-rose-400 mt-1.5 flex items-center gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
                     <span>{subdomainError}</span>
                   </p>
                 ) : subdomain ? (
-                  <p className="text-[11px] text-emerald-600 mt-1 flex items-center gap-1">
-                    <CheckCircle2 className="w-3 h-3" />
-                    <span>https://{subdomain}.amaas.xyz is available!</span>
+                  <p className="text-[11px] text-emerald-600 dark:text-emerald-400 mt-1.5 flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                    <span>{cw.step2.subdomainAvailable(subdomain)}</span>
                   </p>
                 ) : null}
               </div>
 
               {/* Optional Custom Domain */}
               <div>
-                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  Optional Custom Domain (if you own one)
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                  {cw.step2.customDomainLabel}
                 </label>
                 <input
                   type="text"
                   value={customDomain}
                   onChange={(e) => setCustomDomain(e.target.value)}
-                  placeholder="e.g. www.urbanfashionbd.com (domain registration paid separately)"
-                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono"
+                  placeholder={cw.step2.customDomainPlaceholder}
+                  className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm font-mono focus:outline-hidden focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500"
                 />
-                <p className="text-[11px] text-slate-400 mt-1">
-                  Free hosting &amp; <code className="font-mono">.amaas.xyz</code> subdomain are included in your ৳600/mo plan. Custom domain registration is paid separately to your domain registrar.
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1.5 leading-relaxed">
+                  {cw.step2.customDomainNote}
                 </p>
               </div>
 
-              {/* Phone, WhatsApp, Email */}
+              {/* Phone & WhatsApp */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                    Customer Phone Number
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                    {cw.step2.phoneLabel}
                   </label>
                   <input
                     type="text"
                     value={phone}
                     onChange={(e) => setPhone(e.target.value)}
                     placeholder="+880 1XXXXXXXXX"
-                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono"
+                    className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm font-mono"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                    WhatsApp Orders / Inquiry Number
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                    {cw.step2.whatsappLabel}
                   </label>
                   <input
                     type="text"
                     value={whatsappNumber}
                     onChange={(e) => setWhatsappNumber(e.target.value)}
                     placeholder="+880 1XXXXXXXXX"
-                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono"
+                    className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm font-mono"
                   />
                 </div>
               </div>
 
+              {/* Email & Address */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                    Public Business Email (Optional)
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                    {cw.step2.emailLabel}
                   </label>
                   <input
                     type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="hello@yourbusiness.com"
-                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
+                    className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                    Physical Store / Office Address (Optional)
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                    {cw.step2.addressLabel}
                   </label>
                   <input
                     type="text"
                     value={address}
                     onChange={(e) => setAddress(e.target.value)}
-                    placeholder="e.g. Road 11, Banani, Dhaka"
-                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
+                    placeholder={cw.step2.addressPlaceholder}
+                    className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm"
                   />
                 </div>
               </div>
@@ -859,106 +901,106 @@ export const CreateWebsitePage: React.FC = () => {
               {/* Optional Social Links */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                    Facebook Page URL (Optional)
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                    {cw.step2.facebookLabel}
                   </label>
                   <input
                     type="url"
                     value={facebookUrl}
                     onChange={(e) => setFacebookUrl(e.target.value)}
                     placeholder="https://facebook.com/yourpage"
-                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
+                    className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                    Instagram Profile URL (Optional)
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                    {cw.step2.instagramLabel}
                   </label>
                   <input
                     type="url"
                     value={instagramUrl}
                     onChange={(e) => setInstagramUrl(e.target.value)}
                     placeholder="https://instagram.com/yourhandle"
-                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
+                    className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm"
                   />
                 </div>
               </div>
 
               {/* Hero Copy & CTA */}
-              <div className="pt-2 border-t border-slate-100 dark:border-slate-800 space-y-3">
+              <div className="pt-4 border-t border-slate-200/80 dark:border-slate-800 space-y-4">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                    Hero Headline
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                    {cw.step2.heroHeadlineLabel}
                   </label>
                   <input
                     type="text"
                     value={headline}
                     onChange={(e) => setHeadline(e.target.value)}
-                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-medium"
+                    className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm font-medium"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                    Hero Description / Subheadline
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                    {cw.step2.heroSubheadlineLabel}
                   </label>
                   <textarea
                     rows={2}
                     value={subheadline}
                     onChange={(e) => setSubheadline(e.target.value)}
-                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs leading-relaxed"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm leading-relaxed"
                   />
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                      Primary CTA Button Text
+                    <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                      {cw.step2.primaryCtaTextLabel}
                     </label>
                     <input
                       type="text"
                       value={heroCtaText}
                       onChange={(e) => setHeroCtaText(e.target.value)}
-                      placeholder="e.g. Order on WhatsApp"
-                      className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-medium"
+                      placeholder="Order on WhatsApp"
+                      className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm font-medium"
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                      Primary CTA Destination
+                    <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                      {cw.step2.primaryCtaDestLabel}
                     </label>
                     <select
                       value={heroCtaLink}
                       onChange={(e) => setHeroCtaLink(e.target.value)}
-                      className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
+                      className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm"
                     >
-                      <option value="whatsapp">Direct WhatsApp Inquiry</option>
-                      <option value="#services">Scroll to Products / Catalog</option>
-                      <option value="#contact">Scroll to Contact Section</option>
-                      <option value="#about">Scroll to About Section</option>
+                      <option value="whatsapp">{cw.step2.destWhatsapp}</option>
+                      <option value="#services">{cw.step2.destCatalog}</option>
+                      <option value="#contact">{cw.step2.destContact}</option>
+                      <option value="#about">{cw.step2.destAbout}</option>
                     </select>
                   </div>
                 </div>
               </div>
             </div>
 
-            <div className="flex items-center justify-between pt-4">
+            <div className="flex items-center justify-between gap-3 pt-2">
               <button
                 type="button"
                 onClick={() => setStep(1)}
-                className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                className="min-h-[44px] px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs sm:text-sm font-semibold flex items-center gap-1.5 cursor-pointer"
               >
-                <ArrowLeft className="w-3.5 h-3.5" />
-                <span>Change Category</span>
+                <ArrowLeft className="w-4 h-4" />
+                <span>{cw.step2.changeCategory}</span>
               </button>
               <button
                 type="button"
                 disabled={!businessName.trim() || !subdomain.trim() || !!subdomainError || isSubdomainChecking}
                 onClick={() => setStep(3)}
-                className="px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-md flex items-center gap-2 disabled:opacity-50 cursor-pointer"
+                className="min-h-[44px] px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs sm:text-sm font-semibold flex items-center gap-2 disabled:opacity-50 cursor-pointer"
               >
-                <span>Continue to Products</span>
-                <ArrowRight className="w-3.5 h-3.5" />
+                <span>{cw.step2.continueProducts}</span>
+                <ArrowRight className="w-4 h-4" />
               </button>
             </div>
           </div>
@@ -968,14 +1010,14 @@ export const CreateWebsitePage: React.FC = () => {
         {step === 3 && (
           <div className="space-y-6 max-w-3xl mx-auto">
             <div className="text-center space-y-2">
-              <span className="text-xs font-semibold text-blue-600">
-                Step 3 of 5 · {selectedCategory.label}
-              </span>
-              <h2 className="text-2xl font-bold text-slate-900 dark:text-white">
-                Add Featured {selectedCategory.itemTypeLabel}
+              <p className="text-xs font-semibold text-blue-600 dark:text-blue-400">
+                {cw.stepOf(3, 5)} · {localizedSelectedCat.label}
+              </p>
+              <h2 className="text-2xl sm:text-3xl font-bold text-slate-950 dark:text-white tracking-tight">
+                {cw.step3.title(localizedSelectedCat.itemTypeLabel)}
               </h2>
-              <p className="text-xs text-slate-500">
-                Add products or services with prices, descriptions, and photos. These are saved to your database catalog and can be updated anytime.
+              <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
+                {cw.step3.subtitle}
               </p>
             </div>
 
@@ -983,92 +1025,94 @@ export const CreateWebsitePage: React.FC = () => {
               {items.map((item, idx) => (
                 <div
                   key={item.id}
-                  className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3"
+                  className="p-5 sm:p-6 rounded-2xl bg-slate-50/70 dark:bg-slate-900/70 border border-slate-200/90 dark:border-slate-800 space-y-4"
                 >
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-blue-600">
-                      Item #{idx + 1}
+                    <span className="text-xs font-bold text-blue-600 dark:text-blue-400 font-mono tabular-nums">
+                      {cw.step3.itemNumber(idx + 1)}
                     </span>
                     <button
                       type="button"
                       onClick={() => handleRemoveItem(item.id)}
-                      className="p-1 text-slate-400 hover:text-rose-500 transition-colors cursor-pointer"
-                      title="Remove item"
+                      className="min-h-[36px] min-w-[36px] inline-flex items-center justify-center rounded-lg text-slate-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors cursor-pointer"
+                      title={cw.step3.removeItemTitle}
+                      aria-label={cw.step3.removeItemTitle}
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
                     <div className="sm:col-span-2">
-                      <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Product / Service Name *
+                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                        {cw.step3.itemNameLabel}
                       </label>
                       <input
                         type="text"
                         value={item.name}
                         onChange={(e) => handleUpdateItem(item.id, 'name', e.target.value)}
-                        className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-semibold"
+                        className="w-full min-h-[42px] px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm font-semibold"
                       />
                     </div>
                     <div>
-                      <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Price *
+                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                        {cw.step3.priceLabel}
                       </label>
                       <input
                         type="text"
                         value={item.price || ''}
                         onChange={(e) => handleUpdateItem(item.id, 'price', e.target.value)}
-                        placeholder="e.g. ৳1,850"
-                        className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono font-bold"
+                        placeholder="৳1,850"
+                        className="w-full min-h-[42px] px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm font-mono font-bold tabular-nums"
                       />
                     </div>
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                      Description
+                    <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                      {cw.step3.descLabel}
                     </label>
                     <textarea
                       rows={2}
                       value={item.description}
                       onChange={(e) => handleUpdateItem(item.id, 'description', e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs leading-relaxed"
+                      className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm leading-relaxed"
                     />
                   </div>
 
                   {/* Product Image Upload */}
                   <div className="flex flex-wrap items-center gap-3 pt-1">
                     {item.imageUrl ? (
-                      <div className="flex items-center gap-2.5 p-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                      <div className="flex items-center gap-2.5 p-2 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
                         <img
                           src={item.imageUrl}
                           alt={item.name}
+                          referrerPolicy="no-referrer"
                           className="w-10 h-10 rounded-lg object-cover"
                         />
-                        <span className="text-[11px] text-slate-600 dark:text-slate-300 font-medium">
-                          Product photo attached
+                        <span className="text-xs text-slate-600 dark:text-slate-300 font-medium">
+                          {cw.step3.photoAttached}
                         </span>
                         <button
                           type="button"
                           onClick={() => handleUpdateItem(item.id, 'imageUrl', '')}
-                          className="text-slate-400 hover:text-rose-500 cursor-pointer"
-                          title="Remove image"
+                          className="p-1 text-slate-400 hover:text-rose-500 cursor-pointer"
+                          title={cw.step3.removeItemTitle}
                         >
                           <XCircle className="w-4 h-4" />
                         </button>
                       </div>
                     ) : (
-                      <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer">
+                      <label className="min-h-[40px] inline-flex items-center gap-2 px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer">
                         {uploadingAssetKey === `prod-${item.id}` ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600" />
+                          <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
                         ) : (
-                          <ImageIcon className="w-3.5 h-3.5 text-blue-600" />
+                          <ImageIcon className="w-4 h-4 text-blue-600 dark:text-blue-400" />
                         )}
                         <span>
                           {uploadingAssetKey === `prod-${item.id}`
-                            ? 'Uploading...'
-                            : 'Upload Product Image'}
+                            ? cw.step3.uploading
+                            : cw.step3.uploadProductImage}
                         </span>
                         <input
                           type="file"
@@ -1092,29 +1136,29 @@ export const CreateWebsitePage: React.FC = () => {
               <button
                 type="button"
                 onClick={handleAddItem}
-                className="w-full py-3 rounded-2xl border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-blue-500 hover:bg-blue-50/50 dark:hover:bg-blue-950/20 text-xs font-semibold text-slate-600 dark:text-slate-300 transition-all flex items-center justify-center gap-2 cursor-pointer"
+                className="w-full min-h-[48px] py-3 rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 hover:border-blue-500 hover:bg-blue-50/40 dark:hover:bg-blue-950/20 text-xs sm:text-sm font-semibold text-slate-700 dark:text-slate-300 transition-colors flex items-center justify-center gap-2 cursor-pointer"
               >
-                <Plus className="w-4 h-4 text-blue-600" />
-                <span>Add Another Product / Service</span>
+                <Plus className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                <span>{cw.step3.addAnother}</span>
               </button>
             </div>
 
-            <div className="flex items-center justify-between pt-4">
+            <div className="flex items-center justify-between gap-3 pt-2">
               <button
                 type="button"
                 onClick={() => setStep(2)}
-                className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                className="min-h-[44px] px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs sm:text-sm font-semibold flex items-center gap-1.5 cursor-pointer"
               >
-                <ArrowLeft className="w-3.5 h-3.5" />
-                <span>Back</span>
+                <ArrowLeft className="w-4 h-4" />
+                <span>{cw.step3.back}</span>
               </button>
               <button
                 type="button"
                 onClick={() => setStep(4)}
-                className="px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-md flex items-center gap-2 cursor-pointer"
+                className="min-h-[44px] px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs sm:text-sm font-semibold flex items-center gap-2 cursor-pointer"
               >
-                <span>Continue to Design &amp; Preview</span>
-                <ArrowRight className="w-3.5 h-3.5" />
+                <span>{cw.step3.continueDesign}</span>
+                <ArrowRight className="w-4 h-4" />
               </button>
             </div>
           </div>
@@ -1124,29 +1168,30 @@ export const CreateWebsitePage: React.FC = () => {
         {step === 4 && (
           <div className="space-y-6">
             <div className="text-center max-w-2xl mx-auto space-y-2">
-              <span className="text-xs font-semibold text-blue-600">
-                Step 4 of 5 · Design, Media &amp; Live Preview
-              </span>
-              <h2 className="text-2xl font-bold text-slate-900 dark:text-white">
-                Customize Branding &amp; Preview Before Publishing
+              <p className="text-xs font-semibold text-blue-600 dark:text-blue-400">
+                {cw.stepOf(4, 5)} · {cw.step4.subtitleBadge}
+              </p>
+              <h2 className="text-2xl sm:text-3xl font-bold text-slate-950 dark:text-white tracking-tight">
+                {cw.step4.title}
               </h2>
-              <p className="text-xs text-slate-500">
-                Upload your logo and hero banner, select colors and typography, and inspect both Desktop and Mobile layouts live.
+              <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
+                {cw.step4.subtitle}
               </p>
             </div>
 
             {/* Brand Logo, Hero Image & Layout Controls */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs text-xs">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 p-5 sm:p-6 rounded-2xl bg-slate-50/70 dark:bg-slate-900/70 border border-slate-200/90 dark:border-slate-800 text-xs">
               {/* Logo Upload */}
               <div className="space-y-2">
                 <label className="block font-semibold text-slate-700 dark:text-slate-300">
-                  Business Logo (Optional)
+                  {cw.step4.logoLabel}
                 </label>
                 {logoUrl ? (
-                  <div className="flex items-center gap-3 p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                  <div className="flex items-center gap-3 p-2.5 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
                     <img
                       src={logoUrl}
-                      alt="Logo"
+                      alt="Business Logo"
+                      referrerPolicy="no-referrer"
                       className="w-10 h-10 rounded-lg object-contain bg-white p-0.5 border border-slate-200"
                     />
                     <button
@@ -1154,17 +1199,19 @@ export const CreateWebsitePage: React.FC = () => {
                       onClick={() => setLogoUrl('')}
                       className="text-rose-600 font-semibold hover:underline cursor-pointer"
                     >
-                      Remove Logo
+                      {cw.step4.removeLogo}
                     </button>
                   </div>
                 ) : (
-                  <label className="flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl border border-dashed border-slate-300 dark:border-slate-700 hover:border-blue-500 cursor-pointer text-slate-600 dark:text-slate-300 font-semibold">
+                  <label className="min-h-[44px] flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl border border-dashed border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800/70 hover:border-blue-500 cursor-pointer text-slate-700 dark:text-slate-300 font-semibold">
                     {uploadingAssetKey === 'logo' ? (
                       <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
                     ) : (
-                      <Upload className="w-4 h-4 text-blue-600" />
+                      <Upload className="w-4 h-4 text-blue-600 dark:text-blue-400" />
                     )}
-                    <span>{uploadingAssetKey === 'logo' ? 'Uploading...' : 'Upload Logo (PNG/JPG)'}</span>
+                    <span>
+                      {uploadingAssetKey === 'logo' ? cw.step3.uploading : cw.step4.uploadLogo}
+                    </span>
                     <input
                       type="file"
                       accept="image/*"
@@ -1180,13 +1227,14 @@ export const CreateWebsitePage: React.FC = () => {
               {/* Hero Image Upload */}
               <div className="space-y-2">
                 <label className="block font-semibold text-slate-700 dark:text-slate-300">
-                  Hero Banner Image (Optional)
+                  {cw.step4.heroImageLabel}
                 </label>
                 {heroImageUrl ? (
-                  <div className="flex items-center gap-3 p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                  <div className="flex items-center gap-3 p-2.5 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
                     <img
                       src={heroImageUrl}
-                      alt="Hero"
+                      alt="Hero Banner"
+                      referrerPolicy="no-referrer"
                       className="w-14 h-10 rounded-lg object-cover border border-slate-200"
                     />
                     <button
@@ -1194,17 +1242,19 @@ export const CreateWebsitePage: React.FC = () => {
                       onClick={() => setHeroImageUrl('')}
                       className="text-rose-600 font-semibold hover:underline cursor-pointer"
                     >
-                      Remove Hero
+                      {cw.step4.removeHero}
                     </button>
                   </div>
                 ) : (
-                  <label className="flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl border border-dashed border-slate-300 dark:border-slate-700 hover:border-blue-500 cursor-pointer text-slate-600 dark:text-slate-300 font-semibold">
+                  <label className="min-h-[44px] flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl border border-dashed border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800/70 hover:border-blue-500 cursor-pointer text-slate-700 dark:text-slate-300 font-semibold">
                     {uploadingAssetKey === 'hero' ? (
                       <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
                     ) : (
-                      <ImageIcon className="w-4 h-4 text-blue-600" />
+                      <ImageIcon className="w-4 h-4 text-blue-600 dark:text-blue-400" />
                     )}
-                    <span>{uploadingAssetKey === 'hero' ? 'Uploading...' : 'Upload Hero Image'}</span>
+                    <span>
+                      {uploadingAssetKey === 'hero' ? cw.step3.uploading : cw.step4.uploadHero}
+                    </span>
                     <input
                       type="file"
                       accept="image/*"
@@ -1226,45 +1276,57 @@ export const CreateWebsitePage: React.FC = () => {
               <div className="grid grid-cols-3 gap-2">
                 <div>
                   <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                    Hero Layout
+                    {cw.step4.heroLayoutLabel}
                   </label>
                   <select
                     value={heroLayout}
-                    onChange={(e) => setHeroLayout(e.target.value as any)}
-                    className="w-full px-2 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
+                    onChange={(e) =>
+                      setHeroLayout(
+                        e.target.value as NonNullable<WebsiteThemeSettings['heroLayout']>
+                      )
+                    }
+                    className="w-full min-h-[44px] px-2 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800"
                   >
-                    <option value="split">Split</option>
-                    <option value="centered">Centered</option>
-                    <option value="cover">Cover</option>
+                    <option value="split">{cw.step4.layoutSplit}</option>
+                    <option value="centered">{cw.step4.layoutCentered}</option>
+                    <option value="cover">{cw.step4.layoutCover}</option>
                   </select>
                 </div>
                 <div>
                   <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                    Typography
+                    {cw.step4.typographyLabel}
                   </label>
                   <select
                     value={fontStyle}
-                    onChange={(e) => setFontStyle(e.target.value as any)}
-                    className="w-full px-2 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
+                    onChange={(e) =>
+                      setFontStyle(
+                        e.target.value as NonNullable<WebsiteThemeSettings['fontStyle']>
+                      )
+                    }
+                    className="w-full min-h-[44px] px-2 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800"
                   >
-                    <option value="modern">Modern</option>
-                    <option value="editorial">Editorial</option>
-                    <option value="bold">Bold</option>
-                    <option value="minimal">Minimal</option>
+                    <option value="modern">{cw.step4.fontModern}</option>
+                    <option value="editorial">{cw.step4.fontEditorial}</option>
+                    <option value="bold">{cw.step4.fontBold}</option>
+                    <option value="minimal">{cw.step4.fontMinimal}</option>
                   </select>
                 </div>
                 <div>
                   <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                    Buttons
+                    {cw.step4.buttonsLabel}
                   </label>
                   <select
                     value={buttonStyle}
-                    onChange={(e) => setButtonStyle(e.target.value as any)}
-                    className="w-full px-2 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
+                    onChange={(e) =>
+                      setButtonStyle(
+                        e.target.value as NonNullable<WebsiteThemeSettings['buttonStyle']>
+                      )
+                    }
+                    className="w-full min-h-[44px] px-2 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800"
                   >
-                    <option value="rounded">Rounded</option>
-                    <option value="pill">Pill</option>
-                    <option value="sharp">Sharp</option>
+                    <option value="rounded">{cw.step4.btnRounded}</option>
+                    <option value="pill">{cw.step4.btnPill}</option>
+                    <option value="sharp">{cw.step4.btnSharp}</option>
                   </select>
                 </div>
               </div>
@@ -1277,20 +1339,20 @@ export const CreateWebsitePage: React.FC = () => {
                   key={pal.id}
                   type="button"
                   onClick={() => setBrandColor(pal.brandColor)}
-                  className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                  className={`p-3 rounded-xl border text-left transition-colors cursor-pointer ${
                     brandColor.toLowerCase() === pal.brandColor.toLowerCase()
-                      ? 'border-blue-600 ring-2 ring-blue-500/20 bg-blue-50/40 dark:bg-blue-950/40'
-                      : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-50'
+                      ? 'border-blue-600 bg-blue-50/40 dark:bg-blue-950/30'
+                      : 'border-slate-200/90 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-900/60 hover:bg-slate-100 dark:hover:bg-slate-900'
                   }`}
                 >
                   <div
-                    className="w-6 h-6 rounded-full shadow-xs mb-2"
+                    className="w-6 h-6 rounded-full mb-2 border border-black/10"
                     style={{ backgroundColor: pal.brandColor }}
                   />
                   <span className="font-bold text-[11px] text-slate-900 dark:text-white block truncate">
                     {pal.name}
                   </span>
-                  <span className="text-[10px] text-slate-400 font-mono mt-0.5 block">
+                  <span className="text-[10px] text-slate-500 dark:text-slate-400 font-mono mt-0.5 block">
                     {pal.brandColor}
                   </span>
                 </button>
@@ -1298,54 +1360,57 @@ export const CreateWebsitePage: React.FC = () => {
             </div>
 
             {/* Device Switcher for Preview */}
-            <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-800 pb-3">
               <div className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                Live Preview: <span className="font-mono text-blue-600">https://{subdomain || 'yourbusiness'}.amaas.xyz</span>
+                {cw.step4.livePreviewLabel}{' '}
+                <span className="font-mono text-blue-600 dark:text-blue-400">
+                  https://{subdomain || 'yourbusiness'}.amaas.xyz
+                </span>
               </div>
-              <div className="flex items-center p-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs">
+              <div className="flex items-center p-1 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 text-xs">
                 <button
                   type="button"
                   onClick={() => setPreviewDevice('desktop')}
-                  className={`px-2.5 py-1.5 rounded-md flex items-center gap-1 cursor-pointer ${
+                  className={`min-h-[36px] px-3 py-1.5 rounded-lg flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
                     previewDevice === 'desktop'
-                      ? 'bg-white dark:bg-slate-900 shadow-xs text-blue-600 font-bold'
-                      : 'text-slate-500'
+                      ? 'bg-white dark:bg-slate-800 shadow-xs text-blue-600 dark:text-blue-400 font-bold'
+                      : 'text-slate-600 dark:text-slate-400'
                   }`}
                 >
                   <Monitor className="w-3.5 h-3.5" />
-                  <span>Desktop</span>
+                  <span>{cw.step4.desktop}</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => setPreviewDevice('mobile')}
-                  className={`px-2.5 py-1.5 rounded-md flex items-center gap-1 cursor-pointer ${
+                  className={`min-h-[36px] px-3 py-1.5 rounded-lg flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
                     previewDevice === 'mobile'
-                      ? 'bg-white dark:bg-slate-900 shadow-xs text-blue-600 font-bold'
-                      : 'text-slate-500'
+                      ? 'bg-white dark:bg-slate-800 shadow-xs text-blue-600 dark:text-blue-400 font-bold'
+                      : 'text-slate-600 dark:text-slate-400'
                   }`}
                 >
                   <Smartphone className="w-3.5 h-3.5" />
-                  <span>Mobile</span>
+                  <span>{cw.step4.mobile}</span>
                 </button>
               </div>
             </div>
 
             {/* Live Rendered Preview */}
-            <div className="p-4 rounded-3xl bg-slate-100 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 overflow-hidden">
+            <div className="p-3 sm:p-5 rounded-2xl bg-slate-100/80 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 overflow-hidden">
               <WebsitePreviewRenderer site={draftSite} viewMode={previewDevice} />
             </div>
 
             {submitError && (
-              <div className="p-3.5 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900 text-red-700 dark:text-red-300 text-xs flex items-start gap-2.5">
-                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-600 dark:text-red-400" />
+              <div className="p-4 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 text-xs flex items-start gap-2.5">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600 dark:text-rose-400" />
                 <div className="flex-1">
-                  <span className="font-bold block">Could not save website</span>
+                  <span className="font-bold block">{cw.step4.saveErrorTitle}</span>
                   <span>{submitError}</span>
                 </div>
               </div>
             )}
 
-            <div className="flex items-center justify-between pt-4">
+            <div className="flex items-center justify-between gap-3 pt-2">
               <button
                 type="button"
                 disabled={isSubmitting}
@@ -1353,26 +1418,26 @@ export const CreateWebsitePage: React.FC = () => {
                   setSubmitError(null);
                   setStep(3);
                 }}
-                className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                className="min-h-[44px] px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50 text-xs sm:text-sm font-semibold flex items-center gap-1.5 cursor-pointer"
               >
-                <ArrowLeft className="w-3.5 h-3.5" />
-                <span>Back</span>
+                <ArrowLeft className="w-4 h-4" />
+                <span>{cw.step3.back}</span>
               </button>
               <button
                 type="button"
                 disabled={isSubmitting || !!subdomainError || isSubdomainChecking}
                 onClick={() => void handleCompleteDraft()}
-                className="px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold shadow-md flex items-center gap-2 cursor-pointer disabled:cursor-not-allowed"
+                className="min-h-[44px] px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer disabled:cursor-not-allowed"
               >
                 {isSubmitting ? (
                   <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    <span>Saving Website...</span>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>{cw.step4.savingWebsite}</span>
                   </>
                 ) : (
                   <>
-                    <span>Save Website &amp; Proceed to Subscription</span>
-                    <ArrowRight className="w-3.5 h-3.5" />
+                    <span>{cw.step4.saveAndProceed}</span>
+                    <ArrowRight className="w-4 h-4" />
                   </>
                 )}
               </button>
@@ -1384,103 +1449,100 @@ export const CreateWebsitePage: React.FC = () => {
         {step === 5 && (
           <div className="space-y-6 max-w-2xl mx-auto">
             <div className="text-center space-y-2">
-              <div className="w-12 h-12 rounded-2xl bg-emerald-100 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400 flex items-center justify-center mx-auto shadow-sm">
+              <div className="w-12 h-12 rounded-2xl bg-emerald-50 dark:bg-emerald-950/70 border border-emerald-200 dark:border-emerald-900 text-emerald-600 dark:text-emerald-400 flex items-center justify-center mx-auto">
                 <CheckCircle2 className="w-6 h-6" />
               </div>
-              <h2 className="text-2xl font-black text-slate-900 dark:text-white">
-                Website Saved &amp; Subdomain Reserved
+              <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-950 dark:text-white tracking-tight">
+                {cw.step5.title}
               </h2>
-              <p className="text-xs text-slate-500">
-                Your website is saved at{' '}
-                <strong className="font-mono text-blue-600">https://{effectiveFullDomain}</strong>.
+              <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400">
+                {cw.step5.savedAtPrefix}{' '}
+                <strong className="font-mono text-blue-600 dark:text-blue-400">
+                  https://{effectiveFullDomain}
+                </strong>
+                .
               </p>
             </div>
 
             {/* Subscription Terms Disclosure */}
-            <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-900 dark:text-amber-200 text-xs space-y-2">
+            <div className="p-4 sm:p-5 rounded-xl bg-amber-50/80 dark:bg-amber-950/30 border border-amber-200/90 dark:border-amber-900 text-amber-900 dark:text-amber-200 text-xs space-y-1.5">
               <div className="flex items-center gap-2 font-bold">
                 <ShieldCheck className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
-                <span>{effectivePlanName} Subscription — Automatic Live Publishing</span>
+                <span>{cw.step5.autoPublishTitle(effectivePlanName)}</span>
               </div>
-              <p className="leading-relaxed text-[11px] text-amber-800 dark:text-amber-300">
-                Submit your <strong>৳{effectiveMonthlyFee} BDT</strong> monthly payment via bKash, Nagad, or Bank Transfer below. As soon as your payment is verified by our operations team, your website automatically goes live at <strong>https://{effectiveFullDomain}</strong> for a full <strong>30-day billing period</strong>.
+              <p className="leading-relaxed text-amber-800 dark:text-amber-300">
+                {cw.step5.autoPublishBody(effectiveMonthlyFee, effectiveFullDomain)}
               </p>
             </div>
 
             {/* Plan Fee Breakdown Card */}
-            <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-md space-y-4">
-              <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+            <div className="p-6 sm:p-8 rounded-2xl bg-slate-50/70 dark:bg-slate-900/70 border border-slate-200/90 dark:border-slate-800 space-y-5">
+              <div className="flex items-center justify-between gap-4 pb-4 border-b border-slate-200/80 dark:border-slate-800">
                 <div>
-                  <h3 className="font-bold text-sm text-slate-900 dark:text-white">
+                  <h3 className="font-bold text-sm sm:text-base text-slate-950 dark:text-white">
                     {effectivePlanName}
                   </h3>
-                  <span className="text-[11px] text-slate-400 font-mono">
-                    https://{effectiveFullDomain} · 30-day billing period
+                  <span className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">
+                    https://{effectiveFullDomain} · {cw.step5.billingPeriod30}
                   </span>
                 </div>
-                <div className="text-right">
-                  <span className="text-2xl font-black text-blue-600 font-mono tabular-nums">
+                <div className="text-right shrink-0">
+                  <span className="text-2xl sm:text-3xl font-extrabold text-blue-600 dark:text-blue-400 font-mono tabular-nums">
                     ৳{effectiveMonthlyFee}
                   </span>
-                  <span className="text-xs text-slate-400"> / month</span>
-                </div>
-              </div>
-
-              <div className="space-y-2 text-xs text-slate-600 dark:text-slate-300">
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-                  <span>
-                    Free <code className="font-mono text-blue-600">{effectiveFullDomain}</code> subdomain &amp; free hosting on GoAMAAS infrastructure
-                  </span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-                  <span>
-                    Full Visual Website Editor (sections, logo, hero banner, theme, products &amp; images)
-                  </span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-                  <span>
-                    Optional custom domain support (domain registration paid separately by customer)
-                  </span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-                  <span>
-                    Direct WhatsApp customer inquiry &amp; 30-day cumulative renewal cycle
+                  <span className="text-xs text-slate-500 dark:text-slate-400">
+                    {cw.step5.perMonth}
                   </span>
                 </div>
               </div>
 
-              <div className="pt-4 border-t border-slate-100 dark:border-slate-800 flex flex-col sm:flex-row items-center gap-3">
+              <div className="space-y-2.5 text-xs sm:text-sm text-slate-700 dark:text-slate-300">
+                <div className="flex items-start gap-2.5">
+                  <Check className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
+                  <span>{cw.step5.bullet1(effectiveFullDomain)}</span>
+                </div>
+                <div className="flex items-start gap-2.5">
+                  <Check className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
+                  <span>{cw.step5.bullet2}</span>
+                </div>
+                <div className="flex items-start gap-2.5">
+                  <Check className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
+                  <span>{cw.step5.bullet3}</span>
+                </div>
+                <div className="flex items-start gap-2.5">
+                  <Check className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
+                  <span>{cw.step5.bullet4}</span>
+                </div>
+              </div>
+
+              <div className="pt-4 border-t border-slate-200/80 dark:border-slate-800 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
                 <button
                   type="button"
                   disabled={!persistedSite?.id && !createdSiteId}
                   onClick={() => setIsPaymentModalOpen(true)}
-                  className="w-full sm:flex-1 py-3 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-bold text-xs shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
+                  className="w-full sm:flex-1 min-h-[46px] py-3 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold text-xs sm:text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer"
                 >
-                  <CreditCard className="w-4 h-4" />
-                  <span>Submit ৳{effectiveMonthlyFee} Payment (bKash / Nagad / Bank)</span>
+                  <CreditCard className="w-4 h-4 shrink-0" />
+                  <span>{cw.step5.submitPaymentBtn(effectiveMonthlyFee)}</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => navigate('/dashboard/subscribed-website')}
-                  className="w-full sm:w-auto px-4 py-3 rounded-xl border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 transition-colors cursor-pointer"
+                  className="w-full sm:w-auto min-h-[46px] px-4 py-3 rounded-xl border border-slate-300 dark:border-slate-700 hover:bg-white dark:hover:bg-slate-800 text-xs sm:text-sm font-semibold text-slate-800 dark:text-slate-200 transition-colors cursor-pointer"
                 >
-                  Open Visual Website Editor
+                  {cw.step5.openEditorBtn}
                 </button>
               </div>
             </div>
 
             {/* Custom Domain Support Callout */}
-            <div className="p-4 rounded-xl bg-slate-100 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
-              <div>
-                <span className="font-bold text-slate-900 dark:text-white block">
-                  Connecting your own custom domain?
+            <div className="p-4 sm:p-5 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-xs">
+              <div className="space-y-0.5">
+                <span className="font-bold text-slate-950 dark:text-white block">
+                  {cw.step5.customDomainTitle}
                 </span>
-                <span className="text-[11px] text-slate-500">
-                  Point your domain CNAME to <code className="font-mono">cname.amaas.xyz</code> inside the Website Editor. Domain purchase is paid separately.
+                <span className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed block">
+                  {cw.step5.customDomainBody}
                 </span>
               </div>
               {(() => {
@@ -1499,20 +1561,20 @@ export const CreateWebsitePage: React.FC = () => {
                       )}`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs flex items-center gap-1.5 shrink-0"
+                      className="min-h-[40px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs inline-flex items-center gap-1.5 shrink-0 whitespace-nowrap"
                     >
                       <MessageSquare className="w-3.5 h-3.5" />
-                      <span>WhatsApp Support</span>
+                      <span>{cw.step5.whatsappSupport}</span>
                     </a>
                   );
                 }
                 return (
                   <Link
                     to="/dashboard/support"
-                    className="px-3.5 py-2 rounded-lg bg-slate-900 dark:bg-slate-700 hover:bg-slate-800 text-white font-semibold text-xs flex items-center gap-1.5 shrink-0"
+                    className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-900 dark:bg-slate-800 hover:bg-slate-800 dark:hover:bg-slate-700 text-white font-semibold text-xs inline-flex items-center gap-1.5 shrink-0 whitespace-nowrap"
                   >
                     <MessageSquare className="w-3.5 h-3.5" />
-                    <span>Support Desk</span>
+                    <span>{cw.step5.supportDesk}</span>
                   </Link>
                 );
               })()}
@@ -1531,10 +1593,7 @@ export const CreateWebsitePage: React.FC = () => {
         planTier={effectivePlanName}
         amount={effectiveMonthlyFee}
         onSuccess={() => {
-          showToast(
-            'Payment submitted! Your website will publish live automatically as soon as your payment is verified.',
-            'success'
-          );
+          showToast(cw.step5.paymentSubmittedToast, 'success');
           navigate('/dashboard/subscribed-website');
         }}
       />

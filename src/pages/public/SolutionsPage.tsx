@@ -6,159 +6,144 @@ import {
   Apple,
   TrendingUp,
   Building2,
-  CheckCircle2,
+  Check,
   ArrowRight,
-  Globe,
-  Sparkles,
 } from 'lucide-react';
 import { ASSETS } from '../../assets/images';
+import { useLanguage, usePageSeo } from '../../context/LanguageContext';
+import { Reveal, StaggerGroup, StaggerItem } from '../../components/ui/MotionPrimitives';
+
+const INDUSTRY_ICONS = [Shirt, Smartphone, Apple, TrendingUp, Building2];
 
 export const SolutionsPage: React.FC = () => {
-  const industries = [
-    {
-      icon: Shirt,
-      title: 'Fashion, Apparel & Footwear',
-      tagline: 'Manage size variations, seasonal lookbooks, and high return rates.',
-      points: [
-        'Multi-variant product catalog (Sizes, Colors, Inseams)',
-        'Exchange & return verification workflow',
-        'Visual lookbook landing page templates with instant COD orders',
-        'Messenger bot answers sizing queries with measurement charts',
-      ],
-    },
-    {
-      icon: Smartphone,
-      title: 'Consumer Electronics & Gadgets',
-      tagline: 'Track serial numbers, manage warranties, and combat high-value COD risk.',
-      points: [
-        'SKU and barcode serial tracking on invoices',
-        'Customer purchase verification before courier handoff',
-        'Technical specification tables on landing pages',
-        'Automated WhatsApp follow-up for unboxing instructions',
-      ],
-    },
-    {
-      icon: Apple,
-      title: 'Organic Groceries & Gourmet Food',
-      tagline: 'Batch expiry management, rapid same-day dispatch, and loyal repeat buyers.',
-      points: [
-        'Freshness batch tracking and inventory shelf-life warnings',
-        'Repeat order reminders via SMS 14 days after purchase',
-        'Neighborhood delivery route grouping for reduced delivery expense',
-        'Bulk wholesale discounts for regular pantry shoppers',
-      ],
-    },
-    {
-      icon: TrendingUp,
-      title: 'Fast-Scaling Direct-to-Consumer Brands',
-      tagline: 'Launch flash drops, run influencer campaigns, and scale ad ROI.',
-      points: [
-        'High-converting single-product flash landing pages',
-        'Real-time traffic and conversion attribution analytics',
-        'Abandoned cart WhatsApp recovery within 30 minutes',
-        'Unlimited orders per month with Pro and Enterprise plans',
-      ],
-    },
-    {
-      icon: Building2,
-      title: 'Wholesale B2B & Distributors',
-      tagline: 'Tiered wholesale pricing, custom quotations, and bulk invoicing.',
-      points: [
-        'Minimum order quantity (MOQ) controls per client tier',
-        'Credit limit and outstanding payment balance tracking',
-        'Print-ready professional B2B invoices with tax/VAT breakdown',
-        'Branch warehouse inventory routing and multi-user access',
-      ],
-    },
-  ];
+  const { t } = useLanguage();
+  const sp = t.solutionsPage;
+
+  usePageSeo({
+    title: sp.seoTitle,
+    description: sp.seoDescription,
+  });
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 py-16 transition-colors">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-20">
-        {/* Header */}
-        <div className="text-center max-w-3xl mx-auto space-y-4">
-          <span className="text-xs font-bold text-blue-600 dark:text-blue-400 tracking-wider uppercase">
-            Tailored Industry Solutions
-          </span>
-          <h1 className="text-3xl sm:text-5xl font-extrabold text-slate-900 dark:text-white tracking-tight">
-            Built for the Specific Challenges of Your Vertical
-          </h1>
-          <p className="text-base text-slate-600 dark:text-slate-300 leading-relaxed">
-            Whether you sell apparel on Facebook, run a boutique gadget shop in Banani, or distribute wholesale across Bangladesh, GoAMAAS fits your workflow.
-          </p>
+    <div className="min-h-screen bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors">
+      {/* Header */}
+      <section className="relative pt-14 pb-16 sm:pt-20 sm:pb-20 border-b border-slate-200/80 dark:border-slate-800/80 overflow-hidden">
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 bg-[radial-gradient(#cbd5e1_1px,transparent_1px)] dark:bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:28px_28px] opacity-40 [mask-image:radial-gradient(ellipse_70%_60%_at_50%_20%,#000_50%,transparent_100%)]"
+        />
+        <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="max-w-3xl space-y-4">
+            <Reveal y={12}>
+              <p className="text-xs font-semibold text-blue-600 dark:text-blue-400">
+                {sp.eyebrow}
+              </p>
+            </Reveal>
+            <Reveal delay={0.05} y={16}>
+              <h1 className="text-3xl sm:text-5xl font-extrabold text-slate-950 dark:text-white tracking-tight leading-[1.12] text-balance">
+                {sp.title}
+              </h1>
+            </Reveal>
+            <Reveal delay={0.1} y={16}>
+              <p className="text-sm sm:text-base lg:text-lg text-slate-600 dark:text-slate-300 leading-relaxed max-w-2xl">
+                {sp.subtitle}
+              </p>
+            </Reveal>
+          </div>
         </div>
+      </section>
 
-        {/* Industry Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-          {industries.map((ind, i) => {
-            const Icon = ind.icon;
-            return (
-              <div
-                key={i}
-                className="p-8 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex flex-col justify-between shadow-xs hover:shadow-md transition-shadow"
-              >
-                <div className="space-y-4">
-                  <div className="w-12 h-12 rounded-xl bg-blue-50 dark:bg-blue-950 text-blue-600 dark:text-blue-400 flex items-center justify-center">
-                    <Icon className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <h3 className="text-lg font-bold text-slate-900 dark:text-white">
-                      {ind.title}
-                    </h3>
-                    <p className="text-xs text-slate-500 mt-1">{ind.tagline}</p>
-                  </div>
-                  <div className="pt-2 space-y-2.5">
-                    {ind.points.map((pt, pIdx) => (
-                      <div key={pIdx} className="flex items-start gap-2 text-xs text-slate-600 dark:text-slate-300">
-                        <CheckCircle2 className="w-3.5 h-3.5 text-blue-600 shrink-0 mt-0.5" />
-                        <span>{pt}</span>
+      {/* Industry Verticals Bento */}
+      <section className="py-16 sm:py-24">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-16">
+          <StaggerGroup className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-12 gap-6">
+            {sp.industries.map((ind, idx) => {
+              const Icon = INDUSTRY_ICONS[idx % INDUSTRY_ICONS.length];
+              const colSpan = idx < 2 ? 'lg:col-span-6' : 'lg:col-span-4';
+              const numLabel = String(idx + 1).padStart(2, '0');
+
+              return (
+                <StaggerItem key={idx} className={colSpan}>
+                  <article className="h-full p-7 sm:p-8 rounded-2xl bg-slate-50/70 dark:bg-slate-900/70 border border-slate-200/90 dark:border-slate-800 flex flex-col justify-between gap-6 hover:border-slate-300 dark:hover:border-slate-700 transition-colors">
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between">
+                        <div className="w-11 h-11 rounded-xl bg-white dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
+                          <Icon className="w-5 h-5" />
+                        </div>
+                        <span className="font-mono text-xs font-semibold text-slate-400 dark:text-slate-500 tabular-nums">
+                          {numLabel}
+                        </span>
                       </div>
-                    ))}
-                  </div>
+
+                      <div className="space-y-1.5">
+                        <h2 className="text-lg sm:text-xl font-bold text-slate-950 dark:text-white tracking-tight text-balance">
+                          {ind.title}
+                        </h2>
+                        <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
+                          {ind.tagline}
+                        </p>
+                      </div>
+                    </div>
+
+                    <ul className="pt-5 border-t border-slate-200/70 dark:border-slate-800/80 space-y-2.5">
+                      {ind.points.map((pt, pIdx) => (
+                        <li
+                          key={pIdx}
+                          className="flex items-start gap-2.5 text-xs sm:text-[13px] text-slate-700 dark:text-slate-300 leading-snug"
+                        >
+                          <Check className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
+                          <span>{pt}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </article>
+                </StaggerItem>
+              );
+            })}
+          </StaggerGroup>
+
+          {/* Bespoke Engineering Studio Split */}
+          <Reveal y={18}>
+            <div className="rounded-2xl bg-slate-950 dark:bg-slate-900 text-white border border-slate-800 overflow-hidden grid grid-cols-1 lg:grid-cols-12 items-stretch">
+              <div className="lg:col-span-7 p-8 sm:p-12 flex flex-col justify-center space-y-5">
+                <p className="text-xs font-semibold text-blue-400">
+                  {sp.bannerBadge}
+                </p>
+                <h2 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-balance">
+                  {sp.bannerTitle}
+                </h2>
+                <p className="text-sm text-slate-300 leading-relaxed max-w-xl">
+                  {sp.bannerDesc}
+                </p>
+                <div className="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                  <Link
+                    to="/dashboard/website-requests"
+                    className="min-h-[46px] inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs sm:text-sm transition-colors whitespace-nowrap group"
+                  >
+                    <span>{sp.bannerPrimaryCta}</span>
+                    <ArrowRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
+                  </Link>
+                  <Link
+                    to="/pricing"
+                    className="min-h-[46px] inline-flex items-center justify-center px-6 py-3 rounded-xl bg-slate-900 hover:bg-slate-800 dark:bg-slate-950 dark:hover:bg-slate-800 text-slate-200 font-semibold text-xs sm:text-sm border border-slate-700 transition-colors whitespace-nowrap"
+                  >
+                    {sp.bannerSecondaryCta}
+                  </Link>
                 </div>
               </div>
-            );
-          })}
-        </div>
 
-        {/* Website Development Service Banner */}
-        <div className="rounded-2xl bg-gradient-to-r from-blue-900 via-slate-900 to-slate-950 p-8 sm:p-12 text-white border border-slate-800 shadow-xl flex flex-col lg:flex-row items-center justify-between gap-8">
-          <div className="max-w-xl space-y-4">
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/20 text-blue-300 text-xs font-semibold">
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>Full-Service Agency by AMAAS</span>
+              <div className="lg:col-span-5 relative min-h-[260px] bg-slate-900 border-t lg:border-t-0 lg:border-l border-slate-800">
+                <img
+                  src={ASSETS.storePreview}
+                  alt="GoAMAAS custom website engineering showcase"
+                  referrerPolicy="no-referrer"
+                  className="w-full h-full object-cover"
+                />
+              </div>
             </div>
-            <h2 className="text-2xl sm:text-3xl font-extrabold tracking-tight">
-              Need a Custom Engineered Website? Starting at ৳8,000
-            </h2>
-            <p className="text-sm text-slate-300 leading-relaxed">
-              Every website project includes your first year domain (.com) and lightning-fast cloud hosting <strong>100% free</strong>. Built with modern React and Tailwind, mobile-optimized, and connected to your GoAMAAS dashboard.
-            </p>
-            <div className="pt-2 flex flex-wrap gap-4">
-              <Link
-                to="/dashboard/website-requests"
-                className="px-5 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs transition-colors"
-              >
-                Request a Custom Website
-              </Link>
-              <Link
-                to="/pricing"
-                className="px-5 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs border border-slate-700 transition-colors"
-              >
-                Compare Website Tiers
-              </Link>
-            </div>
-          </div>
-          <div className="w-full lg:w-96 rounded-xl overflow-hidden border border-slate-800 shadow-lg shrink-0">
-            <img
-              src={ASSETS.storePreview}
-              alt="Custom website store preview"
-              className="w-full h-auto object-cover"
-              referrerPolicy="no-referrer"
-            />
-          </div>
+          </Reveal>
         </div>
-      </div>
+      </section>
     </div>
   );
 };

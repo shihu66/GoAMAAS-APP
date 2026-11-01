@@ -27,6 +27,11 @@ import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { WebsitePreviewRenderer } from '../../components/website/WebsitePreviewRenderer';
 import {
+  NAGAD_ACCOUNT_TYPE_EN,
+  NAGAD_DEFAULT_ADMIN_INSTRUCTIONS,
+  NAGAD_PERSONAL_NUMBER,
+} from '../../data/paymentGatewaysConfig';
+import {
   CreditCard,
   Globe,
   CheckCircle2,
@@ -2182,21 +2187,50 @@ export const AdminDashboardPage: React.FC = () => {
                   key={gw.id}
                   className="p-5 sm:p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-4"
                 >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-bold text-slate-900 dark:text-white text-sm">
-                      {gw.displayName}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => updateGatewayDraft(gw.id, { isEnabled: !draft.isEnabled })}
-                      className={`min-h-[36px] px-3 py-1 rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
-                        draft.isEnabled
-                          ? 'bg-emerald-600 text-white'
-                          : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
-                      }`}
-                    >
-                      {draft.isEnabled ? 'Enabled' : 'Disabled'}
-                    </button>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <span className="font-bold text-slate-900 dark:text-white text-sm block">
+                        {gw.displayName}
+                      </span>
+                      {gw.id === 'nagad' && (
+                        <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                          Manual Payment Verification ·{' '}
+                          {gw.isEnabled && gw.accountNumber?.trim()
+                            ? `Verified Active (${gw.accountName || NAGAD_ACCOUNT_TYPE_EN})`
+                            : 'Save & verify to enable for customers'}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {gw.id === 'nagad' && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateGatewayDraft('nagad', {
+                              displayName: 'Nagad Personal (Send Money)',
+                              isEnabled: true,
+                              accountNumber: NAGAD_PERSONAL_NUMBER,
+                              accountName: NAGAD_ACCOUNT_TYPE_EN,
+                              instructions: NAGAD_DEFAULT_ADMIN_INSTRUCTIONS,
+                            })
+                          }
+                          className="min-h-[36px] px-2.5 py-1 rounded-xl text-[11px] font-semibold bg-amber-50 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800 hover:bg-amber-100 dark:hover:bg-amber-900/50 transition-colors cursor-pointer whitespace-nowrap"
+                        >
+                          Load Nagad Personal ({NAGAD_PERSONAL_NUMBER})
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => updateGatewayDraft(gw.id, { isEnabled: !draft.isEnabled })}
+                        className={`min-h-[36px] px-3 py-1 rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
+                          draft.isEnabled
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
+                        }`}
+                      >
+                        {draft.isEnabled ? 'Enabled' : 'Disabled'}
+                      </button>
+                    </div>
                   </div>
 
                   <div className="space-y-3 text-xs">
@@ -2220,7 +2254,9 @@ export const AdminDashboardPage: React.FC = () => {
                     {gw.id !== 'whatsapp_support' && (
                       <div>
                         <label className="block text-slate-600 dark:text-slate-400 font-semibold mb-1">
-                          Account Holder / Merchant Name
+                          {gw.id === 'nagad'
+                            ? 'Account Type / Holder Name (e.g. Personal)'
+                            : 'Account Holder / Merchant Name'}
                         </label>
                         <input
                           type="text"
@@ -2228,6 +2264,7 @@ export const AdminDashboardPage: React.FC = () => {
                           onChange={(e) =>
                             updateGatewayDraft(gw.id, { accountName: e.target.value })
                           }
+                          placeholder={gw.id === 'nagad' ? NAGAD_ACCOUNT_TYPE_EN : ''}
                           className="w-full min-h-[44px] px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white"
                         />
                       </div>

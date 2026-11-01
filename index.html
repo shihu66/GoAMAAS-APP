@@ -4,20 +4,100 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>GoAMAAS — All-in-One Business Growth Platform</title>
-    <meta name="description" content="Complete business growth SaaS platform by AMAAS featuring multi-store management, orders, inventory, landing page builder, AI automations, website service requests, and analytics." />
-    <meta property="og:title" content="GoAMAAS — All-in-One Business Growth Platform" />
-    <meta property="og:description" content="Complete business growth SaaS platform by AMAAS featuring multi-store management, orders, inventory, landing page builder, AI automations, website service requests, and analytics." />
+    <meta name="description" content="Create your business website for ৳600/month with free GoAMAAS cloud hosting and .amaas.xyz subdomain, and manage products, orders, inventory, and analytics — engineered by AMAAS Technologies." />
+    <meta name="robots" content="index, follow" />
+    <link rel="canonical" href="https://amaas.xyz/" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+
+    <!-- OpenGraph / Facebook / WhatsApp -->
     <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="GoAMAAS by AMAAS Technologies" />
+    <meta property="og:title" content="GoAMAAS — All-in-One Business Growth Platform" />
+    <meta property="og:description" content="Create your business website for ৳600/month with free GoAMAAS cloud hosting and .amaas.xyz subdomain, and manage products, orders, inventory, and analytics — engineered by AMAAS Technologies." />
+    <meta property="og:url" content="https://amaas.xyz/" />
+    <meta property="og:locale" content="en_BD" />
+    <meta property="og:locale:alternate" content="bn_BD" />
+    <meta property="og:image" content="https://amaas.xyz/og-banner.svg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="GoAMAAS — Website Builder & Commerce Platform by AMAAS Technologies" />
+
+    <!-- Twitter / X -->
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="GoAMAAS — All-in-One Business Growth Platform" />
+    <meta name="twitter:description" content="Create your business website for ৳600/month with free GoAMAAS cloud hosting and .amaas.xyz subdomain, and manage products, orders, inventory, and analytics — engineered by AMAAS Technologies." />
+    <meta name="twitter:image" content="https://amaas.xyz/og-banner.svg" />
+
+    <!-- Schema.org Structured Data (Organization, WebSite, SoftwareApplication) -->
+    <script id="goamaas-jsonld" type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Organization",
+            "@id": "https://amaas.xyz/#organization",
+            "name": "AMAAS Technologies",
+            "url": "https://amaas.xyz",
+            "email": "official.amaas.dev@gmail.com",
+            "telephone": "+8801605012812",
+            "address": {
+              "@type": "PostalAddress",
+              "streetAddress": "Fulbarigate, KUET-9203",
+              "addressLocality": "Khulna",
+              "postalCode": "9203",
+              "addressCountry": "BD"
+            }
+          },
+          {
+            "@type": "WebSite",
+            "@id": "https://amaas.xyz/#website",
+            "url": "https://amaas.xyz",
+            "name": "GoAMAAS",
+            "publisher": {
+              "@id": "https://amaas.xyz/#organization"
+            },
+            "inLanguage": ["en", "bn"]
+          },
+          {
+            "@type": "SoftwareApplication",
+            "@id": "https://amaas.xyz/#software",
+            "name": "GoAMAAS",
+            "applicationCategory": "BusinessApplication",
+            "operatingSystem": "Web",
+            "url": "https://amaas.xyz",
+            "description": "Website builder and multi-channel business operations platform by AMAAS Technologies with free GoAMAAS cloud hosting, .amaas.xyz subdomain, product catalog, order hub, and inventory management.",
+            "provider": {
+              "@id": "https://amaas.xyz/#organization"
+            },
+            "offers": {
+              "@type": "AggregateOffer",
+              "priceCurrency": "BDT",
+              "lowPrice": "299",
+              "highPrice": "1999",
+              "offerCount": "5"
+            }
+          }
+        ]
+      }
+    </script>
+
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,300..800;1,300..800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&family=Plus+Jakarta+Sans:ital,wght@0,300..800;1,300..800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <script>
       (function () {
         var p = window.location.pathname;
         if (p === '/admin' || p.indexOf('/admin/') === 0) {
           document.title = 'GoAMAAS Admin — AMAAS Technologies';
           var head = document.head;
+          var existingRobots = document.querySelector('meta[name="robots"]');
+          if (existingRobots) existingRobots.parentNode.removeChild(existingRobots);
+          var existingCanonical = document.querySelector('link[rel="canonical"]');
+          if (existingCanonical) existingCanonical.parentNode.removeChild(existingCanonical);
+          var existingIcon = document.querySelector('link[rel="icon"]');
+          if (existingIcon) existingIcon.parentNode.removeChild(existingIcon);
+          var existingJsonLd = document.getElementById('goamaas-jsonld');
+          if (existingJsonLd) existingJsonLd.parentNode.removeChild(existingJsonLd);
           function meta(name, content) {
             var m = document.createElement('meta');
             m.setAttribute('name', name);
@@ -34,6 +114,7 @@
           meta('robots', 'noindex, nofollow, noarchive');
           meta('googlebot', 'noindex, nofollow, noarchive');
           meta('theme-color', '#090D16');
+          meta('mobile-web-app-capable', 'yes');
           meta('apple-mobile-web-app-capable', 'yes');
           meta('apple-mobile-web-app-status-bar-style', 'black-translucent');
           meta('apple-mobile-web-app-title', 'AMAAS Admin');

@@ -57,6 +57,11 @@ import {
   resolveAuthoritativeServicePrice,
 } from '../data/pricingConfig';
 import {
+  NAGAD_PERSONAL_NUMBER,
+  NAGAD_ACCOUNT_TYPE_EN,
+  NAGAD_DEFAULT_ADMIN_INSTRUCTIONS,
+} from '../data/paymentGatewaysConfig';
+import {
   executeApproveAndPublishWorkflow,
   hasDuplicateActiveTransactionReference,
   isWebsitePaymentService,
@@ -127,6 +132,10 @@ import {
   uploadWebsiteAssetToStorage,
   deleteWebsiteAssetFromStorage,
 } from '../lib/supabase';
+import {
+  isAuthorizedAdminEmail,
+  isAuthUserEmailVerified,
+} from '../lib/adminSecurity';
 
 export interface ToastMessage {
   id: string;
@@ -411,8 +420,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       sessionUser.email?.split('@')[0] ||
       'Merchant';
 
-    // Ensure profile row exists for OAuth / confirmed users without trusting metadata role
-    if (!profile && isSupabaseConfigured) {
+    const isOnAdminRoute =
+      typeof window !== 'undefined' &&
+      (window.location.pathname === '/admin' || window.location.pathname.startsWith('/admin/'));
+
+    // Ensure profile row exists for OAuth / confirmed merchant users without trusting metadata role
+    // Never auto-provision a merchant profile row while inside /admin routes
+    if (!profile && isSupabaseConfigured && !isOnAdminRoute) {
       await upsertUserProfile({
         id: userId,
         full_name: fullName,
@@ -424,9 +438,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       profile = refreshed.profile;
     }
 
-    // SECURITY: Never trust user_metadata.role or localStorage for admin authorization; require both profile.role === 'admin' AND server RPC is_admin()
+    // SECURITY: Never trust user_metadata.role or localStorage for admin authorization;
+    // require authorized email + verified email + profile.role === 'admin' + server RPC is_admin()
     let verifiedRole: UserRole = 'merchant';
-    if (profile?.role === 'admin' && isSupabaseConfigured && supabase) {
+    if (
+      profile?.role === 'admin' &&
+      isAuthorizedAdminEmail(sessionUser.email) &&
+      isAuthUserEmailVerified(sessionUser) &&
+      isSupabaseConfigured &&
+      supabase
+    ) {
       const { data: rpcAdmin, error: rpcErr } = await supabase.rpc('is_admin');
       if (!rpcErr && rpcAdmin === true) {
         verifiedRole = 'admin';
@@ -555,7 +576,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const setAuthenticatedUser = (newUser: User) => {
     const safeRole: UserRole =
-      isSupabaseConfigured && newUser.role === 'admin' ? 'admin' : 'merchant';
+      isSupabaseConfigured &&
+      newUser.role === 'admin' &&
+      isAuthorizedAdminEmail(newUser.email)
+        ? 'admin'
+        : 'merchant';
     setUser({ ...newUser, role: safeRole });
     setRole(safeRole);
   };
@@ -759,6 +784,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         );
         return;
       }
+
+      // Never auto-provision a default merchant store for platform admin sessions or /admin routes
+      const isOnAdminRoute =
+        typeof window !== 'undefined' &&
+        (window.location.pathname === '/admin' || window.location.pathname.startsWith('/admin/'));
+      if (user.role === 'admin' || isOnAdminRoute) return;
 
       // Auto-provision default store once if authenticated user has zero stores in DB
       if (syncingStoresUserRef.current === user.id) return;
@@ -2344,10 +2375,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     {
       id: 'nagad',
       displayName: 'Nagad Personal (Send Money)',
-      isEnabled: false,
-      accountNumber: '',
-      accountName: '',
-      instructions: 'Nagad payment channel is disabled until configured by an administrator.',
+      isEnabled: true,
+      accountNumber: NAGAD_PERSONAL_NUMBER,
+      accountName: NAGAD_ACCOUNT_TYPE_EN,
+      instructions: NAGAD_DEFAULT_ADMIN_INSTRUCTIONS,
     },
     {
       id: 'bank_transfer',
@@ -2369,11 +2400,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
   ];
 
-  const [paymentGatewayConfigs, setPaymentGatewayConfigs] = useState<PaymentGatewayConfig[]>(() =>
-    isSupabaseConfigured
-      ? UNCONFIGURED_GATEWAY_SKELETONS
-      : getStored('payment_gateway_configs', DEMO_OFFLINE_GATEWAY_CONFIGS)
-  );
+  const [paymentGatewayConfigs, setPaymentGatewayConfigs] = useState<PaymentGatewayConfig[]>(() => {
+    if (isSupabaseConfigured) {
+      return UNCONFIGURED_GATEWAY_SKELETONS;
+    }
+    const stored = getStored('payment_gateway_configs', DEMO_OFFLINE_GATEWAY_CONFIGS);
+    return stored.map((gw) => {
+      if (gw.id === 'nagad' && !gw.isEnabled && !gw.accountNumber?.trim()) {
+        return {
+          ...gw,
+          displayName: 'Nagad Personal (Send Money)',
+          isEnabled: true,
+          accountNumber: NAGAD_PERSONAL_NUMBER,
+          accountName: NAGAD_ACCOUNT_TYPE_EN,
+          instructions: NAGAD_DEFAULT_ADMIN_INSTRUCTIONS,
+        };
+      }
+      return gw;
+    });
+  });
   const latestGatewayConfigsRef = useRef<PaymentGatewayConfig[]>(paymentGatewayConfigs);
   const pendingGatewayUpdatesRef = useRef<Record<string, Partial<PaymentGatewayConfig>>>({});
   const gatewaySaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
@@ -2387,12 +2432,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [paymentGatewayConfigs]);
 
-  const refreshPaymentGatewayConfigs = useCallback(async () => {
-    if (!isSupabaseConfigured || !supabase || !user?.id) return;
+  const refreshPaymentGatewayConfigs = useCallback(async (): Promise<PaymentGatewayConfig[] | null> => {
+    if (!isSupabaseConfigured || !supabase || !user?.id) return null;
     const { data, error } = await fetchPaymentGatewayConfigsFromDb();
     if (!error && data && data.length > 0) {
-      setPaymentGatewayConfigs(data);
+      const normalized = data.map((gw) =>
+        gw.id === 'nagad' &&
+        gw.accountNumber?.replace(/\s+/g, '') === NAGAD_PERSONAL_NUMBER &&
+        !gw.accountName?.trim()
+          ? { ...gw, accountName: NAGAD_ACCOUNT_TYPE_EN }
+          : gw
+      );
+      setPaymentGatewayConfigs(normalized);
+      latestGatewayConfigsRef.current = normalized;
+      return normalized;
     }
+    return null;
   }, [user?.id]);
 
   useEffect(() => {
@@ -2622,14 +2677,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
-    setPaymentGatewayConfigs((prev) => {
-      const next = prev.map((c) => (c.id === knownGatewayId ? { ...c, ...updates } : c));
-      latestGatewayConfigsRef.current = next;
-      return next;
-    });
-
     if (!isSupabaseConfigured) {
-      showToast('Payment gateway configuration saved.', 'success');
+      setPaymentGatewayConfigs((prev) => {
+        const next = prev.map((c) => (c.id === knownGatewayId ? { ...c, ...updates } : c));
+        latestGatewayConfigsRef.current = next;
+        return next;
+      });
+      showToast('Payment gateway configuration saved and verified.', 'success');
       return true;
     }
 
@@ -2651,8 +2705,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
-    await refreshPaymentGatewayConfigs();
-    showToast('Payment gateway configuration saved.', 'success');
+    // Verify saved state from database before marking gateway enabled/verified in UI
+    const verifiedConfigs = await refreshPaymentGatewayConfigs();
+    const verifiedGateway = verifiedConfigs?.find((c) => c.id === knownGatewayId);
+    if (
+      !verifiedGateway ||
+      (typeof delta.isEnabled === 'boolean' && verifiedGateway.isEnabled !== delta.isEnabled) ||
+      (verifiedGateway.isEnabled &&
+        knownGatewayId !== 'whatsapp_support' &&
+        !(verifiedGateway.accountNumber || '').trim())
+    ) {
+      showToast(
+        'Gateway configuration could not be verified after saving. Please review and try again.',
+        'error'
+      );
+      return false;
+    }
+
+    showToast('Payment gateway configuration saved and verified.', 'success');
     return true;
   };
 
@@ -3560,6 +3630,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               normalizedId === 'ai_automations')
         );
         if (hasApprovedAuto) {
+          return {
+            serviceId,
+            serviceName,
+            serviceCategory: category,
+            status: 'subscribed',
+            hasAccess: true,
+            isExpired: false,
+          };
+        }
+      } else if (category === 'landing_pages') {
+        const hasApprovedLandingPlan = userApprovedPayments.some((r) => {
+          if (r.serviceType !== 'dashboard_plan') return false;
+          const reqCode = r.serviceId.trim().toLowerCase();
+          const approvedPlan =
+            normalizeDashboardPlanId(reqCode) || normalizeDashboardPlanId(r.planTier);
+          return (
+            approvedPlan === 'pro' ||
+            approvedPlan === 'enterprise' ||
+            approvedPlan === 'business'
+          );
+        });
+        if (hasApprovedLandingPlan) {
           return {
             serviceId,
             serviceName,

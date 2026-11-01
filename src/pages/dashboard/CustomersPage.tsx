@@ -19,9 +19,12 @@ import {
 } from 'lucide-react';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
+import { TrialStatusBadge } from '../../components/ui/TrialStatusBadge';
+import { TrialGateBanner } from '../../components/ui/TrialGateBanner';
 
 export const CustomersPage: React.FC = () => {
-  const { customers, addCustomer, updateCustomer, deleteCustomer, addCustomerNote } = useApp();
+  const { customers, addCustomer, updateCustomer, deleteCustomer, addCustomerNote, getServiceAccess } = useApp();
+  const serviceAccess = getServiceAccess('dashboard_business', 'Dashboard Business Tier', 'dashboard');
 
   const [search, setSearch] = useState('');
   const [selectedTag, setSelectedTag] = useState<string>('all');
@@ -128,9 +131,16 @@ export const CustomersPage: React.FC = () => {
       {/* Title & Actions */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
-            Customer Directory & CRM
-          </h1>
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
+              Customer Directory & CRM
+            </h1>
+            <TrialStatusBadge
+              serviceId="dashboard_business"
+              serviceName="Dashboard Business Tier"
+              category="dashboard"
+            />
+          </div>
           <p className="text-xs text-slate-500 mt-1">
             Track shopper lifetime spend, order history, and notes to drive repeat purchases.
           </p>
@@ -138,12 +148,33 @@ export const CustomersPage: React.FC = () => {
 
         <button
           onClick={handleOpenAdd}
-          className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-xs transition-colors self-start sm:self-auto"
+          disabled={!serviceAccess.hasAccess}
+          className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-semibold shadow-xs transition-colors self-start sm:self-auto cursor-pointer"
         >
           <Plus className="w-3.5 h-3.5" />
           <span>Add New Customer</span>
         </button>
       </div>
+
+      {!serviceAccess.hasAccess ? (
+        <TrialGateBanner
+          serviceId="dashboard_business"
+          serviceName="Dashboard Business Tier"
+          category="dashboard"
+          serviceDescription="Maintain a unified customer CRM directory with lifetime spend metrics, VIP segmentation tags, and internal staff notes using a 7-day free Dashboard trial."
+          features={[
+            'Complete Customer Contact & City Directory',
+            'Lifetime Spend & Repeat Order Tracking',
+            'VIP & Custom Segment Tagging',
+            'Internal CRM Follow-Up Notes',
+            'Instant Phone, Email & City Search',
+            'Synced Buyer Records from Orders',
+          ]}
+          subscribePath="/dashboard/billing"
+          subscribePriceLabel="From ৳299/mo"
+        />
+      ) : (
+        <>
 
       {/* Search and Filters */}
       <div className="p-4 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col md:flex-row items-center justify-between gap-3 text-xs">
@@ -335,6 +366,8 @@ export const CustomersPage: React.FC = () => {
             </button>
           </div>
         </div>
+      )}
+        </>
       )}
 
       {/* Add / Edit Customer Modal */}

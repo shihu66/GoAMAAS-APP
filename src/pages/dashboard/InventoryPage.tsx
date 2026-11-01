@@ -16,9 +16,12 @@ import {
   Package,
 } from 'lucide-react';
 import { Modal } from '../../components/ui/Modal';
+import { TrialStatusBadge } from '../../components/ui/TrialStatusBadge';
+import { TrialGateBanner } from '../../components/ui/TrialGateBanner';
 
 export const InventoryPage: React.FC = () => {
-  const { products, inventoryLogs, adjustProductStock } = useApp();
+  const { products, inventoryLogs, adjustProductStock, getServiceAccess } = useApp();
+  const serviceAccess = getServiceAccess('dashboard_business', 'Dashboard Business Tier', 'dashboard');
 
   const [search, setSearch] = useState('');
   const [activeTab, setActiveTab] = useState<'inventory' | 'history'>('inventory');
@@ -69,9 +72,16 @@ export const InventoryPage: React.FC = () => {
       {/* Title & Context */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
-            Inventory & Warehouse Stock Ledger
-          </h1>
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
+              Inventory & Warehouse Stock Ledger
+            </h1>
+            <TrialStatusBadge
+              serviceId="dashboard_business"
+              serviceName="Dashboard Business Tier"
+              category="dashboard"
+            />
+          </div>
           <p className="text-xs text-slate-500 mt-1">
             Real-time stock tracking, automatic reorder alerts, and movement audit logs.
           </p>
@@ -103,6 +113,26 @@ export const InventoryPage: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {!serviceAccess.hasAccess ? (
+        <TrialGateBanner
+          serviceId="dashboard_business"
+          serviceName="Dashboard Business Tier"
+          category="dashboard"
+          serviceDescription="Prevent overselling with real-time SKU stock balances, low-stock reorder alerts, wholesale asset valuation, and timestamped movement audit logs using a 7-day free Dashboard trial."
+          features={[
+            'Real-Time Warehouse SKU Stock Balances',
+            'Configurable Low-Stock & Out-of-Stock Warnings',
+            'Wholesale Inventory Asset Cost Valuation',
+            'Instant Consignment Restock & Deduction Controls',
+            'Timestamped Stock Movement Audit History',
+            'Automatic Deduction on Validated Orders',
+          ]}
+          subscribePath="/dashboard/billing"
+          subscribePriceLabel="From ৳299/mo"
+        />
+      ) : (
+        <>
 
       {/* KPI Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -372,6 +402,8 @@ export const InventoryPage: React.FC = () => {
             </div>
           </div>
         )
+      )}
+        </>
       )}
 
       {/* Stock Adjustment Modal */}

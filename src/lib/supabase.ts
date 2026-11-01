@@ -269,80 +269,203 @@ export interface UserProfileRecord {
   updated_at?: string;
 }
 
+export const ADMIN_OAUTH_INTENT_KEY = 'goamaas_admin_oauth_intent_v1';
+const ADMIN_OAUTH_INTENT_MAX_AGE_MS = 10 * 60 * 1000;
+
+/**
+ * Records non-authoritative post-OAuth destination for /admin sign-in so redirectTo
+ * can remain a clean exact URL (/auth/callback) without query string mismatch in Supabase GoTrue.
+ * Authorization is NEVER derived from this storage value.
+ */
+export function setAdminOAuthIntent(nextPath = '/admin'): void {
+  if (typeof window === 'undefined') return;
+  const safeNext =
+    nextPath.startsWith('/admin') && nextPath !== '/admin/login' ? nextPath : '/admin';
+  try {
+    window.sessionStorage.setItem(
+      ADMIN_OAUTH_INTENT_KEY,
+      JSON.stringify({ nextPath: safeNext, createdAt: Date.now() })
+    );
+  } catch {
+    // Ignore storage exceptions
+  }
+}
+
+export function peekAdminOAuthIntent(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.sessionStorage.getItem(ADMIN_OAUTH_INTENT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { nextPath?: string; createdAt?: number };
+    if (
+      typeof parsed.createdAt !== 'number' ||
+      Date.now() - parsed.createdAt > ADMIN_OAUTH_INTENT_MAX_AGE_MS
+    ) {
+      window.sessionStorage.removeItem(ADMIN_OAUTH_INTENT_KEY);
+      return null;
+    }
+    const candidate = (parsed.nextPath || '').trim();
+    if (candidate === '/admin' || (candidate.startsWith('/admin/') && candidate !== '/admin/login')) {
+      return candidate;
+    }
+    return '/admin';
+  } catch {
+    return null;
+  }
+}
+
+export function consumeAdminOAuthIntent(): string | null {
+  const target = peekAdminOAuthIntent();
+  if (typeof window !== 'undefined') {
+    try {
+      window.sessionStorage.removeItem(ADMIN_OAUTH_INTENT_KEY);
+    } catch {
+      // Ignore
+    }
+  }
+  return target;
+}
+
+/**
+ * Read-only preflight check against Supabase Auth /auth/v1/settings to verify whether
+ * the Google OAuth provider is enabled before navigating the browser away to raw JSON 400.
+ */
+export async function checkGoogleOAuthProviderStatus(): Promise<{
+  enabled: boolean;
+  checked: boolean;
+  errorMessage?: string;
+}> {
+  if (!isSupabaseConfigured || !supabaseUrl || !supabaseAnonKey) {
+    return {
+      enabled: false,
+      checked: false,
+      errorMessage: 'Supabase authentication credentials are not configured.',
+    };
+  }
+
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timeoutId = controller ? setTimeout(() => controller.abort(), 3500) : null;
+
+  try {
+    const response = await fetch(`${supabaseUrl.replace(/\/$/, '')}/auth/v1/settings`, {
+      method: 'GET',
+      headers: {
+        apikey: supabaseAnonKey,
+      },
+      signal: controller?.signal,
+    });
+
+    if (!response.ok) {
+      return { enabled: true, checked: false };
+    }
+
+    const settings = (await response.json()) as {
+      external?: Record<string, boolean>;
+    };
+
+    if (settings?.external && settings.external.google === false) {
+      return {
+        enabled: false,
+        checked: true,
+        errorMessage:
+          'Google Sign-In is not yet enabled on the Supabase project. Enable Google under Supabase Dashboard → Authentication → Providers → Google and add the authorized callback URL.',
+      };
+    }
+
+    return { enabled: true, checked: true };
+  } catch {
+    // Do not block sign-in on transient preflight fetch failures
+    return { enabled: true, checked: false };
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+export interface SignInWithGoogleOptions {
+  isAdminFlow?: boolean;
+  nextPath?: string;
+  loginHint?: string;
+  skipWindowRedirect?: boolean;
+}
+
 /**
  * Initiates the real Google OAuth sign-in flow through Supabase Auth.
  * Never simulates authentication.
  */
-export async function signInWithGoogle(customRedirectTo?: string): Promise<{ data: { provider: string; url: string } | null; error: Error | null }> {
+export async function signInWithGoogle(
+  customRedirectTo?: string,
+  options?: SignInWithGoogleOptions
+): Promise<{ data: { provider: string; url: string } | null; error: Error | null }> {
   if (!isSupabaseConfigured || !supabase) {
     const status = getSupabaseConfigStatus();
     return {
       data: null,
       error: new Error(
-        `Supabase is not configured. Missing environment variables: ${status.missingVariables.join(', ')}. Please configure them in .env.local to enable Google authentication.`
+        `Supabase is not configured. Missing environment variables: ${status.missingVariables.join(', ')}.`
       ),
     };
   }
 
   try {
-    // Determine the authoritative redirect URL:
-    // If running in production on app.amaas.xyz (or any non-preview domain), ensure we use that origin.
-    const isProductionHost = typeof window !== 'undefined' && (
-      window.location.hostname === 'app.amaas.xyz' ||
-      window.location.hostname.endsWith('.amaas.xyz')
-    );
-    const origin = isProductionHost ? 'https://app.amaas.xyz' : window.location.origin;
+    // Preflight check so disabled provider in Supabase Auth returns an actionable UI error instead of raw JSON 400
+    const providerStatus = await checkGoogleOAuthProviderStatus();
+    if (!providerStatus.enabled) {
+      return {
+        data: null,
+        error: new Error(
+          providerStatus.errorMessage ||
+            'Google Sign-In provider is currently disabled in Supabase Authentication settings.'
+        ),
+      };
+    }
+
+    // Always preserve current window.location.origin so PKCE code_verifier in localStorage
+    // and the /auth/callback landing page share the exact same origin.
+    const origin =
+      typeof window !== 'undefined' && window.location.origin
+        ? window.location.origin
+        : 'https://app.amaas.xyz';
     const redirectTo = customRedirectTo || `${origin}/auth/callback`;
 
-    // Diagnostic logging without sensitive credentials or tokens
-    console.info('[GoAMAAS Auth] Initiating Google OAuth flow', {
-      origin: window.location.origin,
-      hostname: window.location.hostname,
-      isProductionHost,
-      resolvedRedirectTo: redirectTo,
-    });
+    if (options?.isAdminFlow) {
+      setAdminOAuthIntent(options.nextPath || '/admin');
+    }
+
+    const queryParams: Record<string, string> = options?.isAdminFlow
+      ? {
+          prompt: 'select_account',
+          ...(options.loginHint ? { login_hint: options.loginHint.trim().toLowerCase() } : {}),
+        }
+      : {
+          access_type: 'offline',
+          prompt: 'select_account',
+        };
 
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
         redirectTo,
-        skipBrowserRedirect: true, // We inspect and handle navigation explicitly
-        queryParams: {
-          access_type: 'offline',
-          prompt: 'consent',
-        },
+        skipBrowserRedirect: true,
+        queryParams,
       },
     });
 
     if (error) {
-      console.error('[GoAMAAS Auth] signInWithOAuth returned error:', error.message);
       return { data: null, error };
     }
 
-    if (data?.url) {
-      let targetAuthHost = 'unknown';
-      try {
-        const parsedUrl = new URL(data.url);
-        targetAuthHost = parsedUrl.host;
-      } catch {}
-
-      console.info('[GoAMAAS Auth] Navigating directly to Supabase Auth provider URL', {
-        currentHostname: window.location.hostname,
-        targetAuthHost,
-        resolvedRedirectTo: redirectTo,
-      });
-
-      // Explicitly assign top-level window location to avoid any iframe/bridge interception
-      if (typeof window !== 'undefined') {
-        window.location.assign(data.url);
-      }
+    if (data?.url && !options?.skipWindowRedirect && typeof window !== 'undefined') {
+      window.location.assign(data.url);
     }
 
     return { data, error: null };
   } catch (err: unknown) {
     return {
       data: null,
-      error: err instanceof Error ? err : new Error('An unexpected error occurred during Google sign-in'),
+      error:
+        err instanceof Error
+          ? err
+          : new Error('An unexpected error occurred during Google sign-in.'),
     };
   }
 }

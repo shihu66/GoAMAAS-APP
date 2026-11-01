@@ -85,6 +85,17 @@ export default defineConfig(({ mode }) => {
           res.end(JSON.stringify({ error: 'Not found' }));
           return;
         }
+        if (pathname === '/admin' || pathname.startsWith('/admin/')) {
+          res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet');
+          res.setHeader('Cache-Control', 'no-store, no-cache, max-age=0, must-revalidate');
+        } else if (pathname === '/admin-sw.js') {
+          res.setHeader('Service-Worker-Allowed', '/admin');
+          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+        } else if (pathname === '/admin-manifest.webmanifest') {
+          res.setHeader('Content-Type', 'application/manifest+json');
+          res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+        }
         return next();
       });
     },

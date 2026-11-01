@@ -1,4 +1,6 @@
-import { supabase, isSupabaseConfigured, getUserProfile } from './supabase';
+import { supabase, isSupabaseConfigured, getUserProfile, UserProfileRecord } from './supabase';
+
+export const AUTHORIZED_ADMIN_EMAIL = 'official.amaas.dev@gmail.com';
 
 export type AdminAuthStatus =
   | 'authorized'
@@ -7,6 +9,11 @@ export type AdminAuthStatus =
   | 'forbidden'
   | 'unconfigured'
   | 'network_error';
+
+export type AdminForbiddenReason =
+  | 'unauthorized_email'
+  | 'unverified_email'
+  | 'missing_admin_role';
 
 export interface VerifiedAdminFactor {
   id: string;
@@ -36,7 +43,24 @@ export interface AdminVerificationResult {
   status: AdminAuthStatus;
   admin: VerifiedAdminIdentity | null;
   mfa: AdminMfaState;
+  forbiddenReason?: AdminForbiddenReason;
   message?: string;
+}
+
+export interface AdminAuthUserLike {
+  id: string;
+  email?: string | null;
+  email_confirmed_at?: string | null;
+  confirmed_at?: string | null;
+  user_metadata?: Record<string, unknown>;
+}
+
+export interface AdminVerificationDependencies {
+  isConfigured?: boolean;
+  getAuthUser?: () => Promise<{ user: AdminAuthUserLike | null; error: unknown }>;
+  checkIsAdminRpc?: () => Promise<{ data: boolean | null; error: unknown }>;
+  fetchProfile?: (userId: string) => Promise<{ profile: UserProfileRecord | null; error: unknown }>;
+  fetchMfaState?: () => Promise<AdminMfaState>;
 }
 
 export interface AdminSessionAuditEntry {
@@ -51,7 +75,28 @@ export interface AdminSessionAuditEntry {
 }
 
 export const UNIFORM_ADMIN_AUTH_ERROR =
-  'Invalid credentials or unauthorized administrator account.';
+  'Access denied. You are not authorized to access GoAMAAS Admin.';
+
+export function normalizeAdminEmail(email: string | null | undefined): string {
+  return (email ?? '').trim().toLowerCase();
+}
+
+export function isAuthorizedAdminEmail(email: string | null | undefined): boolean {
+  return normalizeAdminEmail(email) === AUTHORIZED_ADMIN_EMAIL;
+}
+
+export function isAuthUserEmailVerified(user: AdminAuthUserLike | null | undefined): boolean {
+  if (!user) return false;
+  const meta = user.user_metadata || {};
+  if (meta.email_verified === false) {
+    return false;
+  }
+  return Boolean(
+    user.email_confirmed_at ||
+      user.confirmed_at ||
+      meta.email_verified === true
+  );
+}
 
 const RATE_LIMIT_STORAGE_KEY = 'goamaas_admin_auth_guard_v1';
 const MAX_ATTEMPTS_PER_WINDOW = 5;
@@ -64,7 +109,7 @@ interface RateLimitRecord {
   lockoutCount: number;
 }
 
-const DEFAULT_MFA_STATE: AdminMfaState = {
+export const DEFAULT_MFA_STATE: AdminMfaState = {
   currentLevel: null,
   nextLevel: null,
   verifiedTotpFactors: [],
@@ -318,13 +363,17 @@ export async function inspectAdminMfaState(): Promise<AdminMfaState> {
 
 /**
  * Verifies administrator authorization strictly against Supabase Auth server + PostgreSQL:
- * 1. Fails closed when Supabase is unconfigured (never trusts localStorage or demo role state).
+ * 1. Fails closed when Supabase is unconfigured (never trusts localStorage, URL params, or demo role state).
  * 2. Calls supabase.auth.getUser() to validate the JWT directly with Supabase Auth.
- * 3. Calls PostgreSQL RPC public.is_admin() AND checks public.profiles.role === 'admin'.
- * 4. Enforces AAL2 MFA step-up when a verified TOTP factor is enrolled on the admin account.
+ * 3. Strictly enforces normalized email === 'official.amaas.dev@gmail.com' AND verified email status.
+ * 4. Calls PostgreSQL RPC public.is_admin() AND checks public.profiles.role === 'admin' (email match NEVER auto-promotes).
+ * 5. Enforces AAL2 MFA step-up when a verified TOTP factor is enrolled on the admin account.
  */
-export async function verifyServerAdminSession(): Promise<AdminVerificationResult> {
-  if (!isSupabaseConfigured || !supabase) {
+export async function verifyServerAdminSession(
+  deps?: AdminVerificationDependencies
+): Promise<AdminVerificationResult> {
+  const configured = deps?.isConfigured ?? Boolean(isSupabaseConfigured && supabase);
+  if (!configured) {
     return {
       status: 'unconfigured',
       admin: null,
@@ -334,11 +383,27 @@ export async function verifyServerAdminSession(): Promise<AdminVerificationResul
     };
   }
 
+  const getAuthUser =
+    deps?.getAuthUser ||
+    (async () => {
+      if (!supabase) return { user: null, error: new Error('Supabase client unavailable') };
+      const { data, error } = await supabase.auth.getUser();
+      return { user: data.user as AdminAuthUserLike | null, error };
+    });
+
+  const checkIsAdminRpc =
+    deps?.checkIsAdminRpc ||
+    (async () => {
+      if (!supabase) return { data: false, error: new Error('Supabase client unavailable') };
+      const res = await supabase.rpc('is_admin');
+      return { data: res.data === true, error: res.error };
+    });
+
+  const fetchProfile = deps?.fetchProfile || getUserProfile;
+  const fetchMfaState = deps?.fetchMfaState || inspectAdminMfaState;
+
   try {
-    const {
-      data: { user: authUser },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const { user: authUser, error: authError } = await getAuthUser();
 
     if (authError) {
       if (isLikelyNetworkFailure(authError)) {
@@ -365,10 +430,35 @@ export async function verifyServerAdminSession(): Promise<AdminVerificationResul
       };
     }
 
+    const normalizedEmail = normalizeAdminEmail(authUser.email);
+
+    // 1. Strict Single-Account Email Allowlist Check (trimmed & lowercased)
+    if (!isAuthorizedAdminEmail(normalizedEmail)) {
+      return {
+        status: 'forbidden',
+        admin: null,
+        mfa: DEFAULT_MFA_STATE,
+        forbiddenReason: 'unauthorized_email',
+        message: UNIFORM_ADMIN_AUTH_ERROR,
+      };
+    }
+
+    // 2. Mandatory Verified Email Check
+    if (!isAuthUserEmailVerified(authUser)) {
+      return {
+        status: 'forbidden',
+        admin: null,
+        mfa: DEFAULT_MFA_STATE,
+        forbiddenReason: 'unverified_email',
+        message: UNIFORM_ADMIN_AUTH_ERROR,
+      };
+    }
+
+    // 3. Authoritative Server/Database Role Verification (is_admin() + profiles.role === 'admin')
     const [rpcRes, profileRes, mfaState] = await Promise.all([
-      supabase.rpc('is_admin'),
-      getUserProfile(authUser.id),
-      inspectAdminMfaState(),
+      checkIsAdminRpc(),
+      fetchProfile(authUser.id),
+      fetchMfaState(),
     ]);
 
     if (rpcRes.error && isLikelyNetworkFailure(rpcRes.error)) {
@@ -382,28 +472,31 @@ export async function verifyServerAdminSession(): Promise<AdminVerificationResul
 
     const isRpcAdmin = rpcRes.data === true && !rpcRes.error;
     const isProfileAdmin = profileRes.profile?.role === 'admin' && !profileRes.error;
+    const profileEmailMatches =
+      !profileRes.profile?.email || isAuthorizedAdminEmail(profileRes.profile.email);
 
-    if (!isRpcAdmin || !isProfileAdmin) {
+    if (!isRpcAdmin || !isProfileAdmin || !profileEmailMatches) {
       return {
         status: 'forbidden',
         admin: null,
         mfa: mfaState,
-        message: 'Access denied: Your account is not authorized to access GoAMAAS Admin.',
+        forbiddenReason: 'missing_admin_role',
+        message: UNIFORM_ADMIN_AUTH_ERROR,
       };
     }
 
+    const fullNameMeta = authUser.user_metadata?.full_name;
     const verifiedAdmin: VerifiedAdminIdentity = {
       id: authUser.id,
-      email: authUser.email || profileRes.profile?.email || '',
+      email: AUTHORIZED_ADMIN_EMAIL,
       name:
         profileRes.profile?.full_name ||
-        authUser.user_metadata?.full_name ||
-        authUser.email?.split('@')[0] ||
-        'Administrator',
+        (typeof fullNameMeta === 'string' && fullNameMeta.trim() ? fullNameMeta.trim() : '') ||
+        'AMAAS Administrator',
       role: 'admin',
     };
 
-    // Enforce mandatory TOTP step-up whenever the admin has an enrolled verified TOTP factor
+    // 4. Enforce mandatory TOTP step-up whenever the admin has an enrolled verified TOTP factor
     if (
       mfaState.isMfaEnrolled &&
       mfaState.nextLevel === 'aal2' &&
@@ -468,12 +561,16 @@ export async function revalidateAdminBeforeAction(params: {
 
   const verification = await verifyServerAdminSession();
 
-  if (verification.status !== 'authorized' || !verification.admin) {
+  if (
+    verification.status !== 'authorized' ||
+    !verification.admin ||
+    !isAuthorizedAdminEmail(verification.admin.email)
+  ) {
     const errorMessage =
       verification.status === 'mfa_required'
         ? 'Multi-factor step-up verification is required before executing this action.'
         : verification.status === 'forbidden'
-        ? 'Access denied: Administrator authorization was revoked.'
+        ? UNIFORM_ADMIN_AUTH_ERROR
         : verification.status === 'network_error'
         ? 'Unable to verify your administrator session due to a network error. Please retry.'
         : 'Your administrator session has expired. Please sign in again.';
