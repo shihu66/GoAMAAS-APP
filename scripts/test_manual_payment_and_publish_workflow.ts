@@ -1,8 +1,10 @@
 import { PGlite } from '@electric-sql/pglite';
 import * as fs from 'fs';
+import resolveTenantHandler from '../api/resolve-tenant';
 import {
   ApproveAndPublishAdapters,
   executeApproveAndPublishWorkflow,
+  getPublicWebsiteHref,
   hasDuplicateActiveTransactionReference,
   isWebsitePaymentService,
   isWebsiteTrulyLive,
@@ -1089,6 +1091,190 @@ async function runManualPaymentAndPublishSuite() {
       throw new Error('Expected recoverystore.amaas.xyz to resolve publicly after Retry Publish');
     }
   });
+
+  // =========================================================================
+  // TEST 8: Subdomain Resolver API (/api/resolve-tenant), sb_publishable_ Key
+  //         Compatibility, Uncached 404 Gate, and Live Subdomain URL Routing
+  // =========================================================================
+  await test(
+    '8. /api/resolve-tenant blocks unpaid website with no-store 404, supports sb_publishable_ & JWT keys, and resolves live subdomain immediately after approval',
+    async (db) => {
+      // Verify getPublicWebsiteHref canonical link behavior
+      const prodHref = getPublicWebsiteHref(
+        { subdomain: 'khulnamart', fullDomainUrl: 'khulnamart.amaas.xyz' },
+        'app.amaas.xyz'
+      );
+      if (prodHref !== 'https://khulnamart.amaas.xyz') {
+        throw new Error(`Expected production href https://khulnamart.amaas.xyz, got ${prodHref}`);
+      }
+      const previewHref = getPublicWebsiteHref(
+        { subdomain: 'khulnamart', fullDomainUrl: 'khulnamart.amaas.xyz' },
+        'localhost'
+      );
+      if (previewHref !== '/sites/khulnamart') {
+        throw new Error(`Expected preview href /sites/khulnamart, got ${previewHref}`);
+      }
+
+      const { merchantA, adminUser, storeA } = await setupFixture(db);
+      const targetSite = await createMerchantWebsite(
+        db,
+        merchantA,
+        'merchant.a@test.com',
+        storeA,
+        'khulnamart',
+        'Khulna Mart Official'
+      );
+      await createMerchantWebsite(
+        db,
+        merchantA,
+        'merchant.a@test.com',
+        storeA,
+        'khulnadraft',
+        'Khulna Unpaid Draft'
+      );
+
+      // Admin enables Nagad Personal (+8801822332020) via secure 8-arg RPC
+      await asUser(db, adminUser, 'admin@amaas.xyz', 'authenticated');
+      await db.query(`
+        SELECT public.admin_update_payment_gateway_config(
+          'nagad', true, '+8801822332020', 'Personal', '', '', '', 'Send Money to Nagad Personal'
+        );
+      `);
+
+      // Client submits manual Nagad payment request
+      await asUser(db, merchantA, 'merchant.a@test.com', 'authenticated');
+      const reqRow = (
+        await db.query<RawPaymentRequestRow>(
+          `INSERT INTO public.payment_requests (
+            user_id, store_id, customer_name, customer_phone, customer_email,
+            service_type, service_id, service_name, plan_tier, amount, currency,
+            payment_method, transaction_id, sender_number, status
+          ) VALUES ($1::uuid, $2::uuid, 'Rahim', '+8801711000111', 'merchant.a@test.com',
+            'website_subscription', $3, 'GoAMAAS Website (khulnamart.amaas.xyz)', 'GoAMAAS Website', 600, '৳',
+            'Nagad', 'NGD600LIVE99', '01711000111', 'pending') RETURNING *;`,
+          [merchantA, storeA, targetSite.id]
+        )
+      ).rows[0];
+      const pendingReq = mapRowToPaymentRequest(reqRow);
+
+      const originalFetch = globalThis.fetch;
+      const prevUrl = process.env.VITE_SUPABASE_URL;
+      const prevKey = process.env.VITE_SUPABASE_ANON_KEY;
+      const capturedHeaders: Record<string, string>[] = [];
+
+      const invokeResolver = async (host: string, urlPath: string) => {
+        const headers: Record<string, string> = {};
+        let statusCode = 200;
+        let bodyText = '';
+        const mockReq: any = {
+          method: 'GET',
+          url: urlPath,
+          headers: { host },
+        };
+        const mockRes: any = {
+          get statusCode() {
+            return statusCode;
+          },
+          set statusCode(code: number) {
+            statusCode = code;
+          },
+          setHeader(name: string, val: string) {
+            headers[name.toLowerCase()] = String(val);
+          },
+          end(chunk?: string) {
+            if (chunk) bodyText += chunk;
+          },
+        };
+        await resolveTenantHandler(mockReq, mockRes);
+        return {
+          statusCode,
+          headers,
+          json: bodyText ? JSON.parse(bodyText) : null,
+        };
+      };
+
+      try {
+        process.env.VITE_SUPABASE_URL = 'https://testprojref.supabase.co';
+        process.env.VITE_SUPABASE_ANON_KEY = 'sb_publishable_test_public_key_12345';
+
+        globalThis.fetch = (async (_input: any, init?: RequestInit) => {
+          const hdrs = (init?.headers || {}) as Record<string, string>;
+          capturedHeaders.push({ ...hdrs });
+          const parsedBody = init?.body ? JSON.parse(String(init.body)) : {};
+          await asUser(db, null, null, 'anon');
+          const rpcRes = await db.query<{ res: unknown }>(
+            `SELECT public.get_published_website_by_subdomain($1) AS res;`,
+            [parsedBody.p_subdomain]
+          );
+          return new Response(JSON.stringify(rpcRes.rows[0]?.res ?? { found: false }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }) as typeof fetch;
+
+        // 1. BEFORE admin approval: khulnamart.amaas.xyz MUST return 404 with no-store Cache-Control
+        const preApprovalResp = await invokeResolver('khulnamart.amaas.xyz', '/api/resolve-tenant');
+        if (preApprovalResp.statusCode !== 404 || preApprovalResp.json?.found !== false) {
+          throw new Error(`Expected unpaid subdomain to return 404 before approval, got ${JSON.stringify(preApprovalResp)}`);
+        }
+        if (!(preApprovalResp.headers['cache-control'] || '').includes('no-store')) {
+          throw new Error(`Expected 404 Cache-Control to include no-store, got "${preApprovalResp.headers['cache-control']}"`);
+        }
+        if ('Authorization' in capturedHeaders[0] || 'authorization' in capturedHeaders[0]) {
+          throw new Error('Expected sb_publishable_ key NOT to send Authorization Bearer header to PostgREST');
+        }
+
+        // 2. Admin clicks Approve -> payment marked paid + exact website published
+        const adapters = createDbAdapters(db, adminUser);
+        const approvalRes = await executeApproveAndPublishWorkflow({
+          mode: 'approve_and_publish',
+          request: pendingReq,
+          notes: 'Verified Nagad TrxID NGD600LIVE99',
+          callerRole: 'admin',
+          callerUserId: adminUser,
+          adapters,
+        });
+        if (!approvalRes.success || !approvalRes.websitePublished || approvalRes.code !== 'APPROVED_AND_PUBLISHED') {
+          throw new Error(`Expected approval & publish to succeed, got ${JSON.stringify(approvalRes)}`);
+        }
+
+        // 3. IMMEDIATELY AFTER approval: khulnamart.amaas.xyz resolves 200 with exact client website!
+        const postApprovalResp = await invokeResolver('khulnamart.amaas.xyz', '/api/resolve-tenant');
+        if (
+          postApprovalResp.statusCode !== 200 ||
+          postApprovalResp.json?.found !== true ||
+          postApprovalResp.json?.site?.subdomain !== 'khulnamart' ||
+          postApprovalResp.json?.site?.businessName !== 'Khulna Mart Official'
+        ) {
+          throw new Error(`Expected approved subdomain to resolve 200 immediately, got ${JSON.stringify(postApprovalResp)}`);
+        }
+
+        // 4. Sibling unpaid website khulnadraft.amaas.xyz MUST STILL return 404
+        const siblingResp = await invokeResolver('khulnadraft.amaas.xyz', '/api/resolve-tenant');
+        if (siblingResp.statusCode !== 404 || siblingResp.json?.found !== false) {
+          throw new Error(`Expected unpaid sibling website to remain 404, got ${JSON.stringify(siblingResp)}`);
+        }
+
+        // 5. Legacy anon JWT format also works and includes Authorization: Bearer
+        const jwtPayload = Buffer.from(JSON.stringify({ role: 'anon', ref: 'testprojref' })).toString('base64url');
+        process.env.VITE_SUPABASE_ANON_KEY = `eyJhbGciOiJIUzI1NiJ9.${jwtPayload}.sig`;
+        const jwtResp = await invokeResolver('app.amaas.xyz', '/api/resolve-tenant?subdomain=khulnamart');
+        if (jwtResp.statusCode !== 200 || jwtResp.json?.found !== true) {
+          throw new Error(`Expected legacy anon JWT lookup to succeed, got ${JSON.stringify(jwtResp)}`);
+        }
+        const lastHdrs = capturedHeaders[capturedHeaders.length - 1];
+        if (!lastHdrs.Authorization?.startsWith('Bearer ')) {
+          throw new Error('Expected legacy anon JWT to include Authorization: Bearer header');
+        }
+      } finally {
+        globalThis.fetch = originalFetch;
+        if (prevUrl === undefined) delete process.env.VITE_SUPABASE_URL;
+        else process.env.VITE_SUPABASE_URL = prevUrl;
+        if (prevKey === undefined) delete process.env.VITE_SUPABASE_ANON_KEY;
+        else process.env.VITE_SUPABASE_ANON_KEY = prevKey;
+      }
+    }
+  );
 
   console.log(`\n=== SUMMARY: ${passed}/${total} Manual Payment & Instant Website Publishing E2E Tests Passed ===`);
   if (passed !== total) {

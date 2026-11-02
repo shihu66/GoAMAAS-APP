@@ -19,6 +19,7 @@ import {
   RefreshCw,
   XCircle,
   Truck,
+  ExternalLink,
 } from 'lucide-react';
 import {
   FREE_MERCHANT_DASHBOARD_PLAN,
@@ -29,7 +30,7 @@ import {
   resolveCatalogPlanState,
 } from '../../data/pricingConfig';
 import { isSupabaseConfigured } from '../../lib/supabase';
-import { isWebsiteTrulyLive } from '../../lib/paymentWorkflow';
+import { getPublicWebsiteHref, isWebsiteTrulyLive } from '../../lib/paymentWorkflow';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { TrialStatusBadge } from '../../components/ui/TrialStatusBadge';
@@ -70,6 +71,15 @@ export const BillingPage: React.FC = () => {
   const myPaymentRequests = paymentRequests
     .filter((r) => !user?.id || r.userId === user.id)
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  const myWebsitePaymentRequests = myWebsite
+    ? myPaymentRequests.filter(
+        (r) =>
+          (r.serviceType === 'website_subscription' || r.serviceType === 'website_package') &&
+          r.serviceId.trim().toLowerCase() === myWebsite.id.trim().toLowerCase()
+      )
+    : [];
+  const hasPendingMyWebsitePayment = myWebsitePaymentRequests.some((r) => r.status === 'pending');
+  const latestMyWebsitePayment = myWebsitePaymentRequests[0];
 
   // Confirmation dialogs & verified payment modal payload
   const [selectedAutoPackage, setSelectedAutoPackage] = useState<AutomationPackageConfig | null>(null);
@@ -655,17 +665,23 @@ export const BillingPage: React.FC = () => {
             <div className="p-6 rounded-2xl bg-gradient-to-r from-blue-950 via-slate-900 to-slate-900 border-2 border-blue-600 text-white shadow-xl space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span
                       className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
                         myWebsite.paymentStatus === 'paid'
                           ? 'bg-blue-500/20 text-blue-300 border border-blue-400/30'
+                          : latestMyWebsitePayment?.status === 'rejected'
+                          ? 'bg-rose-500/20 text-rose-300 border border-rose-400/30'
                           : 'bg-amber-500/20 text-amber-300 border border-amber-400/30'
                       }`}
                     >
                       {myWebsite.paymentStatus === 'paid'
                         ? 'Active Website Subscription'
-                        : 'Pending Payment Verification'}
+                        : hasPendingMyWebsitePayment
+                        ? 'Pending Payment Verification'
+                        : latestMyWebsitePayment?.status === 'rejected'
+                        ? 'Payment Rejected · Resubmit'
+                        : 'Awaiting Subscription Payment'}
                     </span>
                     <span
                       className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
@@ -678,7 +694,9 @@ export const BillingPage: React.FC = () => {
                         ? 'Live'
                         : myWebsite.paymentStatus === 'paid'
                         ? 'Paid · Unpublished'
-                        : 'Pending Verification'}
+                        : hasPendingMyWebsitePayment
+                        ? 'Pending Verification'
+                        : 'Offline Draft'}
                     </span>
                   </div>
                   <h3 className="text-xl font-bold text-white mt-1">
@@ -740,9 +758,22 @@ export const BillingPage: React.FC = () => {
                   <span>
                     {myWebsite.paymentStatus === 'paid'
                       ? `Renew +30 Days (৳${(myWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly).toLocaleString()})`
+                      : hasPendingMyWebsitePayment
+                      ? 'View Pending Verification'
                       : `Submit Payment (৳${(myWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly).toLocaleString()})`}
                   </span>
                 </button>
+                {isWebsiteTrulyLive(myWebsite) && (
+                  <a
+                    href={getPublicWebsiteHref(myWebsite)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="min-h-[44px] px-4 py-2 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/40 text-emerald-200 font-bold text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>Open Live Website</span>
+                  </a>
+                )}
                 <button
                   type="button"
                   onClick={() => navigate('/dashboard/subscribed-website')}

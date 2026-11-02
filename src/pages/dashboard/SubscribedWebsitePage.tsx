@@ -57,7 +57,7 @@ import {
   XCircle,
   RefreshCw,
 } from 'lucide-react';
-import { isWebsiteTrulyLive } from '../../lib/paymentWorkflow';
+import { getPublicWebsiteHref, isWebsiteTrulyLive } from '../../lib/paymentWorkflow';
 
 function createInitialSections(site: SubscribedWebsite, draft?: SubscribedWebsite['draftConfig']): WebsiteSectionConfig[] {
   const sourceSections = draft?.sections ?? site.sections;
@@ -552,8 +552,21 @@ export const SubscribedWebsitePage: React.FC = () => {
       await saveWebsiteDraft(activeWebsite.id, buildEditablePayload());
       setIsSavingDraft(false);
       setIsDirty(false);
+      const hasPendingReq = paymentRequests.some(
+        (r) =>
+          (r.serviceType === 'website_subscription' || r.serviceType === 'website_package') &&
+          r.serviceId.trim().toLowerCase() === activeWebsite.id.trim().toLowerCase() &&
+          r.status === 'pending'
+      );
+      if (hasPendingReq && !isPaid) {
+        showToast(
+          'Draft saved! Your submitted payment is awaiting admin verification — your website will publish automatically once approved.',
+          'info'
+        );
+        return;
+      }
       showToast(
-        'Draft saved! Complete your ৳600 subscription payment below — your website publishes automatically once verified.',
+        'Draft saved! Complete your subscription payment below — your website publishes automatically once verified.',
         'info'
       );
       setIsPaymentModalOpen(true);
@@ -1099,16 +1112,20 @@ export const SubscribedWebsitePage: React.FC = () => {
                 className={
                   isLive
                     ? 'text-emerald-600 dark:text-emerald-400 font-semibold'
+                    : latestWebsitePayment?.status === 'rejected' && !isPaid
+                    ? 'text-rose-600 dark:text-rose-400 font-semibold'
                     : 'text-amber-600 dark:text-amber-400 font-semibold'
                 }
               >
                 {isLive
                   ? 'Live & Public'
-                  : activeWebsite.paymentStatus === 'pending_review'
+                  : hasPendingWebsitePayment || activeWebsite.paymentStatus === 'pending_review'
                   ? 'Payment Under Admin Verification'
+                  : latestWebsitePayment?.status === 'rejected' && !isPaid
+                  ? 'Payment Rejected · Resubmit Required'
                   : isPaid
                   ? 'Paid · Unpublished Draft'
-                  : 'Draft · Awaiting ৳600 Payment'}
+                  : `Draft · Awaiting ৳${activeWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly} Payment`}
               </span>
               <span aria-hidden="true">·</span>
               <span>
@@ -1147,7 +1164,7 @@ export const SubscribedWebsitePage: React.FC = () => {
 
               {isLive ? (
                 <a
-                  href={`/sites/${activeWebsite.subdomain}`}
+                  href={getPublicWebsiteHref(activeWebsite)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-colors shadow-xs"
@@ -1195,6 +1212,8 @@ export const SubscribedWebsitePage: React.FC = () => {
               <span>
                 {isPaid
                   ? `Renew +30 Days (৳${activeWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly})`
+                  : hasPendingWebsitePayment
+                  ? 'Payment Pending Verification'
                   : `Activate Website (৳${activeWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly})`}
               </span>
             </button>

@@ -480,3 +480,39 @@ export async function executeApproveAndPublishWorkflow(params: {
     message: `Payment approved and https://${verifiedLiveSite.fullDomainUrl} is now Active and Live!`,
   };
 }
+
+/**
+ * Resolves the canonical public storefront URL for a published client website:
+ * - On `amaas.xyz` / `*.amaas.xyz` production hosts, points directly to `https://<subdomain>.amaas.xyz`.
+ * - On localhost, preview, or staging hosts without wildcard DNS, points to `/sites/<subdomain>`.
+ */
+export function getPublicWebsiteHref(
+  site: Pick<SubscribedWebsite, 'subdomain' | 'fullDomainUrl'> | null | undefined,
+  currentHostname?: string
+): string {
+  const cleanSub = (site?.subdomain || '').trim().toLowerCase();
+  if (!cleanSub) return '/';
+
+  const rawDomain = (site?.fullDomainUrl || `${cleanSub}.amaas.xyz`)
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/+$/, '')
+    .trim()
+    .toLowerCase();
+
+  const host = (
+    currentHostname !== undefined
+      ? currentHostname
+      : typeof window !== 'undefined'
+      ? window.location.hostname
+      : ''
+  )
+    .trim()
+    .toLowerCase();
+
+  if (host === 'amaas.xyz' || host.endsWith('.amaas.xyz')) {
+    return `https://${rawDomain || `${cleanSub}.amaas.xyz`}`;
+  }
+
+  return `/sites/${encodeURIComponent(cleanSub)}`;
+}
+

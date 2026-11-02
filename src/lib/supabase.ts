@@ -2375,18 +2375,27 @@ export async function fetchPublishedWebsiteBySubdomain(
     // 1. Check server-side resolver API endpoint first if running in browser
     if (typeof window !== 'undefined') {
       try {
-        const res = await fetch(`/api/resolve-tenant?subdomain=${encodeURIComponent(cleanSubdomain)}`);
-        if (res.ok) {
+        const res = await fetch(
+          `/api/resolve-tenant?subdomain=${encodeURIComponent(cleanSubdomain)}`,
+          { cache: 'no-store' }
+        );
+        const contentType = (res.headers.get('content-type') || '').toLowerCase();
+        if (contentType.includes('application/json')) {
           const json = await res.json();
-          if (json.found && json.site) {
+          if (res.ok && json && json.found === true && json.site) {
             return { data: json.site, error: null };
           }
-          if (json.found === false && res.status === 404) {
+          if (
+            (res.status === 404 || res.status === 400) &&
+            json &&
+            json.found === false &&
+            (json.subdomain === cleanSubdomain || res.status === 400)
+          ) {
             return { data: null, error: null, notFound: true };
           }
-        } else if (res.status === 404 || res.status === 400) {
-          return { data: null, error: null, notFound: true };
         }
+        // If /api/resolve-tenant is not mounted (HTML 404 on static SPA host) or returned 5xx,
+        // fall through to the audited SECURITY DEFINER RPC below.
       } catch {
         // Fall back to audited SECURITY DEFINER RPC below
       }

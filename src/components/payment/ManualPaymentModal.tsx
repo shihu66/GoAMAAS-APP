@@ -51,6 +51,9 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
     websiteSubscriptionPlan,
     paymentRequests,
     paymentGatewayConfigs,
+    isGatewaysLoading,
+    refreshPaymentGatewayConfigs,
+    refreshPaymentRequests,
     submitPaymentRequest,
     showToast,
   } = useApp();
@@ -72,8 +75,10 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
     if (isOpen) {
       setSelectedWebsiteId(serviceId);
       setSubmitError(null);
+      void refreshPaymentGatewayConfigs();
+      void refreshPaymentRequests();
     }
-  }, [isOpen, serviceId]);
+  }, [isOpen, serviceId, refreshPaymentGatewayConfigs, refreshPaymentRequests]);
 
   const userWebsites = useMemo(
     () =>
@@ -187,23 +192,45 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
       return;
     }
 
-    if (paymentMethod === 'bKash' && !isBkashReady) {
-      const msg = pm.errors.bkashUnavailable;
-      setSubmitError(msg);
-      showToast(msg, 'warning');
-      return;
-    }
-    if (paymentMethod === 'Nagad' && !isNagadReady) {
-      const msg = pm.errors.nagadUnavailable;
-      setSubmitError(msg);
-      showToast(msg, 'warning');
-      return;
-    }
-    if (paymentMethod === 'Bank Transfer' && !isBankReady) {
-      const msg = pm.errors.bankUnavailable;
-      setSubmitError(msg);
-      showToast(msg, 'warning');
-      return;
+    if (!isGatewaysLoading) {
+      let bkashOk = isBkashReady;
+      let nagadOk = isNagadReady;
+      let bankOk = isBankReady;
+
+      if (
+        (paymentMethod === 'bKash' && !bkashOk) ||
+        (paymentMethod === 'Nagad' && !nagadOk) ||
+        (paymentMethod === 'Bank Transfer' && !bankOk)
+      ) {
+        const refreshed = await refreshPaymentGatewayConfigs();
+        if (refreshed) {
+          const bk = refreshed.find((c) => c.id === 'bkash');
+          const ng = refreshed.find((c) => c.id === 'nagad');
+          const bn = refreshed.find((c) => c.id === 'bank_transfer');
+          bkashOk = Boolean(bk?.isEnabled && bk?.accountNumber?.trim());
+          nagadOk = Boolean(ng?.isEnabled && ng?.accountNumber?.trim());
+          bankOk = Boolean(bn?.isEnabled && bn?.accountNumber?.trim());
+        }
+      }
+
+      if (paymentMethod === 'bKash' && !bkashOk) {
+        const msg = pm.errors.bkashUnavailable;
+        setSubmitError(msg);
+        showToast(msg, 'warning');
+        return;
+      }
+      if (paymentMethod === 'Nagad' && !nagadOk) {
+        const msg = pm.errors.nagadUnavailable;
+        setSubmitError(msg);
+        showToast(msg, 'warning');
+        return;
+      }
+      if (paymentMethod === 'Bank Transfer' && !bankOk) {
+        const msg = pm.errors.bankUnavailable;
+        setSubmitError(msg);
+        showToast(msg, 'warning');
+        return;
+      }
     }
 
     const validation = validateManualPaymentSubmissionInput({
@@ -446,6 +473,12 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
 
         {/* Recipient Account Instructions + Verification Form */}
         <form onSubmit={handleSubmit} className="space-y-4">
+          {isGatewaysLoading && !isBkashReady && !isNagadReady && !isBankReady && (
+            <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 text-xs flex items-center gap-2.5">
+              <Loader2 className="w-4 h-4 animate-spin text-blue-600 shrink-0" />
+              <span>Loading active payment gateway numbers...</span>
+            </div>
+          )}
           {paymentMethod === 'bKash' && (
             <div>
               {!isBkashReady ? (

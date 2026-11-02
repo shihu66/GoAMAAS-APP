@@ -273,6 +273,8 @@ interface AppContextType {
   paymentRequests: PaymentRequest[];
   isPaymentsLoading: boolean;
   paymentGatewayConfigs: PaymentGatewayConfig[];
+  isGatewaysLoading: boolean;
+  refreshPaymentGatewayConfigs: () => Promise<PaymentGatewayConfig[] | null>;
   submitPaymentRequest: (params: {
     serviceType: 'website_subscription' | 'website_package' | 'dashboard_plan' | 'ai_automation';
     serviceId: string;
@@ -2447,6 +2449,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return gw;
     });
   });
+  const [isGatewaysLoading, setIsGatewaysLoading] = useState<boolean>(false);
   const latestGatewayConfigsRef = useRef<PaymentGatewayConfig[]>(paymentGatewayConfigs);
   const pendingGatewayUpdatesRef = useRef<Record<string, Partial<PaymentGatewayConfig>>>({});
   const gatewaySaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
@@ -2462,20 +2465,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const refreshPaymentGatewayConfigs = useCallback(async (): Promise<PaymentGatewayConfig[] | null> => {
     if (!isSupabaseConfigured || !supabase || !user?.id) return null;
-    const { data, error } = await fetchPaymentGatewayConfigsFromDb();
-    if (!error && data && data.length > 0) {
-      const normalized = data.map((gw) =>
-        gw.id === 'nagad' &&
-        gw.accountNumber?.replace(/\s+/g, '') === NAGAD_PERSONAL_NUMBER &&
-        !gw.accountName?.trim()
-          ? { ...gw, accountName: NAGAD_ACCOUNT_TYPE_EN }
-          : gw
-      );
-      setPaymentGatewayConfigs(normalized);
-      latestGatewayConfigsRef.current = normalized;
-      return normalized;
+    setIsGatewaysLoading(true);
+    try {
+      const { data, error } = await fetchPaymentGatewayConfigsFromDb();
+      if (!error && data && data.length > 0) {
+        const normalized = data.map((gw) =>
+          gw.id === 'nagad' &&
+          gw.accountNumber?.replace(/\s+/g, '') === NAGAD_PERSONAL_NUMBER &&
+          !gw.accountName?.trim()
+            ? { ...gw, accountName: NAGAD_ACCOUNT_TYPE_EN }
+            : gw
+        );
+        setPaymentGatewayConfigs(normalized);
+        latestGatewayConfigsRef.current = normalized;
+        return normalized;
+      }
+      return null;
+    } finally {
+      setIsGatewaysLoading(false);
     }
-    return null;
   }, [user?.id]);
 
   useEffect(() => {
@@ -2915,12 +2923,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return { success: false, message: msg };
       }
       targetWebsite = subscribedWebsites.find((w) => w.id === cleanServiceId);
-      if (!isSupabaseConfigured && !targetWebsite) {
+      if (!targetWebsite && isSupabaseConfigured) {
+        const { data: fetchedWebsite } = await fetchSubscribedWebsiteByIdFromDb(cleanServiceId);
+        if (fetchedWebsite) {
+          targetWebsite = fetchedWebsite;
+          setSubscribedWebsites((prev) =>
+            prev.some((w) => w.id === fetchedWebsite.id) ? prev : [fetchedWebsite, ...prev]
+          );
+        }
+      }
+      if (!targetWebsite) {
         const msg = 'Target website not found. Please save your website before submitting payment.';
         showToast(msg, 'error');
         return { success: false, message: msg };
       }
-      if (targetWebsite && (!targetWebsite.userId || targetWebsite.userId !== user.id)) {
+      if (targetWebsite.userId && targetWebsite.userId !== user.id) {
         const msg = 'Unauthorized: You can only submit a payment request for your own website.';
         showToast(msg, 'error');
         return { success: false, message: msg };
@@ -2934,7 +2951,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       'Bank Transfer': 'bank_transfer',
     };
     const targetGatewayId = gatewayIdMap[params.paymentMethod];
-    const targetGateway = paymentGatewayConfigs.find((c) => c.id === targetGatewayId);
+    let targetGateway = latestGatewayConfigsRef.current.find((c) => c.id === targetGatewayId);
+    if (
+      (!targetGateway || !targetGateway.isEnabled || !(targetGateway.accountNumber || '').trim()) &&
+      isSupabaseConfigured
+    ) {
+      const refreshedGateways = await refreshPaymentGatewayConfigs();
+      const sourceGateways = refreshedGateways || latestGatewayConfigsRef.current;
+      targetGateway = sourceGateways.find((c) => c.id === targetGatewayId);
+    }
     if (!targetGateway || !targetGateway.isEnabled || !(targetGateway.accountNumber || '').trim()) {
       const msg = `${params.paymentMethod} payment is currently disabled or unavailable. Please choose an active payment method.`;
       showToast(msg, 'warning');
@@ -2985,7 +3010,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const resolvedStoreId =
       candidateStoreId &&
       UUID_REGEX.test(candidateStoreId) &&
-      stores.some((s) => s.id === candidateStoreId)
+      (stores.some((s) => s.id === candidateStoreId) ||
+        Boolean(isWebsitePayment && targetWebsite?.storeId === candidateStoreId))
         ? candidateStoreId
         : undefined;
 
@@ -4111,6 +4137,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         paymentRequests,
         isPaymentsLoading,
         paymentGatewayConfigs,
+        isGatewaysLoading,
+        refreshPaymentGatewayConfigs,
         submitPaymentRequest,
         adminApprovePayment,
         adminApproveAndPublishPayment,

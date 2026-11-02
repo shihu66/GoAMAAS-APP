@@ -30,7 +30,11 @@ export const PublicTenantWebsitePage: React.FC = () => {
     return null;
   })();
 
+  const resolvePublicWebsiteRef = React.useRef(resolvePublicWebsite);
+  resolvePublicWebsiteRef.current = resolvePublicWebsite;
+
   useEffect(() => {
+    let cancelled = false;
     setLoading(true);
     if (!resolvedSubdomain) {
       setSite(null);
@@ -39,15 +43,20 @@ export const PublicTenantWebsitePage: React.FC = () => {
     }
 
     const loadSite = async () => {
-      const res = await resolvePublicWebsite(resolvedSubdomain);
+      const res = await resolvePublicWebsiteRef.current(resolvedSubdomain);
+      if (cancelled) return;
       setSite(res.site);
       setLoading(false);
       if (res.site?.businessName && typeof document !== 'undefined') {
         document.title = `${res.site.businessName} — Official Storefront`;
       }
     };
-    loadSite();
-  }, [resolvedSubdomain, resolvePublicWebsite]);
+    void loadSite();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [resolvedSubdomain, subscribedWebsites.length]);
 
   if (loading) {
     return (

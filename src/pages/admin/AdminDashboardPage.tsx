@@ -10,6 +10,7 @@ import {
   ApproveAndPublishResult,
 } from '../../types';
 import {
+  getPublicWebsiteHref,
   isWebsitePaymentService,
   isWebsiteTrulyLive,
 } from '../../lib/paymentWorkflow';
@@ -241,10 +242,30 @@ export const AdminDashboardPage: React.FC = () => {
     return site;
   };
 
+  // Auto-sync subscribedWebsites once if an incoming website payment request references an unseen website ID
+  const syncedMissingWebsiteIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (isWebsitesLoading) return;
+    let shouldRefresh = false;
+    for (const req of paymentRequests) {
+      if (!isWebsitePaymentService(req.serviceType)) continue;
+      const cleanId = (req.serviceId || '').trim().toLowerCase();
+      if (!cleanId || syncedMissingWebsiteIdsRef.current.has(cleanId)) continue;
+      const existsLocally = subscribedWebsites.some((w) => w.id.trim().toLowerCase() === cleanId);
+      if (!existsLocally) {
+        syncedMissingWebsiteIdsRef.current.add(cleanId);
+        shouldRefresh = true;
+      }
+    }
+    if (shouldRefresh) {
+      void refreshSubscribedWebsites();
+    }
+  }, [paymentRequests, subscribedWebsites, isWebsitesLoading, refreshSubscribedWebsites]);
+
   const doesRequestNeedPublishRecovery = (req: PaymentRequest): boolean => {
     if (req.status !== 'approved' || !isWebsitePaymentService(req.serviceType)) return false;
     const exactSite = findExactWebsiteForRequest(req);
-    if (!exactSite) return true;
+    if (!exactSite) return !isWebsitesLoading;
     if (
       exactSite.subscriptionStatus === 'suspended' ||
       exactSite.subscriptionStatus === 'cancelled'
@@ -282,7 +303,7 @@ export const AdminDashboardPage: React.FC = () => {
   );
   const needsPublishCount = useMemo(
     () => paymentRequests.filter((p) => doesRequestNeedPublishRecovery(p)).length,
-    [paymentRequests, subscribedWebsites]
+    [paymentRequests, subscribedWebsites, isWebsitesLoading]
   );
   const approvedPaymentsCount = useMemo(
     () => paymentRequests.filter((p) => p.status === 'approved').length,
@@ -971,7 +992,7 @@ export const AdminDashboardPage: React.FC = () => {
         {siteTrulyLive && exactSite && (
           <div className="pt-1">
             <a
-              href={`/sites/${exactSite.subdomain}`}
+              href={getPublicWebsiteHref(exactSite)}
               target="_blank"
               rel="noopener noreferrer"
               className="w-full min-h-[44px] px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 text-emerald-700 dark:text-emerald-300 font-semibold text-xs inline-flex items-center justify-center gap-1.5"
@@ -1345,7 +1366,7 @@ export const AdminDashboardPage: React.FC = () => {
                                     </span>
                                     {siteTrulyLive && (
                                       <a
-                                        href={`/sites/${exactSite.subdomain}`}
+                                        href={getPublicWebsiteHref(exactSite)}
                                         target="_blank"
                                         rel="noopener noreferrer"
                                         className="inline-flex items-center gap-1 text-[11px] text-emerald-600 dark:text-emerald-400 hover:underline font-semibold"
@@ -1748,7 +1769,7 @@ export const AdminDashboardPage: React.FC = () => {
                               </span>
                               {trulyLive && (
                                 <a
-                                  href={`/sites/${site.subdomain}`}
+                                  href={getPublicWebsiteHref(site)}
                                   target="_blank"
                                   rel="noopener noreferrer"
                                   className="text-emerald-600 dark:text-emerald-400 hover:underline"

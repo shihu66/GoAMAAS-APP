@@ -68,13 +68,25 @@ export default async function handler(req: RequestWithQuery, res: ServerResponse
     ) {
       res.statusCode = 400;
       res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Cache-Control', 'private, no-cache, no-store, max-age=0, must-revalidate');
       res.end(JSON.stringify({ found: false, error: 'Subdomain is invalid or reserved.' }));
       return;
     }
 
     // Resolve Supabase credentials strictly from environment variables (no hardcoded project URL fallback)
-    const supabaseUrl = (process.env.VITE_SUPABASE_URL || '').trim();
-    const supabaseAnonKey = (process.env.VITE_SUPABASE_ANON_KEY || '').trim();
+    const supabaseUrl = (
+      process.env.VITE_SUPABASE_URL ||
+      process.env.SUPABASE_URL ||
+      process.env.NEXT_PUBLIC_SUPABASE_URL ||
+      ''
+    ).trim();
+    const supabaseAnonKey = (
+      process.env.VITE_SUPABASE_ANON_KEY ||
+      process.env.SUPABASE_ANON_KEY ||
+      process.env.SUPABASE_PUBLISHABLE_KEY ||
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+      ''
+    ).trim();
 
     let credentialsValid =
       Boolean(supabaseUrl) &&
@@ -107,19 +119,24 @@ export default async function handler(req: RequestWithQuery, res: ServerResponse
     if (!credentialsValid) {
       res.statusCode = 503;
       res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Cache-Control', 'private, no-cache, no-store, max-age=0, must-revalidate');
       res.end(JSON.stringify({ found: false, error: 'Service temporarily unavailable.' }));
       return;
     }
 
     // Call the hardened SECURITY DEFINER stored procedure (never query subscribed_websites directly as anon)
     const rpcUrl = `${supabaseUrl}/rest/v1/rpc/get_published_website_by_subdomain`;
+    const rpcHeaders: Record<string, string> = {
+      'apikey': supabaseAnonKey,
+      'Content-Type': 'application/json',
+    };
+    if (!supabaseAnonKey.startsWith('sb_publishable_')) {
+      rpcHeaders['Authorization'] = `Bearer ${supabaseAnonKey}`;
+    }
+
     const rpcResp = await fetch(rpcUrl, {
       method: 'POST',
-      headers: {
-        'apikey': supabaseAnonKey,
-        'Authorization': `Bearer ${supabaseAnonKey}`,
-        'Content-Type': 'application/json',
-      },
+      headers: rpcHeaders,
       body: JSON.stringify({ p_subdomain: subdomain }),
     });
 
@@ -128,23 +145,25 @@ export default async function handler(req: RequestWithQuery, res: ServerResponse
       if (rpcJson && rpcJson.found && rpcJson.site) {
         res.statusCode = 200;
         res.setHeader('Content-Type', 'application/json');
-        res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300');
+        res.setHeader('Cache-Control', 'public, s-maxage=15, stale-while-revalidate=60');
         res.end(JSON.stringify({ found: true, subdomain, site: rpcJson.site }));
         return;
       }
       res.statusCode = 404;
       res.setHeader('Content-Type', 'application/json');
-      res.setHeader('Cache-Control', 'public, s-maxage=30, stale-while-revalidate=60');
+      res.setHeader('Cache-Control', 'private, no-cache, no-store, max-age=0, must-revalidate');
       res.end(JSON.stringify({ found: false, subdomain, message: 'Website not found or is currently not published.' }));
       return;
     }
 
     res.statusCode = 502;
     res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Cache-Control', 'private, no-cache, no-store, max-age=0, must-revalidate');
     res.end(JSON.stringify({ found: false, error: 'Unable to resolve storefront at this time.' }));
   } catch (err: any) {
     res.statusCode = 500;
     res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Cache-Control', 'private, no-cache, no-store, max-age=0, must-revalidate');
     res.end(JSON.stringify({ found: false, error: 'Server error resolving tenant storefront.' }));
   }
 }
