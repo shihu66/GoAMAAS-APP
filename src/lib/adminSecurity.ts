@@ -83,6 +83,9 @@ export interface AdminSessionAuditEntry {
 export const UNIFORM_ADMIN_AUTH_ERROR =
   'Access denied. You are not authorized to access GoAMAAS Admin.';
 
+export const ADMIN_DB_ROLE_MISSING_ERROR =
+  "Google authentication succeeded, but database administrator authorization failed: this account's profile role is not set to 'admin' (public.is_admin() returned false).";
+
 export function normalizeAdminEmail(email: string | null | undefined): string {
   return (email ?? '').trim().toLowerCase();
 }

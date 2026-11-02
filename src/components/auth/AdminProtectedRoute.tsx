@@ -292,9 +292,18 @@ export const AdminProtectedRoute: React.FC<AdminProtectedRouteProps> = ({ childr
     );
   }
 
-  // 5. Unauthorized Account -> Immediately sign out & redirect to /admin/login?denied=1 (Zero Admin Data Exposed)
+  // 5. Unauthorized Account -> Immediately sign out & redirect (Zero Admin Data Exposed)
   if (currentStatus === 'forbidden') {
     if (forbiddenSignedOut) {
+      if (verification?.forbiddenReason === 'missing_admin_role') {
+        return (
+          <Navigate
+            to="/admin/login?authz_error=missing_admin_role"
+            state={{ from: location.pathname }}
+            replace
+          />
+        );
+      }
       return (
         <Navigate
           to="/admin/login?denied=1"

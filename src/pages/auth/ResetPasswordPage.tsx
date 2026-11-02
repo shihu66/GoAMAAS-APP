@@ -3,7 +3,12 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
 import { useLanguage, usePageSeo } from '../../context/LanguageContext';
 import { LanguageSwitcher } from '../../components/ui/LanguageSwitcher';
-import { isSupabaseConfigured, supabase } from '../../lib/supabase';
+import {
+  isSupabaseConfigured,
+  supabase,
+  getInitialOAuthUrlSnapshot,
+  hydrateImplicitHashSessionIfNeeded,
+} from '../../lib/supabase';
 import {
   Lock,
   Eye,
@@ -34,15 +39,23 @@ export const ResetPasswordPage: React.FC = () => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
+    const initialSnapshot = getInitialOAuthUrlSnapshot();
     const hash = window.location.hash;
     const search = window.location.search;
     const params = new URLSearchParams(search || hash.replace('#', '?'));
-    const errorParam = params.get('error') || params.get('error_code');
-    const errorDesc = params.get('error_description');
+    const errorParam =
+      params.get('error') ||
+      params.get('error_code') ||
+      initialSnapshot.error ||
+      initialSnapshot.errorCode;
+    const errorDesc = params.get('error_description') || initialSnapshot.errorDescription;
 
     if (errorParam) {
       setErrorMessage(errorDesc || rs.errExpiredLink);
+      return;
     }
+
+    void hydrateImplicitHashSessionIfNeeded();
   }, [rs.errExpiredLink]);
 
   const handleReset = async (e: React.FormEvent) => {

@@ -2,7 +2,7 @@ import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AppProvider } from './context/AppContext';
 import { LanguageProvider } from './context/LanguageContext';
-import { validateSubdomainFormat } from './lib/supabase';
+import { validateSubdomainFormat, consumeRootOAuthBridgeRedirect } from './lib/supabase';
 
 // Layouts
 import { PublicLayout } from './components/layout/PublicLayout';
@@ -63,11 +63,16 @@ function OAuthCallbackRedirectBridge({ children }: { children: React.ReactNode }
     location.pathname !== '/reset-password' &&
     !location.pathname.startsWith('/admin')
   ) {
+    const preInitBridgeTarget = consumeRootOAuthBridgeRedirect();
+    if (preInitBridgeTarget) {
+      return <Navigate to={preInitBridgeTarget} replace />;
+    }
+
     const searchParams = new URLSearchParams(location.search);
     const hashParams = new URLSearchParams(location.hash.replace(/^#/, ''));
     const hasOAuthCallbackPayload =
       Boolean(searchParams.get('code')) ||
-      Boolean(searchParams.get('error') && searchParams.get('error_description')) ||
+      Boolean(searchParams.get('error')) ||
       Boolean(hashParams.get('access_token')) ||
       Boolean(hashParams.get('error'));
     if (hasOAuthCallbackPayload) {

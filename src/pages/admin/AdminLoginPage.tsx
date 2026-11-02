@@ -13,10 +13,13 @@ import {
 import {
   supabase,
   isSupabaseConfigured,
+  supabaseProjectRef,
+  checkGoogleOAuthProviderStatus,
   signOutFromSupabase,
   signInWithGoogle,
 } from '../../lib/supabase';
 import {
+  ADMIN_DB_ROLE_MISSING_ERROR,
   AUTHORIZED_ADMIN_EMAIL,
   UNIFORM_ADMIN_AUTH_ERROR,
   VerifiedAdminFactor,
@@ -34,16 +37,27 @@ import { notifyAdminServiceWorkerSignOut, useAdminPWA } from '../../hooks/useAdm
 import { AdminPWAInstallPrompt } from '../../components/admin/AdminPWAInstallBanner';
 import { useApp } from '../../context/AppContext';
 
-function resolveOAuthErrorMessage(reason: string | null): string {
+export function resolveOAuthErrorMessage(reason: string | null): string {
   switch (reason) {
     case 'access_denied':
       return 'Google sign-in was cancelled.';
     case 'provider_disabled':
-      return 'Google Sign-In is currently disabled in authentication settings.';
+      return `Google Sign-In is disabled in the connected Supabase project${
+        supabaseProjectRef ? ` (${supabaseProjectRef})` : ''
+      }. Enable Google in Supabase Dashboard → Authentication → Providers → Google.`;
+    case 'external_code_exchange_failed':
+      return 'Supabase could not exchange the Google authorization code. Verify the Google Client ID and Client Secret in Supabase Dashboard → Authentication → Providers → Google.';
+    case 'redirect_mismatch':
+      return 'OAuth redirect URL mismatch. Ensure the active /auth/callback URL is allowlisted in Supabase Auth → URL Configuration → Redirect URLs.';
+    case 'database_profile_error':
     case 'profile_sync_error':
-      return 'Authentication service could not initialize the account session.';
+      return 'Google authenticated your account, but Supabase encountered a database error while initializing the user profile.';
     case 'pkce_mismatch':
-      return 'Sign-in session expired or opened in a different browser. Please try again.';
+      return 'Sign-in verification state expired or opened across different browser contexts. Please click Continue with Google again.';
+    case 'session_not_established':
+      return 'Google redirect returned without an active session. Ensure /auth/callback is allowlisted in Supabase Auth → URL Configuration.';
+    case 'oauth_server_error':
+      return 'Supabase Authentication returned an unexpected server error during Google callback processing.';
     case 'network_error':
       return 'Network interruption while verifying administrator access. Please try again.';
     case 'unconfigured':
@@ -60,8 +74,13 @@ export const AdminLoginPage: React.FC = () => {
   const { theme, toggleTheme, setAuthenticatedUser, logout } = useApp();
   const { isOnline, isEmbeddedIframe } = useAdminPWA(theme);
   const checkedInitialRef = useRef(false);
+  const autoStartedTopTabRef = useRef(false);
 
   const intendedDestination = (() => {
+    const nextQuery = searchParams.get('next');
+    if (nextQuery && nextQuery.startsWith('/admin') && nextQuery !== '/admin/login') {
+      return nextQuery;
+    }
     const fromState = (location.state as { from?: string } | null)?.from;
     if (fromState && fromState.startsWith('/admin') && fromState !== '/admin/login') {
       return fromState;
@@ -70,17 +89,20 @@ export const AdminLoginPage: React.FC = () => {
   })();
 
   const isExpiredSession = searchParams.get('expired') === '1';
+  const isMissingAdminRoleQuery = searchParams.get('authz_error') === 'missing_admin_role';
   const isDeniedQuery =
     searchParams.get('denied') === '1' || searchParams.get('unauthorized') === '1';
   const isOauthErrorQuery =
     searchParams.get('oauth_error') === '1' || Boolean(searchParams.get('error'));
   const oauthReason = searchParams.get('reason');
+  const shouldAutoStartInTopTab = !isEmbeddedIframe && searchParams.get('start_google') === '1';
 
   const [isCheckingExisting, setIsCheckingExisting] = useState(true);
   const [isSubmittingMfa, setIsSubmittingMfa] = useState(false);
   const [isGoogleRedirecting, setIsGoogleRedirecting] = useState(false);
   const [externalTabOAuthUrl, setExternalTabOAuthUrl] = useState<string | null>(null);
   const [errorBanner, setErrorBanner] = useState<string | null>(() => {
+    if (isMissingAdminRoleQuery) return ADMIN_DB_ROLE_MISSING_ERROR;
     if (isDeniedQuery) return UNIFORM_ADMIN_AUTH_ERROR;
     if (isOauthErrorQuery) {
       return resolveOAuthErrorMessage(oauthReason);
@@ -95,12 +117,14 @@ export const AdminLoginPage: React.FC = () => {
 
   // Sync query-string error banners when redirected back to /admin/login
   useEffect(() => {
-    if (isDeniedQuery) {
+    if (isMissingAdminRoleQuery) {
+      setErrorBanner(ADMIN_DB_ROLE_MISSING_ERROR);
+    } else if (isDeniedQuery) {
       setErrorBanner(UNIFORM_ADMIN_AUTH_ERROR);
     } else if (isOauthErrorQuery) {
       setErrorBanner(resolveOAuthErrorMessage(oauthReason));
     }
-  }, [isDeniedQuery, isOauthErrorQuery, oauthReason]);
+  }, [isDeniedQuery, isMissingAdminRoleQuery, isOauthErrorQuery, oauthReason]);
 
   // Check once on mount whether user already holds a valid server-verified admin session, or purge any unauthorized session
   useEffect(() => {
@@ -151,19 +175,19 @@ export const AdminLoginPage: React.FC = () => {
         return;
       }
 
-      // Immediately purge any unauthorized Google or merchant session and show generic denial
+      // Immediately purge any unauthorized Google or merchant session
       if (res.status === 'forbidden') {
         await enforceMinimumAuthFloor(startedAt, 350);
         clearAdminSessionEvents();
         notifyAdminServiceWorkerSignOut();
         await signOutFromSupabase();
         await logout({ silent: true });
-        const failure =
-          res.forbiddenReason === 'missing_admin_role'
-            ? null
-            : recordAdminLoginFailure();
+        const isMissingDbRole = res.forbiddenReason === 'missing_admin_role';
+        const failure = isMissingDbRole ? null : recordAdminLoginFailure();
         if (!active) return;
-        if (failure?.lockedOut) {
+        if (isMissingDbRole) {
+          setErrorBanner(ADMIN_DB_ROLE_MISSING_ERROR);
+        } else if (failure?.lockedOut) {
           setLockoutSeconds(failure.retryAfterSeconds);
           setErrorBanner(
             `Too many unsuccessful sign-in attempts. Sign-in is temporarily locked for ${failure.retryAfterSeconds}s.`
@@ -236,7 +260,11 @@ export const AdminLoginPage: React.FC = () => {
         await logout({ silent: true });
         setMfaChallengeFactor(null);
         setTotpCode('');
-        setErrorBanner(UNIFORM_ADMIN_AUTH_ERROR);
+        setErrorBanner(
+          finalCheck.forbiddenReason === 'missing_admin_role'
+            ? ADMIN_DB_ROLE_MISSING_ERROR
+            : UNIFORM_ADMIN_AUTH_ERROR
+        );
       }
     } finally {
       setIsSubmittingMfa(false);
@@ -268,25 +296,51 @@ export const AdminLoginPage: React.FC = () => {
     setErrorBanner(null);
     setExternalTabOAuthUrl(null);
 
+    // Embedded cross-origin iframes partition localStorage and Google blocks framed OAuth (X-Frame-Options: DENY).
+    // Verify provider status first, then provide a top-level tab launch URL so PKCE code_verifier runs unpartitioned.
+    if (isEmbeddedIframe) {
+      const providerCheck = await checkGoogleOAuthProviderStatus();
+      setIsGoogleRedirecting(false);
+      if (!providerCheck.enabled) {
+        setErrorBanner(
+          providerCheck.errorMessage ||
+            'Google Sign-In is disabled in the connected Supabase project.'
+        );
+        return;
+      }
+      const nextParam =
+        intendedDestination !== '/admin'
+          ? `&next=${encodeURIComponent(intendedDestination)}`
+          : '';
+      setExternalTabOAuthUrl(`${window.location.origin}/admin/login?start_google=1${nextParam}`);
+      return;
+    }
+
     // Clean callback URL without query string guarantees exact allowlist match in Supabase GoTrue
     const callbackUrl = `${window.location.origin}/auth/callback`;
-    const { data, error } = await signInWithGoogle(callbackUrl, {
+    const { error } = await signInWithGoogle(callbackUrl, {
       isAdminFlow: true,
       nextPath: intendedDestination,
-      skipWindowRedirect: isEmbeddedIframe,
     });
 
     if (error) {
       setIsGoogleRedirecting(false);
       setErrorBanner(error.message || 'Unable to start Google sign-in. Please retry.');
-      return;
-    }
-
-    if (isEmbeddedIframe && data?.url) {
-      setIsGoogleRedirecting(false);
-      setExternalTabOAuthUrl(data.url);
     }
   };
+
+  // Auto-start Google OAuth once when launched in a top-level tab from an embedded preview iframe
+  useEffect(() => {
+    if (isCheckingExisting || !shouldAutoStartInTopTab || autoStartedTopTabRef.current) return;
+    if (mfaChallengeFactor || errorBanner || lockoutSeconds > 0 || !isOnline) return;
+    autoStartedTopTabRef.current = true;
+    if (typeof window !== 'undefined' && window.history?.replaceState) {
+      try {
+        window.history.replaceState(window.history.state, '', '/admin/login');
+      } catch {}
+    }
+    void handleAdminGoogleSignIn();
+  });
 
   if (isCheckingExisting) {
     return (
@@ -463,15 +517,20 @@ export const AdminLoginPage: React.FC = () => {
               </button>
 
               {externalTabOAuthUrl && (
-                <a
-                  href={externalTabOAuthUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-900 dark:text-white font-semibold text-xs inline-flex items-center justify-center gap-2 transition-colors"
-                >
-                  <span>Open Google Sign-In in New Tab</span>
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </a>
+                <div className="space-y-2 pt-1">
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 text-center leading-relaxed">
+                    Google blocks authentication inside embedded preview frames. Continue in a full browser tab:
+                  </p>
+                  <a
+                    href={externalTabOAuthUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-900 dark:text-white font-semibold text-xs inline-flex items-center justify-center gap-2 transition-colors"
+                  >
+                    <span>Open Google Sign-In in New Tab</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                </div>
               )}
             </div>
           )}

@@ -7,6 +7,9 @@ import {
   getUserProfile,
   upsertUserProfile,
   consumeAdminOAuthIntent,
+  consumeOAuthFlowSource,
+  getInitialOAuthUrlSnapshot,
+  hydrateImplicitHashSessionIfNeeded,
   signOutFromSupabase,
 } from '../../lib/supabase';
 import {
@@ -22,7 +25,10 @@ import { notifyAdminServiceWorkerSignOut } from '../../hooks/useAdminPWA';
 import { useApp } from '../../context/AppContext';
 import { Loader2, AlertCircle, CheckCircle2, ArrowRight } from 'lucide-react';
 
-function classifyAdminOAuthFailureReason(
+// Module-level single-flight guard ensuring a single-use OAuth authorization code is never redeemed twice
+const exchangedAuthCodes = new Set<string>();
+
+export function classifyAdminOAuthFailureReason(
   errorParam: string | null,
   errorCode: string | null,
   errorDescription: string | null
@@ -35,14 +41,43 @@ function classifyAdminOAuthFailureReason(
     return 'provider_disabled';
   }
   if (
-    combined.includes('database error') ||
-    combined.includes('unexpected_failure') ||
-    combined.includes('saving new user')
+    combined.includes('unable to exchange external code') ||
+    combined.includes('invalid_client') ||
+    combined.includes('unauthorized_client') ||
+    combined.includes('error getting user profile from external provider')
   ) {
-    return 'profile_sync_error';
+    return 'external_code_exchange_failed';
   }
-  if (combined.includes('code verifier') || combined.includes('flow_state')) {
+  if (
+    combined.includes('redirect_uri') ||
+    combined.includes('redirect url') ||
+    combined.includes('not allowed')
+  ) {
+    return 'redirect_mismatch';
+  }
+  if (
+    combined.includes('database error') ||
+    combined.includes('saving new user') ||
+    combined.includes('duplicate key')
+  ) {
+    return 'database_profile_error';
+  }
+  if (
+    combined.includes('code verifier') ||
+    combined.includes('flow_state') ||
+    combined.includes('both auth code and code verifier')
+  ) {
     return 'pkce_mismatch';
+  }
+  if (
+    combined.includes('session_not_established') ||
+    combined.includes('no session returned') ||
+    combined.includes('auth session missing')
+  ) {
+    return 'session_not_established';
+  }
+  if (combined.includes('unexpected_failure') || combined.includes('server_error')) {
+    return 'oauth_server_error';
   }
   return 'session_failed';
 }
@@ -61,11 +96,15 @@ export const AuthCallbackPage: React.FC = () => {
     if (processedRef.current) return;
     processedRef.current = true;
 
+    const initialSnapshot = getInitialOAuthUrlSnapshot();
     const nextFromQuery = (searchParams.get('next') || '').trim();
     const nextFromIntent = consumeAdminOAuthIntent();
+    const oauthFlowSource = consumeOAuthFlowSource();
     const effectiveNext = nextFromQuery || nextFromIntent || '';
     const isAdminAuthFlow =
-      effectiveNext === '/admin' || effectiveNext.startsWith('/admin/');
+      oauthFlowSource === 'admin' ||
+      effectiveNext === '/admin' ||
+      effectiveNext.startsWith('/admin/');
     setIsAdminFlowState(isAdminAuthFlow);
 
     const hashParams =
@@ -73,12 +112,16 @@ export const AuthCallbackPage: React.FC = () => {
         ? new URLSearchParams(window.location.hash.replace(/^#/, ''))
         : new URLSearchParams();
 
-    const errorParam = searchParams.get('error') || hashParams.get('error');
-    const errorCode = searchParams.get('error_code') || hashParams.get('error_code');
+    const errorParam =
+      searchParams.get('error') || hashParams.get('error') || initialSnapshot.error;
+    const errorCode =
+      searchParams.get('error_code') || hashParams.get('error_code') || initialSnapshot.errorCode;
     const errorDescription =
-      searchParams.get('error_description') || hashParams.get('error_description');
+      searchParams.get('error_description') ||
+      hashParams.get('error_description') ||
+      initialSnapshot.errorDescription;
 
-    if (errorParam) {
+    if (errorParam || errorCode) {
       const reason = classifyAdminOAuthFailureReason(errorParam, errorCode, errorDescription);
       try {
         if ((import.meta as any).env?.DEV) {
@@ -123,6 +166,90 @@ export const AuthCallbackPage: React.FC = () => {
       return;
     }
 
+    const handleVerifiedAdminFlow = async (targetAdminPath: string) => {
+      const adminVerification = await verifyServerAdminSession();
+
+      if (adminVerification.status === 'unauthenticated') {
+        clearAdminSessionEvents();
+        notifyAdminServiceWorkerSignOut();
+        await signOutFromSupabase();
+        await logout({ silent: true });
+        navigate('/admin/login?oauth_error=1&reason=session_not_established', {
+          replace: true,
+        });
+        return;
+      }
+
+      if (adminVerification.status === 'forbidden') {
+        clearAdminSessionEvents();
+        notifyAdminServiceWorkerSignOut();
+        await signOutFromSupabase();
+        await logout({ silent: true });
+
+        // Separate issue: Google login succeeded for the authorized Google account,
+        // but server-side database authorization (is_admin() / profiles.role === 'admin') failed.
+        if (adminVerification.forbiddenReason === 'missing_admin_role') {
+          navigate('/admin/login?authz_error=missing_admin_role', { replace: true });
+          return;
+        }
+
+        recordAdminLoginFailure();
+        navigate('/admin/login?denied=1', { replace: true });
+        return;
+      }
+
+      if (adminVerification.status === 'network_error') {
+        navigate('/admin/login?oauth_error=1&reason=network_error', { replace: true });
+        return;
+      }
+
+      const safeAdminTarget =
+        targetAdminPath.startsWith('/admin') && targetAdminPath !== '/admin/login'
+          ? targetAdminPath
+          : '/admin';
+
+      if (adminVerification.status === 'mfa_required') {
+        clearAdminLoginFailures();
+        navigate('/admin/login', {
+          state: { from: safeAdminTarget },
+          replace: true,
+        });
+        return;
+      }
+
+      if (
+        adminVerification.status === 'authorized' &&
+        adminVerification.admin &&
+        isAuthorizedAdminEmail(adminVerification.admin.email)
+      ) {
+        clearAdminLoginFailures();
+        setAuthenticatedUser({
+          id: adminVerification.admin.id,
+          name: adminVerification.admin.name,
+          email: AUTHORIZED_ADMIN_EMAIL,
+          role: 'admin',
+          storeId: '',
+        });
+        recordAdminSessionEvent({
+          adminId: adminVerification.admin.id,
+          action: 'admin_sign_in_google',
+          targetType: 'session',
+          targetId: 'admin_portal',
+          outcome: 'success',
+          summary: 'Verified Google OAuth administrator session established.',
+        });
+        setStatus('success');
+        navigate(safeAdminTarget, { replace: true });
+        return;
+      }
+
+      clearAdminSessionEvents();
+      notifyAdminServiceWorkerSignOut();
+      await signOutFromSupabase();
+      await logout({ silent: true });
+      navigate('/admin/login?denied=1', { replace: true });
+    };
+
     const processAuth = async () => {
       if (!supabase) {
         setStatus('error');
@@ -131,31 +258,52 @@ export const AuthCallbackPage: React.FC = () => {
       }
 
       try {
-        // 1. Check whether detectSessionInUrl already redeemed the PKCE code or implicit hash
-        let {
-          data: { session },
-          error: sessionError,
-        } = await supabase.auth.getSession();
+        // 1. Await GoTrueClient.initialize() so any URL callback exchange error is captured
+        //    rather than silently discarded by getSession().
+        const initResult = await supabase.auth.initialize();
 
-        // 2. Only exchange ?code= manually if session is not yet populated
+        // 2. Check whether detectSessionInUrl already redeemed the PKCE code or active session
+        const getSessionRes = await supabase.auth.getSession();
+        let session = getSessionRes.data.session;
+        let sessionError: Error | null = getSessionRes.error;
+
+        // 3. Only exchange ?code= manually if session is not yet populated and code was not already redeemed
         const code = searchParams.get('code');
         if (!session?.user && code) {
-          const { data: exchangeData, error: exchangeError } =
-            await supabase.auth.exchangeCodeForSession(code);
-          if (exchangeData?.session?.user) {
-            session = exchangeData.session;
-            sessionError = null;
-          } else if (exchangeError) {
-            // Brief settle pause then re-check getSession() in case detectSessionInUrl completed concurrently
-            await new Promise((resolve) => setTimeout(resolve, 250));
-            const retryRes = await supabase.auth.getSession();
-            if (retryRes.data.session?.user) {
-              session = retryRes.data.session;
+          if (!initResult?.error && !exchangedAuthCodes.has(code)) {
+            exchangedAuthCodes.add(code);
+            const flowId = searchParams.get('sb_flow_id') || initialSnapshot.flowId || undefined;
+            const { data: exchangeData, error: exchangeError } =
+              await supabase.auth.exchangeCodeForSession(code, flowId ? { flowId } : undefined);
+            if (exchangeData?.session?.user) {
+              session = exchangeData.session;
               sessionError = null;
-            } else {
-              throw exchangeError;
+            } else if (exchangeError) {
+              await new Promise((resolve) => setTimeout(resolve, 200));
+              const retryRes = await supabase.auth.getSession();
+              if (retryRes.data.session?.user) {
+                session = retryRes.data.session;
+                sessionError = null;
+              } else {
+                throw exchangeError;
+              }
             }
           }
+        }
+
+        // 4. Fallback for implicit #access_token/#refresh_token URL fragments if ever returned
+        if (!session?.user) {
+          const implicitRes = await hydrateImplicitHashSessionIfNeeded();
+          if (implicitRes.session?.user) {
+            session = implicitRes.session;
+            sessionError = null;
+          } else if (implicitRes.error && !initResult?.error) {
+            sessionError = implicitRes.error;
+          }
+        }
+
+        if (!session?.user && initResult?.error) {
+          throw initResult.error;
         }
 
         if (sessionError) {
@@ -179,110 +327,21 @@ export const AuthCallbackPage: React.FC = () => {
 
         // Dedicated /admin OAuth flow: strictly verify official email + email_verified + server-side admin role
         if (isAdminAuthFlow) {
-          const adminVerification = await verifyServerAdminSession();
-
-          if (
-            adminVerification.status === 'forbidden' ||
-            adminVerification.status === 'unauthenticated'
-          ) {
-            clearAdminSessionEvents();
-            notifyAdminServiceWorkerSignOut();
-            await signOutFromSupabase();
-            await logout({ silent: true });
-            if (adminVerification.forbiddenReason !== 'missing_admin_role') {
-              recordAdminLoginFailure();
-            }
-            navigate('/admin/login?denied=1', { replace: true });
-            return;
-          }
-
-          if (adminVerification.status === 'network_error') {
-            navigate('/admin/login?oauth_error=1&reason=network_error', { replace: true });
-            return;
-          }
-
-          const safeAdminTarget =
-            effectiveNext.startsWith('/admin') && effectiveNext !== '/admin/login'
-              ? effectiveNext
-              : '/admin';
-
-          if (adminVerification.status === 'mfa_required') {
-            clearAdminLoginFailures();
-            navigate('/admin/login', {
-              state: { from: safeAdminTarget },
-              replace: true,
-            });
-            return;
-          }
-
-          if (
-            adminVerification.status === 'authorized' &&
-            adminVerification.admin &&
-            isAuthorizedAdminEmail(adminVerification.admin.email)
-          ) {
-            clearAdminLoginFailures();
-            setAuthenticatedUser({
-              id: adminVerification.admin.id,
-              name: adminVerification.admin.name,
-              email: AUTHORIZED_ADMIN_EMAIL,
-              role: 'admin',
-              storeId: '',
-            });
-            recordAdminSessionEvent({
-              adminId: adminVerification.admin.id,
-              action: 'admin_sign_in_google',
-              targetType: 'session',
-              targetId: 'admin_portal',
-              outcome: 'success',
-              summary: 'Verified Google OAuth administrator session established.',
-            });
-            setStatus('success');
-            navigate(safeAdminTarget, { replace: true });
-            return;
-          }
-
-          clearAdminSessionEvents();
-          notifyAdminServiceWorkerSignOut();
-          await signOutFromSupabase();
-          await logout({ silent: true });
-          navigate('/admin/login?denied=1', { replace: true });
+          await handleVerifiedAdminFlow(effectiveNext || '/admin');
           return;
         }
 
-        // Fallback recovery if storage intent was cleared across browsers/PWA handoff during admin sign-in:
-        // verify server-side admin status BEFORE auto-provisioning any merchant profile.
-        if (!nextFromQuery && isAuthorizedAdminEmail(authenticatedUser.email)) {
-          const recoveredAdminCheck = await verifyServerAdminSession();
-          if (recoveredAdminCheck.status === 'mfa_required') {
-            clearAdminLoginFailures();
-            navigate('/admin/login', { state: { from: '/admin' }, replace: true });
-            return;
-          }
-          if (
-            recoveredAdminCheck.status === 'authorized' &&
-            recoveredAdminCheck.admin &&
-            isAuthorizedAdminEmail(recoveredAdminCheck.admin.email)
-          ) {
-            clearAdminLoginFailures();
-            setAuthenticatedUser({
-              id: recoveredAdminCheck.admin.id,
-              name: recoveredAdminCheck.admin.name,
-              email: AUTHORIZED_ADMIN_EMAIL,
-              role: 'admin',
-              storeId: '',
-            });
-            recordAdminSessionEvent({
-              adminId: recoveredAdminCheck.admin.id,
-              action: 'admin_sign_in_google',
-              targetType: 'session',
-              targetId: 'admin_portal',
-              outcome: 'success',
-              summary: 'Verified Google OAuth administrator session established.',
-            });
-            setStatus('success');
-            navigate('/admin', { replace: true });
-            return;
-          }
+        // Fallback recovery when browser/PWA storage boundary cleared OAuth intent during admin sign-in:
+        // If no explicit merchant intent was set and the Google account matches the authorized admin email,
+        // enforce the full server-side admin verification (including reporting missing_admin_role separately).
+        if (
+          !nextFromQuery &&
+          oauthFlowSource !== 'merchant' &&
+          isAuthorizedAdminEmail(authenticatedUser.email)
+        ) {
+          setIsAdminFlowState(true);
+          await handleVerifiedAdminFlow('/admin');
+          return;
         }
 
         // Standard Customer / Merchant OAuth Flow
@@ -344,8 +403,12 @@ export const AuthCallbackPage: React.FC = () => {
           }
         }, 400);
       } catch (err: unknown) {
+        const errCode =
+          err && typeof err === 'object' && 'code' in err && typeof (err as any).code === 'string'
+            ? (err as any).code
+            : null;
         const errText = err instanceof Error ? err.message : '';
-        const reason = classifyAdminOAuthFailureReason(null, null, errText);
+        const reason = classifyAdminOAuthFailureReason(null, errCode, errText);
         try {
           if ((import.meta as any).env?.DEV) {
             console.warn('[GoAMAAS Auth Callback] Session establishment failed:', reason);

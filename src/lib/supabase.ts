@@ -246,16 +246,185 @@ export const getSupabaseConfigStatus = (): SupabaseConfigStatus => {
   };
 };
 
+export interface InitialOAuthUrlSnapshot {
+  pathname: string;
+  search: string;
+  code: string | null;
+  flowId: string | null;
+  error: string | null;
+  errorCode: string | null;
+  errorDescription: string | null;
+  hasImplicitTokens: boolean;
+  hasCallbackPayload: boolean;
+}
+
+let pendingImplicitHashTokens: { access_token: string; refresh_token: string } | null = null;
+let rootOAuthBridgeConsumed = false;
+
+function captureInitialOAuthUrlSnapshot(): InitialOAuthUrlSnapshot {
+  if (typeof window === 'undefined' || !window.location) {
+    return {
+      pathname: '',
+      search: '',
+      code: null,
+      flowId: null,
+      error: null,
+      errorCode: null,
+      errorDescription: null,
+      hasImplicitTokens: false,
+      hasCallbackPayload: false,
+    };
+  }
+
+  try {
+    const pathname = window.location.pathname || '/';
+    const search = window.location.search || '';
+    const rawHash = (window.location.hash || '').replace(/^#/, '');
+    const searchParams = new URLSearchParams(search);
+    const hashParams = new URLSearchParams(rawHash);
+
+    const code = searchParams.get('code') || null;
+    const flowId = searchParams.get('sb_flow_id') || null;
+    const error = searchParams.get('error') || hashParams.get('error') || null;
+    const errorCode = searchParams.get('error_code') || hashParams.get('error_code') || null;
+    const errorDescription =
+      searchParams.get('error_description') || hashParams.get('error_description') || null;
+
+    const accessToken = hashParams.get('access_token');
+    const refreshToken = hashParams.get('refresh_token');
+    const hasImplicitTokens = Boolean(accessToken && refreshToken);
+    if (accessToken && refreshToken) {
+      pendingImplicitHashTokens = {
+        access_token: accessToken,
+        refresh_token: refreshToken,
+      };
+    }
+
+    const hasCallbackPayload = Boolean(code || error || errorCode || hasImplicitTokens);
+
+    return {
+      pathname,
+      search,
+      code,
+      flowId,
+      error,
+      errorCode,
+      errorDescription,
+      hasImplicitTokens,
+      hasCallbackPayload,
+    };
+  } catch {
+    return {
+      pathname: '',
+      search: '',
+      code: null,
+      flowId: null,
+      error: null,
+      errorCode: null,
+      errorDescription: null,
+      hasImplicitTokens: false,
+      hasCallbackPayload: false,
+    };
+  }
+}
+
+// Captured synchronously BEFORE createClient() auto-initializes GoTrueClient and strips ?code or #access_token
+const initialOAuthUrlSnapshot: InitialOAuthUrlSnapshot = captureInitialOAuthUrlSnapshot();
+
+export function getInitialOAuthUrlSnapshot(): InitialOAuthUrlSnapshot {
+  return initialOAuthUrlSnapshot;
+}
+
+/**
+ * Returns a one-time /auth/callback redirect target when Supabase GoTrue redirected back to a
+ * non-callback route (such as Site URL "/") and GoTrueClient already stripped ?code or #access_token
+ * from window.location before React Router mounted.
+ */
+export function consumeRootOAuthBridgeRedirect(): string | null {
+  if (rootOAuthBridgeConsumed) return null;
+  if (!initialOAuthUrlSnapshot.hasCallbackPayload) return null;
+  const p = initialOAuthUrlSnapshot.pathname;
+  if (!p || p === '/auth/callback' || p === '/reset-password' || p.startsWith('/admin')) {
+    return null;
+  }
+
+  rootOAuthBridgeConsumed = true;
+  const forwarded = new URLSearchParams();
+  if (initialOAuthUrlSnapshot.code) forwarded.set('code', initialOAuthUrlSnapshot.code);
+  if (initialOAuthUrlSnapshot.flowId) forwarded.set('sb_flow_id', initialOAuthUrlSnapshot.flowId);
+  if (initialOAuthUrlSnapshot.error) forwarded.set('error', initialOAuthUrlSnapshot.error);
+  if (initialOAuthUrlSnapshot.errorCode) {
+    forwarded.set('error_code', initialOAuthUrlSnapshot.errorCode);
+  }
+  if (initialOAuthUrlSnapshot.errorDescription) {
+    forwarded.set('error_description', initialOAuthUrlSnapshot.errorDescription);
+  }
+  const qs = forwarded.toString();
+  return qs ? `/auth/callback?${qs}` : '/auth/callback';
+}
+
 // Singleton Supabase client (gracefully null if unconfigured)
 export const supabase: SupabaseClient | null = isSupabaseConfigured
   ? createClient(supabaseUrl, supabaseAnonKey, {
       auth: {
+        flowType: 'pkce',
         persistSession: true,
         autoRefreshToken: true,
         detectSessionInUrl: true,
       },
     })
   : null;
+
+/**
+ * Safely hydrates an implicit-flow #access_token/#refresh_token URL fragment via setSession()
+ * when flowType is 'pkce' (e.g. legacy recovery or magic-link redirects), scrubbing tokens from the URL.
+ */
+export async function hydrateImplicitHashSessionIfNeeded(): Promise<{
+  session: Session | null;
+  error: Error | null;
+}> {
+  if (!isSupabaseConfigured || !supabase) {
+    return { session: null, error: null };
+  }
+
+  let tokens = pendingImplicitHashTokens;
+  pendingImplicitHashTokens = null;
+
+  if (!tokens && typeof window !== 'undefined' && window.location?.hash) {
+    const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    const accessToken = hashParams.get('access_token');
+    const refreshToken = hashParams.get('refresh_token');
+    if (accessToken && refreshToken) {
+      tokens = { access_token: accessToken, refresh_token: refreshToken };
+    }
+  }
+
+  if (!tokens) {
+    return { session: null, error: null };
+  }
+
+  if (typeof window !== 'undefined' && window.history?.replaceState) {
+    try {
+      const cleanUrl = `${window.location.pathname}${window.location.search}`;
+      window.history.replaceState(window.history.state, '', cleanUrl);
+    } catch {
+      // Ignore history replacement errors
+    }
+  }
+
+  try {
+    const { data, error } = await supabase.auth.setSession({
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+    });
+    return { session: data.session ?? null, error: error ?? null };
+  } catch (err: unknown) {
+    return {
+      session: null,
+      error: err instanceof Error ? err : new Error('Failed to establish session from callback token.'),
+    };
+  }
+}
 
 export interface UserProfileRecord {
   id: string;
@@ -270,6 +439,7 @@ export interface UserProfileRecord {
 }
 
 export const ADMIN_OAUTH_INTENT_KEY = 'goamaas_admin_oauth_intent_v1';
+export const OAUTH_FLOW_SOURCE_KEY = 'goamaas_oauth_flow_source_v1';
 const ADMIN_OAUTH_INTENT_MAX_AGE_MS = 10 * 60 * 1000;
 
 function clearAdminOAuthIntentStorage(): void {
@@ -286,6 +456,56 @@ function clearAdminOAuthIntentStorage(): void {
   }
 }
 
+function setOAuthFlowSource(source: 'admin' | 'merchant'): void {
+  if (typeof window === 'undefined') return;
+  const serialized = JSON.stringify({ source, createdAt: Date.now() });
+  try {
+    window.sessionStorage.setItem(OAUTH_FLOW_SOURCE_KEY, serialized);
+  } catch {
+    // Ignore storage exceptions
+  }
+  try {
+    window.localStorage.setItem(OAUTH_FLOW_SOURCE_KEY, serialized);
+  } catch {
+    // Ignore storage exceptions
+  }
+}
+
+export function consumeOAuthFlowSource(): 'admin' | 'merchant' | null {
+  if (typeof window === 'undefined') return null;
+  let raw: string | null = null;
+  try {
+    raw =
+      window.sessionStorage.getItem(OAUTH_FLOW_SOURCE_KEY) ||
+      window.localStorage.getItem(OAUTH_FLOW_SOURCE_KEY);
+  } catch {
+    raw = null;
+  }
+  try {
+    window.sessionStorage.removeItem(OAUTH_FLOW_SOURCE_KEY);
+  } catch {}
+  try {
+    window.localStorage.removeItem(OAUTH_FLOW_SOURCE_KEY);
+  } catch {}
+
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { source?: string; createdAt?: number };
+    if (
+      typeof parsed.createdAt !== 'number' ||
+      Date.now() - parsed.createdAt > ADMIN_OAUTH_INTENT_MAX_AGE_MS
+    ) {
+      return null;
+    }
+    if (parsed.source === 'admin' || parsed.source === 'merchant') {
+      return parsed.source;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Records non-authoritative post-OAuth destination for /admin sign-in in both sessionStorage
  * and localStorage (with strict 10-minute expiry) so standalone /admin PWAs and browser tabs
@@ -297,6 +517,7 @@ export function setAdminOAuthIntent(nextPath = '/admin'): void {
   const safeNext =
     nextPath.startsWith('/admin') && nextPath !== '/admin/login' ? nextPath : '/admin';
   const serialized = JSON.stringify({ nextPath: safeNext, createdAt: Date.now() });
+  setOAuthFlowSource('admin');
   try {
     window.sessionStorage.setItem(ADMIN_OAUTH_INTENT_KEY, serialized);
   } catch {
@@ -378,11 +599,11 @@ export async function checkGoogleOAuthProviderStatus(): Promise<{
     };
 
     if (settings?.external && settings.external.google === false) {
+      const projectHint = supabaseProjectRef ? ` (project: ${supabaseProjectRef})` : '';
       return {
         enabled: false,
         checked: true,
-        errorMessage:
-          'Google Sign-In is currently disabled in Supabase Authentication settings. Enable the Google provider in Supabase Dashboard → Authentication → Providers → Google.',
+        errorMessage: `Google Sign-In is disabled in the connected Supabase project${projectHint}. Enable the Google provider in Supabase Dashboard → Authentication → Providers → Google, or verify VITE_SUPABASE_URL points to the intended project.`,
       };
     }
 
@@ -442,6 +663,9 @@ export async function signInWithGoogle(
 
     if (options?.isAdminFlow) {
       setAdminOAuthIntent(options.nextPath || '/admin');
+    } else {
+      clearAdminOAuthIntentStorage();
+      setOAuthFlowSource('merchant');
     }
 
     const queryParams: Record<string, string> = options?.isAdminFlow

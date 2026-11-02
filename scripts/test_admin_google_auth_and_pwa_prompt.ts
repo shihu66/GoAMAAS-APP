@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import {
+  ADMIN_DB_ROLE_MISSING_ERROR,
   AUTHORIZED_ADMIN_EMAIL,
   DEFAULT_MFA_STATE,
   UNIFORM_ADMIN_AUTH_ERROR,
@@ -10,11 +11,16 @@ import {
 } from '../src/lib/adminSecurity';
 import {
   ADMIN_OAUTH_INTENT_KEY,
+  OAUTH_FLOW_SOURCE_KEY,
   checkGoogleOAuthProviderStatus,
   consumeAdminOAuthIntent,
+  consumeOAuthFlowSource,
+  getInitialOAuthUrlSnapshot,
   peekAdminOAuthIntent,
   setAdminOAuthIntent,
 } from '../src/lib/supabase';
+import { classifyAdminOAuthFailureReason } from '../src/pages/auth/AuthCallbackPage';
+import { resolveOAuthErrorMessage } from '../src/pages/admin/AdminLoginPage';
 import {
   ADMIN_PWA_DISMISS_COOLDOWN_MS,
   detectAdminPlatform,
@@ -328,6 +334,12 @@ async function run() {
     !supabaseSrc.includes('login_hint'),
     'signInWithGoogle never leaks login_hint in Google OAuth redirect URLs'
   );
+  assert(
+    supabaseSrc.includes("flowType: 'pkce'") &&
+      supabaseSrc.includes('captureInitialOAuthUrlSnapshot') &&
+      supabaseSrc.includes('hydrateImplicitHashSessionIfNeeded'),
+    'Supabase client uses PKCE OAuth flow with pre-init URL snapshot capture and implicit hash fallback'
+  );
 
   // ---------------------------------------------------------------------------
   // 4 & 5. Protected Routes, Standalone PWA Intent Recovery, OAuth Callback & Loop Prevention
@@ -337,20 +349,22 @@ async function run() {
   assert(
     peekAdminOAuthIntent() === '/admin/payments' &&
       sessionStore.getItem(ADMIN_OAUTH_INTENT_KEY) !== null &&
-      localStore.getItem(ADMIN_OAUTH_INTENT_KEY) !== null,
-    'setAdminOAuthIntent persists /admin/payments in both sessionStorage and localStorage'
+      localStore.getItem(ADMIN_OAUTH_INTENT_KEY) !== null &&
+      localStore.getItem(OAUTH_FLOW_SOURCE_KEY) !== null,
+    'setAdminOAuthIntent persists /admin/payments and admin flow source in both sessionStorage and localStorage'
   );
   // Simulate standalone PWA -> browser tab boundary where sessionStorage is empty in the callback tab
   sessionStore.clear();
   assert(
-    peekAdminOAuthIntent() === '/admin/payments',
-    'peekAdminOAuthIntent recovers /admin/payments from same-origin localStorage across standalone PWA callback tab boundary'
+    peekAdminOAuthIntent() === '/admin/payments' && consumeOAuthFlowSource() === 'admin',
+    'peekAdminOAuthIntent and consumeOAuthFlowSource recover admin intent from same-origin localStorage across standalone PWA callback tab boundary'
   );
   assert(
     consumeAdminOAuthIntent() === '/admin/payments' &&
       sessionStore.getItem(ADMIN_OAUTH_INTENT_KEY) === null &&
-      localStore.getItem(ADMIN_OAUTH_INTENT_KEY) === null,
-    'consumeAdminOAuthIntent returns deep /admin/payments destination once and clears both sessionStorage and localStorage'
+      localStore.getItem(ADMIN_OAUTH_INTENT_KEY) === null &&
+      consumeOAuthFlowSource() === null,
+    'consumeAdminOAuthIntent and consumeOAuthFlowSource consume once and clear both sessionStorage and localStorage'
   );
   setAdminOAuthIntent('/dashboard/orders');
   assert(
@@ -358,23 +372,66 @@ async function run() {
     'setAdminOAuthIntent sanitizes non-admin paths back to /admin'
   );
 
+  const initialSnapshot = getInitialOAuthUrlSnapshot();
+  assert(
+    typeof initialSnapshot.hasCallbackPayload === 'boolean',
+    'getInitialOAuthUrlSnapshot exposes safe pre-initialization URL callback metadata'
+  );
+
+  // Verify stage-accurate OAuth error classification & separate DB role error reporting
+  assert(
+    classifyAdminOAuthFailureReason('access_denied', null, null) === 'access_denied' &&
+      classifyAdminOAuthFailureReason('validation_failed', null, 'Unsupported provider: provider is not enabled') ===
+        'provider_disabled' &&
+      classifyAdminOAuthFailureReason(
+        'server_error',
+        'unexpected_failure',
+        'Unable to exchange external code: invalid_client'
+      ) === 'external_code_exchange_failed' &&
+      classifyAdminOAuthFailureReason('invalid_request', null, 'Redirect URL is not allowed') ===
+        'redirect_mismatch' &&
+      classifyAdminOAuthFailureReason(
+        'server_error',
+        'unexpected_failure',
+        'Database error saving new user'
+      ) === 'database_profile_error' &&
+      classifyAdminOAuthFailureReason(null, null, 'PKCE code verifier not found in storage.') ===
+        'pkce_mismatch' &&
+      classifyAdminOAuthFailureReason(null, null, 'No session returned from authentication provider.') ===
+        'session_not_established',
+    'classifyAdminOAuthFailureReason accurately pinpoints each OAuth failure stage without masking external code or DB errors'
+  );
+
+  assert(
+    !ADMIN_DB_ROLE_MISSING_ERROR.toLowerCase().includes('official.amaas.dev@gmail.com') &&
+      String(ADMIN_DB_ROLE_MISSING_ERROR) !== String(UNIFORM_ADMIN_AUTH_ERROR) &&
+      resolveOAuthErrorMessage('external_code_exchange_failed').includes('Client Secret') &&
+      !resolveOAuthErrorMessage('provider_disabled').toLowerCase().includes('official.amaas.dev@gmail.com'),
+    'Post-OAuth DB authorization failure (ADMIN_DB_ROLE_MISSING_ERROR) and stage OAuth error messages are clear, distinct, and expose zero admin emails'
+  );
+
   const callbackSrc = fs.readFileSync('src/pages/auth/AuthCallbackPage.tsx', 'utf8');
   assert(
-    callbackSrc.includes('await supabase.auth.getSession()') &&
+    callbackSrc.includes('await supabase.auth.initialize()') &&
+      callbackSrc.includes('await supabase.auth.getSession()') &&
       callbackSrc.includes('if (!session?.user && code)') &&
+      callbackSrc.includes('exchangedAuthCodes') &&
       callbackSrc.includes('window.location.hash') &&
       callbackSrc.includes('verifyServerAdminSession()') &&
+      callbackSrc.includes("navigate('/admin/login?authz_error=missing_admin_role', { replace: true })") &&
+      callbackSrc.includes("navigate('/admin/login?oauth_error=1&reason=session_not_established'") &&
       callbackSrc.includes("navigate('/admin/login?denied=1', { replace: true })"),
-    'AuthCallbackPage parses hash & query OAuth errors, prevents double-PKCE exchange race, verifies server admin session, and redirects unauthorized accounts'
+    'AuthCallbackPage captures GoTrue initialize() errors, prevents duplicate PKCE code exchange, separates session_not_established and missing_admin_role, and redirects unauthorized accounts to ?denied=1'
   );
 
   const appRouterSrc = fs.readFileSync('src/App.tsx', 'utf8');
   assert(
     appRouterSrc.includes('OAuthCallbackRedirectBridge') &&
+      appRouterSrc.includes('consumeRootOAuthBridgeRedirect') &&
       appRouterSrc.includes('<Route path="payments"') &&
       appRouterSrc.includes('<Route path="websites"') &&
       appRouterSrc.includes('<Route path="settings"'),
-    'App.tsx bridges fallback root OAuth callbacks to /auth/callback and protects /admin, /admin/payments, /admin/websites, and /admin/settings'
+    'App.tsx bridges fallback root OAuth callbacks (even pre-init stripped URLs) to /auth/callback and protects /admin, /admin/payments, /admin/websites, and /admin/settings'
   );
 
   const appContextSrc = fs.readFileSync('src/context/AppContext.tsx', 'utf8');
@@ -387,9 +444,10 @@ async function run() {
   const guardSrc = fs.readFileSync('src/components/auth/AdminProtectedRoute.tsx', 'utf8');
   assert(
     guardSrc.includes('purgeUnauthorizedSession') &&
+      guardSrc.includes('to="/admin/login?authz_error=missing_admin_role"') &&
       guardSrc.includes('to="/admin/login?denied=1"') &&
       guardSrc.includes('isAuthorizedAdminEmail(verification.admin.email)'),
-    'AdminProtectedRoute signs out unauthorized accounts and redirects to /admin/login?denied=1 without exposing Admin Dashboard'
+    'AdminProtectedRoute signs out unauthorized accounts, reports missing_admin_role separately, and redirects unauthorized accounts to /admin/login?denied=1 without exposing Admin Dashboard'
   );
 
   const providerCheck = await checkGoogleOAuthProviderStatus();
