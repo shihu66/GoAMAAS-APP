@@ -272,20 +272,38 @@ export interface UserProfileRecord {
 export const ADMIN_OAUTH_INTENT_KEY = 'goamaas_admin_oauth_intent_v1';
 const ADMIN_OAUTH_INTENT_MAX_AGE_MS = 10 * 60 * 1000;
 
+function clearAdminOAuthIntentStorage(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.removeItem(ADMIN_OAUTH_INTENT_KEY);
+  } catch {
+    // Ignore storage exceptions
+  }
+  try {
+    window.localStorage.removeItem(ADMIN_OAUTH_INTENT_KEY);
+  } catch {
+    // Ignore storage exceptions
+  }
+}
+
 /**
- * Records non-authoritative post-OAuth destination for /admin sign-in so redirectTo
- * can remain a clean exact URL (/auth/callback) without query string mismatch in Supabase GoTrue.
+ * Records non-authoritative post-OAuth destination for /admin sign-in in both sessionStorage
+ * and localStorage (with strict 10-minute expiry) so standalone /admin PWAs and browser tabs
+ * preserve intent across Google OAuth redirects while keeping redirectTo a clean exact URL.
  * Authorization is NEVER derived from this storage value.
  */
 export function setAdminOAuthIntent(nextPath = '/admin'): void {
   if (typeof window === 'undefined') return;
   const safeNext =
     nextPath.startsWith('/admin') && nextPath !== '/admin/login' ? nextPath : '/admin';
+  const serialized = JSON.stringify({ nextPath: safeNext, createdAt: Date.now() });
   try {
-    window.sessionStorage.setItem(
-      ADMIN_OAUTH_INTENT_KEY,
-      JSON.stringify({ nextPath: safeNext, createdAt: Date.now() })
-    );
+    window.sessionStorage.setItem(ADMIN_OAUTH_INTENT_KEY, serialized);
+  } catch {
+    // Ignore storage exceptions
+  }
+  try {
+    window.localStorage.setItem(ADMIN_OAUTH_INTENT_KEY, serialized);
   } catch {
     // Ignore storage exceptions
   }
@@ -294,14 +312,16 @@ export function setAdminOAuthIntent(nextPath = '/admin'): void {
 export function peekAdminOAuthIntent(): string | null {
   if (typeof window === 'undefined') return null;
   try {
-    const raw = window.sessionStorage.getItem(ADMIN_OAUTH_INTENT_KEY);
+    const raw =
+      window.sessionStorage.getItem(ADMIN_OAUTH_INTENT_KEY) ||
+      window.localStorage.getItem(ADMIN_OAUTH_INTENT_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as { nextPath?: string; createdAt?: number };
     if (
       typeof parsed.createdAt !== 'number' ||
       Date.now() - parsed.createdAt > ADMIN_OAUTH_INTENT_MAX_AGE_MS
     ) {
-      window.sessionStorage.removeItem(ADMIN_OAUTH_INTENT_KEY);
+      clearAdminOAuthIntentStorage();
       return null;
     }
     const candidate = (parsed.nextPath || '').trim();
@@ -316,13 +336,7 @@ export function peekAdminOAuthIntent(): string | null {
 
 export function consumeAdminOAuthIntent(): string | null {
   const target = peekAdminOAuthIntent();
-  if (typeof window !== 'undefined') {
-    try {
-      window.sessionStorage.removeItem(ADMIN_OAUTH_INTENT_KEY);
-    } catch {
-      // Ignore
-    }
-  }
+  clearAdminOAuthIntentStorage();
   return target;
 }
 
@@ -339,7 +353,7 @@ export async function checkGoogleOAuthProviderStatus(): Promise<{
     return {
       enabled: false,
       checked: false,
-      errorMessage: 'Supabase authentication credentials are not configured.',
+      errorMessage: 'Authentication service credentials are not configured.',
     };
   }
 
@@ -368,7 +382,7 @@ export async function checkGoogleOAuthProviderStatus(): Promise<{
         enabled: false,
         checked: true,
         errorMessage:
-          'Google Sign-In is not yet enabled on the Supabase project. Enable Google under Supabase Dashboard → Authentication → Providers → Google and add the authorized callback URL.',
+          'Google Sign-In is currently disabled in Supabase Authentication settings. Enable the Google provider in Supabase Dashboard → Authentication → Providers → Google.',
       };
     }
 
@@ -384,13 +398,12 @@ export async function checkGoogleOAuthProviderStatus(): Promise<{
 export interface SignInWithGoogleOptions {
   isAdminFlow?: boolean;
   nextPath?: string;
-  loginHint?: string;
   skipWindowRedirect?: boolean;
 }
 
 /**
  * Initiates the real Google OAuth sign-in flow through Supabase Auth.
- * Never simulates authentication.
+ * Never simulates authentication and never exposes authorized emails in query strings.
  */
 export async function signInWithGoogle(
   customRedirectTo?: string,
@@ -434,7 +447,6 @@ export async function signInWithGoogle(
     const queryParams: Record<string, string> = options?.isAdminFlow
       ? {
           prompt: 'select_account',
-          ...(options.loginHint ? { login_hint: options.loginHint.trim().toLowerCase() } : {}),
         }
       : {
           access_type: 'offline',
@@ -451,6 +463,11 @@ export async function signInWithGoogle(
     });
 
     if (error) {
+      try {
+        if ((import.meta as any).env?.DEV) {
+          console.warn('[GoAMAAS Auth] Google OAuth initiation failed:', error.name || 'AuthError');
+        }
+      } catch {}
       return { data: null, error };
     }
 

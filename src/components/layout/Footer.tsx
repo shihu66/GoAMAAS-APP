@@ -1,7 +1,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { useLanguage } from '../../context/LanguageContext';
-import { Globe, Shield, Mail, Phone, MapPin, ExternalLink } from 'lucide-react';
+import { Globe, Shield, Phone, MapPin, ExternalLink } from 'lucide-react';
 
 const OFFICIAL_MAPS_URL =
   'https://www.google.com/maps/dir/?api=1&destination=Fulbarigate,+KUET-9203,+Khulna,+Bangladesh';
@@ -53,15 +53,6 @@ export const Footer: React.FC = () => {
                   className="font-mono hover:text-white transition-colors"
                 >
                   {f.hotline}
-                </a>
-              </div>
-              <div className="flex items-center gap-2.5">
-                <Mail className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-                <a
-                  href="mailto:official.amaas.dev@gmail.com"
-                  className="font-mono hover:text-white transition-colors"
-                >
-                  official.amaas.dev@gmail.com
                 </a>
               </div>
               <div className="flex items-center gap-2.5">

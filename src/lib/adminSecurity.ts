@@ -47,12 +47,18 @@ export interface AdminVerificationResult {
   message?: string;
 }
 
+export interface AdminAuthIdentityLike {
+  provider?: string;
+  identity_data?: Record<string, unknown> | null;
+}
+
 export interface AdminAuthUserLike {
   id: string;
   email?: string | null;
   email_confirmed_at?: string | null;
   confirmed_at?: string | null;
   user_metadata?: Record<string, unknown>;
+  identities?: AdminAuthIdentityLike[] | null;
 }
 
 export interface AdminVerificationDependencies {
@@ -87,6 +93,25 @@ export function isAuthorizedAdminEmail(email: string | null | undefined): boolea
 
 export function isAuthUserEmailVerified(user: AdminAuthUserLike | null | undefined): boolean {
   if (!user) return false;
+  const normalizedUserEmail = normalizeAdminEmail(user.email);
+  const googleIdentityVerified = Array.isArray(user.identities)
+    ? user.identities.some((identity) => {
+        if (identity?.provider !== 'google') return false;
+        const idData = identity.identity_data || {};
+        const idEmail =
+          typeof idData.email === 'string' ? normalizeAdminEmail(idData.email) : normalizedUserEmail;
+        return (
+          Boolean(normalizedUserEmail) &&
+          idEmail === normalizedUserEmail &&
+          (idData.email_verified === true || idData.verified === true)
+        );
+      })
+    : false;
+
+  if (googleIdentityVerified && Boolean(user.email_confirmed_at || user.confirmed_at)) {
+    return true;
+  }
+
   const meta = user.user_metadata || {};
   if (meta.email_verified === false) {
     return false;
@@ -282,8 +307,25 @@ export async function enforceMinimumAuthFloor(
   }
 }
 
+function logSanitizedAdminDiagnostic(reasonCode: string): void {
+  try {
+    if ((import.meta as any).env?.DEV) {
+      console.warn(`[GoAMAAS Admin Security] Verification status: ${reasonCode}`);
+    }
+  } catch {
+    // Ignore environment inspection errors
+  }
+}
+
 function isLikelyNetworkFailure(err: unknown): boolean {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return true;
+  }
+  const status =
+    err && typeof err === 'object' && 'status' in err
+      ? Number((err as { status?: unknown }).status)
+      : NaN;
+  if (status === 429 || status === 502 || status === 503 || status === 504) {
     return true;
   }
   const msg =
@@ -296,7 +338,9 @@ function isLikelyNetworkFailure(err: unknown): boolean {
     msg.includes('failed to fetch') ||
     msg.includes('networkerror') ||
     msg.includes('network request failed') ||
-    msg.includes('load failed')
+    msg.includes('load failed') ||
+    msg.includes('too many requests') ||
+    msg.includes('rate limit')
   );
 }
 
@@ -434,6 +478,7 @@ export async function verifyServerAdminSession(
 
     // 1. Strict Single-Account Email Allowlist Check (trimmed & lowercased)
     if (!isAuthorizedAdminEmail(normalizedEmail)) {
+      logSanitizedAdminDiagnostic('forbidden:unauthorized_email');
       return {
         status: 'forbidden',
         admin: null,
@@ -445,6 +490,7 @@ export async function verifyServerAdminSession(
 
     // 2. Mandatory Verified Email Check
     if (!isAuthUserEmailVerified(authUser)) {
+      logSanitizedAdminDiagnostic('forbidden:unverified_email');
       return {
         status: 'forbidden',
         admin: null,
@@ -461,7 +507,11 @@ export async function verifyServerAdminSession(
       fetchMfaState(),
     ]);
 
-    if (rpcRes.error && isLikelyNetworkFailure(rpcRes.error)) {
+    if (
+      (rpcRes.error && isLikelyNetworkFailure(rpcRes.error)) ||
+      (profileRes.error && isLikelyNetworkFailure(profileRes.error))
+    ) {
+      logSanitizedAdminDiagnostic('network_error:role_verification');
       return {
         status: 'network_error',
         admin: null,
@@ -476,6 +526,7 @@ export async function verifyServerAdminSession(
       !profileRes.profile?.email || isAuthorizedAdminEmail(profileRes.profile.email);
 
     if (!isRpcAdmin || !isProfileAdmin || !profileEmailMatches) {
+      logSanitizedAdminDiagnostic('forbidden:missing_admin_role');
       return {
         status: 'forbidden',
         admin: null,

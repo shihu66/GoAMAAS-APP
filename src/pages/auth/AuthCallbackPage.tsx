@@ -22,6 +22,31 @@ import { notifyAdminServiceWorkerSignOut } from '../../hooks/useAdminPWA';
 import { useApp } from '../../context/AppContext';
 import { Loader2, AlertCircle, CheckCircle2, ArrowRight } from 'lucide-react';
 
+function classifyAdminOAuthFailureReason(
+  errorParam: string | null,
+  errorCode: string | null,
+  errorDescription: string | null
+): string {
+  const combined = `${errorParam || ''} ${errorCode || ''} ${errorDescription || ''}`.toLowerCase();
+  if (errorParam === 'access_denied' || combined.includes('access_denied')) {
+    return 'access_denied';
+  }
+  if (combined.includes('provider is not enabled') || combined.includes('unsupported provider')) {
+    return 'provider_disabled';
+  }
+  if (
+    combined.includes('database error') ||
+    combined.includes('unexpected_failure') ||
+    combined.includes('saving new user')
+  ) {
+    return 'profile_sync_error';
+  }
+  if (combined.includes('code verifier') || combined.includes('flow_state')) {
+    return 'pkce_mismatch';
+  }
+  return 'session_failed';
+}
+
 export const AuthCallbackPage: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -43,22 +68,38 @@ export const AuthCallbackPage: React.FC = () => {
       effectiveNext === '/admin' || effectiveNext.startsWith('/admin/');
     setIsAdminFlowState(isAdminAuthFlow);
 
-    const errorParam = searchParams.get('error');
-    const errorDescription = searchParams.get('error_description');
+    const hashParams =
+      typeof window !== 'undefined' && window.location.hash
+        ? new URLSearchParams(window.location.hash.replace(/^#/, ''))
+        : new URLSearchParams();
+
+    const errorParam = searchParams.get('error') || hashParams.get('error');
+    const errorCode = searchParams.get('error_code') || hashParams.get('error_code');
+    const errorDescription =
+      searchParams.get('error_description') || hashParams.get('error_description');
 
     if (errorParam) {
+      const reason = classifyAdminOAuthFailureReason(errorParam, errorCode, errorDescription);
+      try {
+        if ((import.meta as any).env?.DEV) {
+          console.warn('[GoAMAAS Auth Callback] OAuth error returned:', reason);
+        }
+      } catch {}
+
       if (isAdminAuthFlow) {
         void (async () => {
           clearAdminSessionEvents();
           notifyAdminServiceWorkerSignOut();
           await signOutFromSupabase();
-          await logout();
-          navigate('/admin/login?oauth_error=1', { replace: true });
+          await logout({ silent: true });
+          navigate(`/admin/login?oauth_error=1&reason=${encodeURIComponent(reason)}`, {
+            replace: true,
+          });
         })();
         return;
       }
       setStatus('error');
-      if (errorParam === 'access_denied') {
+      if (reason === 'access_denied') {
         setErrorMessage(
           'Google authentication was cancelled. You can try again or use your email and password.'
         );
@@ -72,7 +113,7 @@ export const AuthCallbackPage: React.FC = () => {
 
     if (!isSupabaseConfigured || !supabase) {
       if (isAdminAuthFlow) {
-        navigate('/admin/login?oauth_error=1', { replace: true });
+        navigate('/admin/login?oauth_error=1&reason=unconfigured', { replace: true });
         return;
       }
       setStatus('error');
@@ -105,7 +146,8 @@ export const AuthCallbackPage: React.FC = () => {
             session = exchangeData.session;
             sessionError = null;
           } else if (exchangeError) {
-            // Re-check getSession() in case detectSessionInUrl completed concurrently
+            // Brief settle pause then re-check getSession() in case detectSessionInUrl completed concurrently
+            await new Promise((resolve) => setTimeout(resolve, 250));
             const retryRes = await supabase.auth.getSession();
             if (retryRes.data.session?.user) {
               session = retryRes.data.session;
@@ -146,14 +188,16 @@ export const AuthCallbackPage: React.FC = () => {
             clearAdminSessionEvents();
             notifyAdminServiceWorkerSignOut();
             await signOutFromSupabase();
-            await logout();
-            recordAdminLoginFailure();
+            await logout({ silent: true });
+            if (adminVerification.forbiddenReason !== 'missing_admin_role') {
+              recordAdminLoginFailure();
+            }
             navigate('/admin/login?denied=1', { replace: true });
             return;
           }
 
           if (adminVerification.status === 'network_error') {
-            navigate('/admin/login?oauth_error=1', { replace: true });
+            navigate('/admin/login?oauth_error=1&reason=network_error', { replace: true });
             return;
           }
 
@@ -200,9 +244,45 @@ export const AuthCallbackPage: React.FC = () => {
           clearAdminSessionEvents();
           notifyAdminServiceWorkerSignOut();
           await signOutFromSupabase();
-          await logout();
+          await logout({ silent: true });
           navigate('/admin/login?denied=1', { replace: true });
           return;
+        }
+
+        // Fallback recovery if storage intent was cleared across browsers/PWA handoff during admin sign-in:
+        // verify server-side admin status BEFORE auto-provisioning any merchant profile.
+        if (!nextFromQuery && isAuthorizedAdminEmail(authenticatedUser.email)) {
+          const recoveredAdminCheck = await verifyServerAdminSession();
+          if (recoveredAdminCheck.status === 'mfa_required') {
+            clearAdminLoginFailures();
+            navigate('/admin/login', { state: { from: '/admin' }, replace: true });
+            return;
+          }
+          if (
+            recoveredAdminCheck.status === 'authorized' &&
+            recoveredAdminCheck.admin &&
+            isAuthorizedAdminEmail(recoveredAdminCheck.admin.email)
+          ) {
+            clearAdminLoginFailures();
+            setAuthenticatedUser({
+              id: recoveredAdminCheck.admin.id,
+              name: recoveredAdminCheck.admin.name,
+              email: AUTHORIZED_ADMIN_EMAIL,
+              role: 'admin',
+              storeId: '',
+            });
+            recordAdminSessionEvent({
+              adminId: recoveredAdminCheck.admin.id,
+              action: 'admin_sign_in_google',
+              targetType: 'session',
+              targetId: 'admin_portal',
+              outcome: 'success',
+              summary: 'Verified Google OAuth administrator session established.',
+            });
+            setStatus('success');
+            navigate('/admin', { replace: true });
+            return;
+          }
         }
 
         // Standard Customer / Merchant OAuth Flow
@@ -264,12 +344,22 @@ export const AuthCallbackPage: React.FC = () => {
           }
         }, 400);
       } catch (err: unknown) {
+        const errText = err instanceof Error ? err.message : '';
+        const reason = classifyAdminOAuthFailureReason(null, null, errText);
+        try {
+          if ((import.meta as any).env?.DEV) {
+            console.warn('[GoAMAAS Auth Callback] Session establishment failed:', reason);
+          }
+        } catch {}
+
         if (isAdminAuthFlow) {
           clearAdminSessionEvents();
           notifyAdminServiceWorkerSignOut();
           await signOutFromSupabase().catch(() => {});
-          await logout().catch(() => {});
-          navigate('/admin/login?oauth_error=1', { replace: true });
+          await logout({ silent: true }).catch(() => {});
+          navigate(`/admin/login?oauth_error=1&reason=${encodeURIComponent(reason)}`, {
+            replace: true,
+          });
           return;
         }
         setStatus('error');

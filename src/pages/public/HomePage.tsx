@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { useApp } from '../../context/AppContext';
 import { useLanguage, usePageSeo } from '../../context/LanguageContext';
-import { DASHBOARD_SUBSCRIPTION_PLANS } from '../../data/pricingConfig';
+import { FREE_MERCHANT_DASHBOARD_PLAN } from '../../data/pricingConfig';
 import { Reveal, StaggerGroup, StaggerItem } from '../../components/ui/MotionPrimitives';
 import {
   ArrowRight,
@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 
 export const HomePage: React.FC = () => {
-  const { websiteSubscriptionPlan } = useApp();
+  const { websiteSubscriptionPlan, isAuthenticated } = useApp();
   const { t } = useLanguage();
   const h = t.home;
   const prefersReducedMotion = useReducedMotion();
@@ -928,72 +928,78 @@ export const HomePage: React.FC = () => {
               </div>
             </Reveal>
 
-            {/* 4 Dashboard Subscription Plans */}
+            {/* 100% Free Forever Core Merchant Dashboard */}
             <div className="lg:col-span-7 flex flex-col justify-between space-y-6">
-              <div className="flex items-center justify-between gap-2">
-                <h3 className="text-sm font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-sm font-bold tracking-tight text-slate-800 dark:text-slate-200">
                   {h.pricing.dashboardSection.label}
                 </h3>
-                <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+                <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-400">
                   {h.pricing.dashboardSection.trialBadge}
                 </span>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {DASHBOARD_SUBSCRIPTION_PLANS.map((plan) => {
-                  const localizedPlan = t.pricingPage.dashboardTab.plans[plan.id];
-                  return (
-                    <div
-                      key={plan.id}
-                      className={`p-5 rounded-2xl border flex flex-col justify-between space-y-4 ${
-                        plan.isPopular
-                          ? 'bg-blue-50/40 dark:bg-blue-950/20 border-blue-500/60'
-                          : 'bg-white dark:bg-slate-900 border-slate-200/80 dark:border-slate-800'
-                      }`}
-                    >
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-base font-bold text-slate-950 dark:text-white">
-                            {localizedPlan.name}
-                          </span>
-                          {plan.isPopular && (
-                            <span className="text-[11px] font-bold uppercase tracking-wider text-blue-600 dark:text-blue-400">
-                              {h.pricing.dashboardSection.popularBadge}
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-xs text-slate-500 dark:text-slate-400">
-                          {localizedPlan.subtitle}
-                        </p>
-                        <div className="flex items-baseline gap-1 pt-1">
-                          <span className="text-2xl font-extrabold font-mono text-slate-950 dark:text-white tabular-nums">
-                            ৳{plan.priceMonthly.toLocaleString()}
-                          </span>
-                          <span className="text-xs text-slate-500">
-                            {h.pricing.dashboardSection.perMonth}
-                          </span>
-                        </div>
-                      </div>
-
-                      <Link
-                        to="/register"
-                        className="min-h-[42px] inline-flex items-center justify-center px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-900 dark:text-white text-xs font-semibold transition-colors"
-                      >
-                        {h.pricing.dashboardSection.cta}
-                      </Link>
+              <div className="p-6 sm:p-8 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 flex flex-col justify-between space-y-6">
+                <div className="space-y-4">
+                  <div className="flex flex-wrap items-baseline justify-between gap-4">
+                    <div className="space-y-1">
+                      <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                        {t.pricingPage.dashboardTab.kicker} · {h.pricing.dashboardSection.popularBadge}
+                      </p>
+                      <h4 className="text-xl sm:text-2xl font-bold text-slate-950 dark:text-white tracking-tight">
+                        {t.pricingPage.dashboardTab.plans.pro.name}
+                      </h4>
                     </div>
-                  );
-                })}
-              </div>
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="text-3xl sm:text-4xl font-extrabold font-mono text-slate-950 dark:text-white tabular-nums">
+                        ৳{FREE_MERCHANT_DASHBOARD_PLAN.priceMonthly}
+                      </span>
+                      <span className="text-xs text-slate-500 dark:text-slate-400">
+                        {h.pricing.dashboardSection.perMonth}
+                      </span>
+                    </div>
+                  </div>
 
-              <div className="pt-2">
-                <Link
-                  to="/pricing"
-                  className="inline-flex items-center gap-1.5 text-xs font-bold text-blue-600 dark:text-blue-400 hover:underline"
-                >
-                  <span>{h.pricing.dashboardSection.compareAllCta}</span>
-                  <ArrowRight className="w-3.5 h-3.5" />
-                </Link>
+                  <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed">
+                    {t.pricingPage.dashboardTab.subnote}
+                  </p>
+
+                  <div className="pt-4 border-t border-slate-200/70 dark:border-slate-800 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2.5">
+                    {t.pricingPage.dashboardTab.plans.pro.features.map((feat, idx) => (
+                      <div key={idx} className="flex items-start gap-2 text-xs sm:text-sm text-slate-700 dark:text-slate-300">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                        <span>{feat}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="pt-4 border-t border-slate-200/70 dark:border-slate-800 space-y-4">
+                  <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                    <span className="font-semibold text-slate-700 dark:text-slate-200">
+                      {t.pricingPage.dashboardTab.integrationNoteLabel}:{' '}
+                    </span>
+                    {t.pricingPage.dashboardTab.integrationNoteBody}
+                  </p>
+
+                  <div className="flex flex-wrap items-center justify-between gap-4">
+                    <Link
+                      to={isAuthenticated ? '/dashboard' : '/register'}
+                      className="min-h-[44px] inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 dark:bg-white dark:hover:bg-slate-100 text-white dark:text-slate-950 text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap shrink-0"
+                    >
+                      <span>{h.pricing.dashboardSection.cta}</span>
+                      <ArrowRight className="w-4 h-4" />
+                    </Link>
+
+                    <Link
+                      to="/pricing"
+                      className="inline-flex items-center gap-1.5 text-xs font-bold text-blue-600 dark:text-blue-400 hover:underline whitespace-nowrap shrink-0"
+                    >
+                      <span>{h.pricing.dashboardSection.compareAllCta}</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </Link>
+                  </div>
+                </div>
               </div>
             </div>
           </div>

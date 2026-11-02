@@ -1,5 +1,5 @@
 import React from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AppProvider } from './context/AppContext';
 import { LanguageProvider } from './context/LanguageContext';
 import { validateSubdomainFormat } from './lib/supabase';
@@ -52,6 +52,31 @@ import { SupportPage } from './pages/dashboard/SupportPage';
 import { AdminLoginPage } from './pages/admin/AdminLoginPage';
 import { AdminDashboardPage } from './pages/admin/AdminDashboardPage';
 
+/**
+ * Bridges OAuth redirects that land on the root Site URL (e.g. /?code=... or /#access_token=... or /#error=...)
+ * when Supabase GoTrue falls back to Site URL, ensuring callback parameters are processed by /auth/callback.
+ */
+function OAuthCallbackRedirectBridge({ children }: { children: React.ReactNode }) {
+  const location = useLocation();
+  if (
+    location.pathname !== '/auth/callback' &&
+    location.pathname !== '/reset-password' &&
+    !location.pathname.startsWith('/admin')
+  ) {
+    const searchParams = new URLSearchParams(location.search);
+    const hashParams = new URLSearchParams(location.hash.replace(/^#/, ''));
+    const hasOAuthCallbackPayload =
+      Boolean(searchParams.get('code')) ||
+      Boolean(searchParams.get('error') && searchParams.get('error_description')) ||
+      Boolean(hashParams.get('access_token')) ||
+      Boolean(hashParams.get('error'));
+    if (hasOAuthCallbackPayload) {
+      return <Navigate to={`/auth/callback${location.search}${location.hash}`} replace />;
+    }
+  }
+  return <>{children}</>;
+}
+
 export default function App() {
   // Check if current request is dispatched to a tenant subdomain (e.g. urbanfashion.amaas.xyz or urbanfashion.localhost)
   const isTenantSubdomain = (() => {
@@ -77,6 +102,7 @@ export default function App() {
           </Routes>
         )}
         {!isTenantSubdomain && (
+        <OAuthCallbackRedirectBridge>
         <Routes>
           {/* Public Website Routes */}
           <Route element={<PublicLayout />}>
@@ -150,6 +176,7 @@ export default function App() {
             <Route path="customers" element={<AdminDashboardPage />} />
             <Route path="requests" element={<AdminDashboardPage />} />
             <Route path="gateways" element={<AdminDashboardPage />} />
+            <Route path="settings" element={<AdminDashboardPage />} />
             <Route path="audit" element={<AdminDashboardPage />} />
             <Route path="security" element={<AdminDashboardPage />} />
             <Route path="*" element={<Navigate to="/admin" replace />} />
@@ -158,6 +185,7 @@ export default function App() {
           {/* Catch-all redirect */}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        </OAuthCallbackRedirectBridge>
         )}
       </BrowserRouter>
       </AppProvider>

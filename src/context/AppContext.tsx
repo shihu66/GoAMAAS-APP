@@ -52,6 +52,7 @@ import {
 import {
   DEFAULT_WEBSITE_SUBSCRIPTION_PLAN,
   DashboardPlanId,
+  evaluateServiceAccessState,
   getDashboardPlanById,
   normalizeDashboardPlanId,
   resolveAuthoritativeServicePrice,
@@ -80,6 +81,7 @@ import {
   updateUserPassword,
   resendVerificationEmail,
   signOutFromSupabase,
+  peekAdminOAuthIntent,
   getUserProfile,
   upsertUserProfile,
   getSupabaseConfigStatus,
@@ -160,7 +162,7 @@ interface AppContextType {
   requestPasswordReset: (email: string) => Promise<{ error: Error | null }>;
   updatePassword: (password: string) => Promise<{ error: Error | null }>;
   resendVerification: (email: string) => Promise<{ error: Error | null }>;
-  logout: () => Promise<void>;
+  logout: (options?: { silent?: boolean }) => Promise<void>;
   switchRole: (role: UserRole) => void;
 
   // Stores
@@ -366,17 +368,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Toast System
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
-  const showToast = (message: string, type: ToastMessage['type'] = 'success') => {
-    const id = `toast-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
-    setToasts((prev) => [...prev, { id, message, type }]);
-    setTimeout(() => {
-      removeToast(id);
-    }, 4000);
-  };
-
-  const removeToast = (id: string) => {
+  const removeToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
-  };
+  }, []);
+
+  const showToast = useCallback(
+    (message: string, type: ToastMessage['type'] = 'success') => {
+      const id = `toast-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      setToasts((prev) => [...prev, { id, message, type }]);
+      setTimeout(() => {
+        removeToast(id);
+      }, 4000);
+    },
+    [removeToast]
+  );
 
   // User & Auth State (Authoritative Supabase session when configured; never trust metadata/localStorage for admin role)
   const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
@@ -422,10 +427,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const isOnAdminRoute =
       typeof window !== 'undefined' &&
-      (window.location.pathname === '/admin' || window.location.pathname.startsWith('/admin/'));
+      (window.location.pathname === '/admin' ||
+        window.location.pathname.startsWith('/admin/') ||
+        window.location.pathname === '/auth/callback' ||
+        Boolean(peekAdminOAuthIntent()));
 
     // Ensure profile row exists for OAuth / confirmed merchant users without trusting metadata role
-    // Never auto-provision a merchant profile row while inside /admin routes
+    // Never auto-provision a merchant profile row while inside /admin routes or /auth/callback
     if (!profile && isSupabaseConfigured && !isOnAdminRoute) {
       await upsertUserProfile({
         id: userId,
@@ -574,16 +582,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [user]);
 
-  const setAuthenticatedUser = (newUser: User) => {
+  const setAuthenticatedUser = useCallback((newUser: User) => {
     const safeRole: UserRole =
       isSupabaseConfigured &&
       newUser.role === 'admin' &&
       isAuthorizedAdminEmail(newUser.email)
         ? 'admin'
         : 'merchant';
-    setUser({ ...newUser, role: safeRole });
-    setRole(safeRole);
-  };
+    setUser((prev) => {
+      if (
+        prev &&
+        prev.id === newUser.id &&
+        prev.name === newUser.name &&
+        prev.email === newUser.email &&
+        prev.role === safeRole &&
+        prev.storeId === newUser.storeId
+      ) {
+        return prev;
+      }
+      return { ...newUser, role: safeRole };
+    });
+    setRole((prevRole) => (prevRole === safeRole ? prevRole : safeRole));
+  }, []);
 
   const loginWithGoogle = async (customRedirectTo?: string): Promise<{ error: Error | null }> => {
     const result = await signInWithGoogle(customRedirectTo);
@@ -729,13 +749,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return result;
   };
 
-  const logout = async () => {
-    if (isSupabaseConfigured && supabase) {
-      await signOutFromSupabase();
-    }
-    clearAuthenticatedSessionState();
-    showToast('Signed out of GoAMAAS session', 'info');
-  };
+  const logout = useCallback(
+    async (options?: { silent?: boolean }) => {
+      if (isSupabaseConfigured && supabase) {
+        await signOutFromSupabase();
+      }
+      clearAuthenticatedSessionState();
+      if (!options?.silent) {
+        showToast('Signed out of GoAMAAS session', 'info');
+      }
+    },
+    [clearAuthenticatedSessionState, showToast]
+  );
 
   const switchRole = (newRole: UserRole) => {
     // SECURITY: Client-side role switching can never grant administrator privileges
@@ -785,10 +810,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return;
       }
 
-      // Never auto-provision a default merchant store for platform admin sessions or /admin routes
+      // Never auto-provision a default merchant store for platform admin sessions, /admin routes, or OAuth callback handoff
       const isOnAdminRoute =
         typeof window !== 'undefined' &&
-        (window.location.pathname === '/admin' || window.location.pathname.startsWith('/admin/'));
+        (window.location.pathname === '/admin' ||
+          window.location.pathname.startsWith('/admin/') ||
+          window.location.pathname === '/auth/callback' ||
+          Boolean(peekAdminOAuthIntent()));
       if (user.role === 'admin' || isOnAdminRoute) return;
 
       // Auto-provision default store once if authenticated user has zero stores in DB
@@ -2849,6 +2877,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: msg };
     }
 
+    if (params.serviceType === 'dashboard_plan') {
+      const msg = 'The GoAMAAS Merchant Dashboard is 100% free permanently. No subscription payment is required.';
+      showToast(msg, 'info');
+      return { success: false, message: msg };
+    }
+
     const cleanServiceId = (params.serviceId || '').trim();
     if (!cleanServiceId) {
       const msg = 'Missing target service ID for payment submission.';
@@ -2866,15 +2900,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let resolvedServiceId = cleanServiceId;
     let resolvedPlanTier = (params.planTier || '').trim();
 
-    if (params.serviceType === 'dashboard_plan') {
-      const canonicalPlanId = normalizeDashboardPlanId(cleanServiceId);
-      if (!canonicalPlanId) {
-        const msg = 'Invalid or unrecognized dashboard plan selected.';
-        showToast(msg, 'error');
-        return { success: false, message: msg };
-      }
-      resolvedServiceId = canonicalPlanId;
-    } else if (params.serviceType === 'ai_automation') {
+    if (params.serviceType === 'ai_automation') {
       resolvedServiceId = cleanServiceId.toLowerCase();
     }
 
@@ -2938,9 +2964,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (r.userId !== user.id || r.serviceType !== params.serviceType || r.status !== 'pending') {
         return false;
       }
-      if (params.serviceType === 'dashboard_plan') {
-        return normalizeDashboardPlanId(r.serviceId) === resolvedServiceId;
-      }
       return r.serviceId.trim() === resolvedServiceId;
     });
     if (hasDuplicatePendingService) {
@@ -2982,47 +3005,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       let authoritativeAmount: number | null = null;
 
-      if (params.serviceType === 'dashboard_plan') {
-        if (isSupabaseConfigured) {
-          const planEntry = (activeCatalog || []).find(
-            (entry) =>
-              entry.serviceType === 'dashboard_plan' &&
-              entry.serviceCode.trim().toLowerCase() === resolvedServiceId &&
-              entry.isActive &&
-              Number.isFinite(entry.priceBdt) &&
-              entry.priceBdt > 0
-          );
-          if (!planEntry) {
-            const msg = 'The selected dashboard plan is currently unavailable or inactive.';
-            showToast(msg, 'error');
-            return { success: false, message: msg };
-          }
-          if (submittedAmount !== planEntry.priceBdt) {
-            const msg = `Payment amount (৳${submittedAmount}) does not match the active ${planEntry.planTierLabel} plan price (৳${planEntry.priceBdt}). Please refresh Billing and try again.`;
-            showToast(msg, 'error');
-            return { success: false, message: msg };
-          }
-          resolvedPlanTier = planEntry.planTierLabel;
-          authoritativeAmount = planEntry.priceBdt;
-        } else {
-          const offlinePrice = resolveAuthoritativeServicePrice({
-            serviceType: 'dashboard_plan',
-            serviceId: resolvedServiceId,
-          });
-          if (offlinePrice === null || offlinePrice <= 0) {
-            const msg = 'Invalid or unrecognized dashboard plan selected.';
-            showToast(msg, 'error');
-            return { success: false, message: msg };
-          }
-          if (submittedAmount !== offlinePrice) {
-            const msg = `Payment amount (৳${submittedAmount}) does not match the selected plan price (৳${offlinePrice}).`;
-            showToast(msg, 'error');
-            return { success: false, message: msg };
-          }
-          resolvedPlanTier = getDashboardPlanById(resolvedServiceId)?.name || resolvedPlanTier;
-          authoritativeAmount = offlinePrice;
-        }
-      } else if (params.serviceType === 'ai_automation') {
+      if (params.serviceType === 'ai_automation') {
         const monthlyExpected = resolveAuthoritativeServicePrice({
           serviceType: 'ai_automation',
           serviceId: resolvedServiceId,
@@ -3578,170 +3561,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     serviceName: string,
     category: ServiceTrialCategory
   ): ServiceAccessStatus => {
-    // 1. Super admin always has full unrestricted access
-    if (role === 'admin') {
-      return {
-        serviceId,
-        serviceName,
-        serviceCategory: category,
-        status: 'subscribed',
-        hasAccess: true,
-        isExpired: false,
-      };
-    }
-
-    // 2. Check verified approved payment requests & paid website subscriptions first
-    if (user?.id) {
-      const normalizedId = (serviceId || '').trim().toLowerCase();
-      const userApprovedPayments = paymentRequests.filter(
-        (r) => r.userId === user.id && r.status === 'approved'
-      );
-
-      if (category === 'dashboard') {
-        const targetPlan = normalizeDashboardPlanId(normalizedId);
-        const hasApprovedDashboard = userApprovedPayments.some((r) => {
-          if (r.serviceType !== 'dashboard_plan') return false;
-          const reqCode = r.serviceId.trim().toLowerCase();
-          const approvedPlan =
-            normalizeDashboardPlanId(reqCode) || normalizeDashboardPlanId(r.planTier);
-          if (normalizedId === 'dashboard_business' && approvedPlan !== null) {
-            return true;
-          }
-          if (targetPlan && approvedPlan) {
-            return targetPlan === approvedPlan;
-          }
-          return reqCode === normalizedId;
-        });
-        if (hasApprovedDashboard) {
-          return {
-            serviceId,
-            serviceName,
-            serviceCategory: category,
-            status: 'subscribed',
-            hasAccess: true,
-            isExpired: false,
-          };
-        }
-      } else if (category === 'ai_automation') {
-        const hasApprovedAuto = userApprovedPayments.some(
-          (r) =>
-            r.serviceType === 'ai_automation' &&
-            (r.serviceId.trim().toLowerCase() === normalizedId ||
-              normalizedId === 'ai_automations')
-        );
-        if (hasApprovedAuto) {
-          return {
-            serviceId,
-            serviceName,
-            serviceCategory: category,
-            status: 'subscribed',
-            hasAccess: true,
-            isExpired: false,
-          };
-        }
-      } else if (category === 'landing_pages') {
-        const hasApprovedLandingPlan = userApprovedPayments.some((r) => {
-          if (r.serviceType !== 'dashboard_plan') return false;
-          const reqCode = r.serviceId.trim().toLowerCase();
-          const approvedPlan =
-            normalizeDashboardPlanId(reqCode) || normalizeDashboardPlanId(r.planTier);
-          return (
-            approvedPlan === 'pro' ||
-            approvedPlan === 'enterprise' ||
-            approvedPlan === 'business'
-          );
-        });
-        if (hasApprovedLandingPlan) {
-          return {
-            serviceId,
-            serviceName,
-            serviceCategory: category,
-            status: 'subscribed',
-            hasAccess: true,
-            isExpired: false,
-          };
-        }
-      } else if (category === 'website') {
-        const hasPaidSite = subscribedWebsites.some(
-          (w) =>
-            w.userId === user.id &&
-            w.paymentStatus === 'paid' &&
-            (w.subscriptionStatus === 'active' || w.subscriptionStatus === 'grace_period')
-        );
-        if (hasPaidSite) {
-          return {
-            serviceId,
-            serviceName,
-            serviceCategory: category,
-            status: 'subscribed',
-            hasAccess: true,
-            isExpired: false,
-          };
-        }
-      }
-    }
-
-    // Website Service strictly requires verified payment — never grant access via free trial records
-    if (category === 'website') {
-      return {
-        serviceId,
-        serviceName,
-        serviceCategory: category,
-        status: 'available',
-        hasAccess: false,
-        isExpired: false,
-      };
-    }
-
-    // 3. Check if a trial record exists for this specific service
-    const record = serviceTrials.find((t) => t.serviceId === serviceId && (!t.userId || t.userId === user?.id));
-
-    if (!record) {
-      return {
-        serviceId,
-        serviceName,
-        serviceCategory: category,
-        status: 'available',
-        hasAccess: false,
-        isExpired: false,
-      };
-    }
-
-    const now = new Date();
-    const expiresAt = new Date(record.expiresAt);
-    const diffMs = expiresAt.getTime() - now.getTime();
-    const isExpired = diffMs <= 0 || record.status === 'expired';
-
-    if (isExpired) {
-      return {
-        serviceId,
-        serviceName,
-        serviceCategory: category,
-        status: 'trial_expired',
-        hasAccess: false,
-        trialRecord: record,
-        daysRemaining: 0,
-        hoursRemaining: 0,
-        formattedExpiresAt: expiresAt.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }),
-        isExpired: true,
-      };
-    }
-
-    const daysRemaining = Math.max(1, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
-    const hoursRemaining = Math.max(1, Math.ceil(diffMs / (1000 * 60 * 60)));
-
-    return {
+    return evaluateServiceAccessState({
       serviceId,
       serviceName,
-      serviceCategory: category,
-      status: 'trial_active',
-      hasAccess: true,
-      trialRecord: record,
-      daysRemaining,
-      hoursRemaining,
-      formattedExpiresAt: expiresAt.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }),
-      isExpired: false,
-    };
+      category,
+      role,
+      userId: user?.id,
+      paymentRequests,
+      subscribedWebsites,
+      serviceTrials,
+    });
   };
 
   // Activates a dedicated 7-day free trial for a specific service
@@ -3751,6 +3580,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     category: ServiceTrialCategory
   ): Promise<{ success: boolean; message: string; trial?: ServiceTrialRecord }> => {
     const normalizedServiceId = (serviceId || '').trim().toLowerCase();
+    if (category === 'dashboard' || category === 'landing_pages') {
+      const msg = 'All core Merchant Dashboard features are 100% free permanently — no trial activation needed.';
+      showToast(msg, 'info');
+      return { success: true, message: msg };
+    }
     if (
       category === 'website' ||
       normalizedServiceId === 'website_lite' ||
@@ -3884,19 +3718,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setInvoices(derivedInvoices);
   }, [paymentRequests, user?.id, role]);
 
-  const updatePlan = (newPlan: DashboardPlanId | Uppercase<DashboardPlanId>) => {
-    if (isSupabaseConfigured) {
-      showToast('Plan upgrades require verified payment approval in Billing.', 'warning');
-      return;
-    }
-    const normalized = normalizeDashboardPlanId(newPlan);
-    if (!normalized) {
-      showToast('Invalid dashboard plan selected.', 'error');
-      return;
-    }
-    const planLabel = getDashboardPlanById(normalized)?.name || normalized;
-    setCurrentPlan(normalized);
-    showToast(`Upgraded subscription to ${planLabel} plan!`, 'success');
+  const updatePlan = (_newPlan: DashboardPlanId | Uppercase<DashboardPlanId>) => {
+    showToast('All Merchant Dashboard features are 100% free permanently — no paid plan upgrade is required.', 'info');
   };
 
   const cancelSubscription = () => {

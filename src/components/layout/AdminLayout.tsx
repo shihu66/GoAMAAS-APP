@@ -164,8 +164,8 @@ export const AdminLayout: React.FC = () => {
             <p className="text-xs font-semibold text-slate-900 dark:text-white truncate">
               {verifiedAdmin.name}
             </p>
-            <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate font-mono">
-              {verifiedAdmin.email}
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+              Verified Administrator
             </p>
             <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-1">
               AMAAS Technologies

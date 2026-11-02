@@ -18,15 +18,14 @@ import {
   Layers,
   RefreshCw,
   XCircle,
+  Truck,
 } from 'lucide-react';
 import {
-  DASHBOARD_SUBSCRIPTION_PLANS,
+  FREE_MERCHANT_DASHBOARD_PLAN,
   AI_AUTOMATION_PACKAGES,
   WEBSITE_DEVELOPMENT_PACKAGES,
-  DashboardPlanConfig,
   AutomationPackageConfig,
   WebsitePackageConfig,
-  normalizeDashboardPlanId,
   resolveCatalogPlanState,
 } from '../../data/pricingConfig';
 import { isSupabaseConfigured } from '../../lib/supabase';
@@ -73,7 +72,6 @@ export const BillingPage: React.FC = () => {
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
   // Confirmation dialogs & verified payment modal payload
-  const [selectedDashboardPlan, setSelectedDashboardPlan] = useState<DashboardPlanConfig | null>(null);
   const [selectedAutoPackage, setSelectedAutoPackage] = useState<AutomationPackageConfig | null>(null);
   const [isCancelDialogOpen, setIsCancelDialogOpen] = useState(false);
   const [checkoutPayload, setCheckoutPayload] = useState<{
@@ -86,16 +84,6 @@ export const BillingPage: React.FC = () => {
   } | null>(null);
 
   const isCatalogPending = isSupabaseConfigured && isPricingCatalogLoading && !isPricingCatalogLoaded;
-
-  const getDashboardPlanState = (plan: DashboardPlanConfig) =>
-    resolveCatalogPlanState({
-      serviceType: 'dashboard_plan',
-      serviceId: plan.id,
-      fallbackLabel: plan.name,
-      fallbackPriceBdt: plan.priceMonthly,
-      catalog: isSupabaseConfigured ? servicePricingCatalog : undefined,
-      requireCatalog: isSupabaseConfigured,
-    });
 
   const getAutomationPackageState = (pkg: AutomationPackageConfig) =>
     resolveCatalogPlanState({
@@ -118,69 +106,24 @@ export const BillingPage: React.FC = () => {
       requireCatalog: isSupabaseConfigured,
     });
 
-  const businessPlanConfig = DASHBOARD_SUBSCRIPTION_PLANS.find((p) => p.id === 'business')!;
-  const businessPlanState = getDashboardPlanState(businessPlanConfig);
   const basicAutoConfig = AI_AUTOMATION_PACKAGES.find((a) => a.id === 'basic_auto')!;
   const basicAutoState = getAutomationPackageState(basicAutoConfig);
 
-  // Pre-open dashboard plan confirmation when routed from /pricing?plan=...
+  // Gracefully handle legacy /dashboard/billing?plan=... links without opening paid checkout
   useEffect(() => {
     const rawRequestedPlan = (searchParams.get('plan') || '').trim();
     if (!rawRequestedPlan) return;
-    if (isCatalogPending) return;
 
-    const canonicalPlanId = normalizeDashboardPlanId(rawRequestedPlan);
-    const matched = canonicalPlanId
-      ? DASHBOARD_SUBSCRIPTION_PLANS.find((p) => p.id === canonicalPlanId)
-      : undefined;
-
-    if (matched) {
-      const state = resolveCatalogPlanState({
-        serviceType: 'dashboard_plan',
-        serviceId: matched.id,
-        fallbackLabel: matched.name,
-        fallbackPriceBdt: matched.priceMonthly,
-        catalog: isSupabaseConfigured ? servicePricingCatalog : undefined,
-        requireCatalog: isSupabaseConfigured,
-      });
-      setActiveTab('dashboard');
-      if (state.isAvailable && state.priceBdt !== null) {
-        setSelectedDashboardPlan(matched);
-      } else {
-        showToast('The selected dashboard plan is currently unavailable or inactive.', 'warning');
-      }
-    } else {
-      showToast('Unrecognized dashboard plan requested.', 'warning');
-    }
+    setActiveTab('dashboard');
+    showToast(
+      'All core Merchant Dashboard features are 100% free permanently — no paid subscription is required.',
+      'info'
+    );
 
     const next = new URLSearchParams(searchParams);
     next.delete('plan');
     setSearchParams(next, { replace: true });
-  }, [
-    searchParams,
-    setSearchParams,
-    isCatalogPending,
-    servicePricingCatalog,
-    showToast,
-  ]);
-
-  const handleConfirmPlanChange = () => {
-    if (!selectedDashboardPlan) return;
-    const planState = getDashboardPlanState(selectedDashboardPlan);
-    if (!planState.isAvailable || planState.priceBdt === null || planState.priceBdt <= 0) {
-      showToast('This dashboard plan is currently unavailable or inactive.', 'error');
-      setSelectedDashboardPlan(null);
-      return;
-    }
-    setSelectedDashboardPlan(null);
-    setCheckoutPayload({
-      serviceType: 'dashboard_plan',
-      serviceId: planState.serviceCode,
-      serviceName: `GoAMAAS Dashboard — ${planState.planTierLabel} Plan`,
-      planTier: planState.planTierLabel,
-      amount: planState.priceBdt,
-    });
-  };
+  }, [searchParams, setSearchParams, showToast]);
 
   const handleConfirmAutomation = () => {
     if (!selectedAutoPackage) return;
@@ -216,58 +159,49 @@ export const BillingPage: React.FC = () => {
         </p>
       </div>
 
-      {/* Independent 7-Day Free Trial Hub */}
+      {/* Workspace Access & Optional Add-On Services Hub */}
       <div className="p-6 sm:p-7 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 dark:border-slate-800 pb-4">
           <div className="space-y-1">
             <div className="flex items-center gap-2">
-              <Sparkles className="w-4 h-4 text-blue-600" />
+              <CheckCircle2 className="w-4 h-4 text-emerald-600" />
               <h2 className="text-base font-bold text-slate-900 dark:text-white">
-                Independent 7-Day Free Trials for Every Service
+                Core Merchant Dashboard — 100% Free Forever
               </h2>
             </div>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              Eligible services (Dashboard Plans, AI Automations, Landing Page Builder) have independent 7-day free trials. Due to server provisioning, Website Service has NO free trial.
+              Every registered merchant receives permanent free access to the core Merchant Dashboard and Landing Page Builder. Optional standalone services (GoAMAAS Website hosting, Custom Website Engineering, and AI Automation packages) are billed separately.
             </p>
           </div>
-          <div className="flex items-center gap-2 text-xs font-semibold text-slate-600 dark:text-slate-300">
-            <span className="font-mono tabular-nums text-blue-600 dark:text-blue-400 font-bold">
-              {serviceTrials.filter((t) => {
-                const diff = new Date(t.expiresAt).getTime() - Date.now();
-                return diff > 0 && t.status === 'active';
-              }).length}
-            </span>
-            <span>Active Service Trials (Dashboard & AI)</span>
+          <div className="flex items-center gap-2 text-xs font-semibold text-emerald-700 dark:text-emerald-400">
+            <span className="font-mono tabular-nums font-bold">৳0/mo</span>
+            <span>Core Dashboard Fee</span>
           </div>
         </div>
 
         {/* 4 Core Services Grid */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {/* Service 1: Dashboard Plan */}
+          {/* Service 1: Free Merchant Dashboard */}
           <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/60 flex flex-col justify-between space-y-3">
             <div>
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Core SaaS</span>
-                <span className="text-xs font-bold text-blue-600">
-                  {isCatalogPending
-                    ? 'Loading...'
-                    : businessPlanState.priceBdt !== null
-                    ? `৳${businessPlanState.priceBdt.toLocaleString()}/mo`
-                    : 'Unavailable'}
-                </span>
+                <span className="text-xs font-bold text-emerald-600 font-mono tabular-nums">৳0 / Forever</span>
               </div>
-              <h3 className="font-bold text-sm text-slate-900 dark:text-white mt-1">Dashboard & Commerce</h3>
+              <h3 className="font-bold text-sm text-slate-900 dark:text-white mt-1">Dashboard &amp; Commerce</h3>
               <p className="text-[11px] text-slate-500 mt-1 leading-snug">
-                Multi-channel order fulfillment, stock management & Courier APIs.
+                Products, stock ledger, orders, CRM, sales graphs, website sync &amp; courier/payment settings.
               </p>
             </div>
             <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60">
-              <TrialStatusBadge
-                serviceId="dashboard_business"
-                serviceName="Dashboard Business Tier"
-                category="dashboard"
-                className="w-full justify-center"
-              />
+              <button
+                type="button"
+                onClick={() => navigate('/dashboard')}
+                className="w-full py-1.5 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Unlocked Free</span>
+              </button>
             </div>
           </div>
 
@@ -276,17 +210,17 @@ export const BillingPage: React.FC = () => {
             <div>
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">AI Messaging</span>
-                <span className="text-xs font-bold text-purple-600">
+                <span className="text-xs font-bold text-purple-600 font-mono tabular-nums">
                   {isCatalogPending
                     ? 'Loading...'
                     : basicAutoState.priceBdt !== null
                     ? `৳${basicAutoState.priceBdt.toLocaleString()}/mo`
-                    : 'Unavailable'}
+                    : 'Optional'}
                 </span>
               </div>
               <h3 className="font-bold text-sm text-slate-900 dark:text-white mt-1">AI Automation Suite</h3>
               <p className="text-[11px] text-slate-500 mt-1 leading-snug">
-                24/7 Messenger & WhatsApp bots, cart recovery & automated notifications.
+                Optional managed Messenger &amp; WhatsApp bots, cart recovery &amp; automated workflows.
               </p>
             </div>
             <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60">
@@ -304,7 +238,7 @@ export const BillingPage: React.FC = () => {
             <div>
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Page Engine</span>
-                <span className="text-xs font-bold text-blue-600">Pro Feature</span>
+                <span className="text-xs font-bold text-emerald-600 font-mono tabular-nums">৳0 / Included</span>
               </div>
               <h3 className="font-bold text-sm text-slate-900 dark:text-white mt-1">Landing Page Builder</h3>
               <p className="text-[11px] text-slate-500 mt-1 leading-snug">
@@ -312,12 +246,14 @@ export const BillingPage: React.FC = () => {
               </p>
             </div>
             <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60">
-              <TrialStatusBadge
-                serviceId="landing_page_builder"
-                serviceName="Landing Page Visual Builder"
-                category="landing_pages"
-                className="w-full justify-center"
-              />
+              <button
+                type="button"
+                onClick={() => navigate('/dashboard/landing-pages')}
+                className="w-full py-1.5 px-3 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <Layers className="w-3.5 h-3.5 text-blue-600" />
+                <span>Open Builder</span>
+              </button>
             </div>
           </div>
 
@@ -326,11 +262,11 @@ export const BillingPage: React.FC = () => {
             <div>
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Managed Web</span>
-                <span className="text-xs font-bold text-emerald-600">৳{websiteSubscriptionPlan.priceMonthly.toLocaleString()}/mo</span>
+                <span className="text-xs font-bold text-emerald-600 font-mono tabular-nums">৳{websiteSubscriptionPlan.priceMonthly.toLocaleString()}/mo</span>
               </div>
               <h3 className="font-bold text-sm text-slate-900 dark:text-white mt-1">GoAMAAS Website</h3>
               <p className="text-[11px] text-slate-500 mt-1 leading-snug">
-                Visual website builder, free GoAMAAS hosting, free *.amaas.xyz subdomain & 30-day cycle.
+                Visual website builder, free GoAMAAS hosting, free *.amaas.xyz subdomain &amp; 30-day cycle.
               </p>
             </div>
             <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60">
@@ -351,14 +287,14 @@ export const BillingPage: React.FC = () => {
       <div className="flex items-center gap-1 border-b border-slate-200 dark:border-slate-800 text-xs font-semibold overflow-x-auto pb-1">
         <button
           onClick={() => setActiveTab('dashboard')}
-          className={`px-4 py-2 rounded-t-lg transition-colors flex items-center gap-2 whitespace-nowrap ${
+          className={`px-4 py-2 rounded-t-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 ${
             activeTab === 'dashboard'
-              ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 font-bold'
+              ? 'bg-white dark:bg-slate-900 text-emerald-600 dark:text-emerald-400 border-b-2 border-emerald-600 font-bold'
               : 'text-slate-500 hover:text-slate-900 dark:hover:text-white'
           }`}
         >
           <Layers className="w-3.5 h-3.5" />
-          <span>Dashboard Plans (Monthly Subscription)</span>
+          <span>Merchant Dashboard (100% Free Forever)</span>
         </button>
 
         <button
@@ -420,114 +356,80 @@ export const BillingPage: React.FC = () => {
         </div>
       )}
 
-      {/* TAB 1: Dashboard Plans */}
+      {/* TAB 1: Free Merchant Dashboard */}
       {activeTab === 'dashboard' && (
         <div className="space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-            {DASHBOARD_SUBSCRIPTION_PLANS.map((p) => {
-              const isCurrent = currentPlan === p.id;
-              const planState = getDashboardPlanState(p);
-              const isUnavailable = !isCatalogPending && (!planState.isAvailable || planState.priceBdt === null);
+          <div className="p-6 sm:p-8 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 dark:border-slate-800 pb-6">
+              <div className="space-y-1.5 max-w-2xl">
+                <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400">
+                  {FREE_MERCHANT_DASHBOARD_PLAN.badge} · Active for Every Registered Merchant
+                </span>
+                <h3 className="text-2xl font-bold text-slate-900 dark:text-white">
+                  {FREE_MERCHANT_DASHBOARD_PLAN.name}
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                  {FREE_MERCHANT_DASHBOARD_PLAN.description}
+                </p>
+              </div>
 
-              return (
-                <div
-                  key={p.id}
-                  className={`p-6 rounded-2xl flex flex-col justify-between transition-all ${
-                    isCurrent
-                      ? 'bg-slate-900 text-white border-2 border-emerald-500 shadow-lg relative'
-                      : isUnavailable
-                      ? 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white opacity-70 relative'
-                      : p.isPopular
-                      ? 'bg-white dark:bg-slate-900 border-2 border-blue-500 text-slate-900 dark:text-white shadow-md relative'
-                      : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white shadow-xs'
-                  }`}
-                >
-                  {isCurrent ? (
-                    <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full bg-emerald-600 text-white font-semibold text-[10px] uppercase tracking-wider">
-                      Current Active Plan
-                    </div>
-                  ) : isUnavailable ? (
-                    <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full bg-slate-500 text-white font-semibold text-[10px] uppercase tracking-wider">
-                      Unavailable
-                    </div>
-                  ) : p.isPopular ? (
-                    <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full bg-blue-600 text-white font-semibold text-[10px] uppercase tracking-wider">
-                      Most Popular
-                    </div>
-                  ) : null}
-
-                  <div className="space-y-4">
-                    <div>
-                      <h4 className="font-bold text-base">{planState.planTierLabel}</h4>
-                      <p className="text-[11px] text-slate-500 mt-0.5">{p.subtitle}</p>
-                    </div>
-
-                    <div className="flex items-baseline gap-1">
-                      {isCatalogPending ? (
-                        <span className="text-lg font-bold text-slate-400">Verifying price...</span>
-                      ) : planState.priceBdt !== null ? (
-                        <>
-                          <span className="text-3xl font-extrabold font-mono tabular-nums">
-                            ৳{planState.priceBdt.toLocaleString()}
-                          </span>
-                          <span className="text-xs text-slate-400">/ month</span>
-                        </>
-                      ) : (
-                        <span className="text-lg font-bold text-slate-400">Currently unavailable</span>
-                      )}
-                    </div>
-
-                    <div className="space-y-2 pt-3 border-t border-slate-100 dark:border-slate-800 text-xs">
-                      {p.features.map((f, idx) => (
-                        <div key={idx} className="flex items-start gap-2">
-                          <CheckCircle2
-                            className={`w-3.5 h-3.5 shrink-0 mt-0.5 ${
-                              isCurrent ? 'text-emerald-400' : 'text-blue-600'
-                            }`}
-                          />
-                          <span className={isCurrent ? 'text-slate-200' : 'text-slate-700 dark:text-slate-300'}>
-                            {f}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="pt-6">
-                    <button
-                      disabled={isCurrent || isCatalogPending || isUnavailable}
-                      onClick={() => {
-                        if (planState.isAvailable && planState.priceBdt !== null) {
-                          setSelectedDashboardPlan(p);
-                        }
-                      }}
-                      className={`w-full py-2.5 rounded-lg text-xs font-semibold transition-colors ${
-                        isCurrent
-                          ? 'bg-emerald-600 text-white cursor-default'
-                          : isCatalogPending || isUnavailable
-                          ? 'bg-slate-200 dark:bg-slate-800 text-slate-400 cursor-not-allowed'
-                          : 'bg-slate-100 dark:bg-slate-800 hover:bg-blue-600 hover:text-white text-slate-900 dark:text-white cursor-pointer'
-                      }`}
-                    >
-                      {isCurrent
-                        ? 'Active Plan'
-                        : isCatalogPending
-                        ? 'Loading...'
-                        : isUnavailable
-                        ? 'Currently Unavailable'
-                        : `Switch to ${planState.planTierLabel}`}
-                    </button>
-                  </div>
+              <div className="sm:text-right shrink-0">
+                <div className="flex sm:justify-end items-baseline gap-1.5">
+                  <span className="text-4xl font-extrabold font-mono text-slate-900 dark:text-white tabular-nums">
+                    ৳0
+                  </span>
+                  <span className="text-xs text-slate-500">/ month forever</span>
                 </div>
-              );
-            })}
+                <span className="text-[11px] text-emerald-600 dark:text-emerald-400 font-semibold block mt-1">
+                  Zero subscription fee · No trial expiry
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <h4 className="text-xs font-bold text-slate-900 dark:text-white">
+                Permanently Unlocked Core Merchant Features
+              </h4>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs text-slate-700 dark:text-slate-300">
+                {FREE_MERCHANT_DASHBOARD_PLAN.features.map((feat, idx) => (
+                  <div key={idx} className="flex items-start gap-2">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                    <span>{feat}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => navigate('/dashboard')}
+                className="px-4 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <span>Go to Merchant Dashboard</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate('/dashboard/settings')}
+                className="px-4 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 font-semibold text-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <Truck className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                <span>Configure Couriers &amp; Payment Gateways</span>
+              </button>
+            </div>
           </div>
 
-          <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400 flex items-start gap-2">
-            <Info className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
-            <span>
-              <strong>Note on Third-Party Integrations:</strong> Courier APIs (Steadfast, Pathao, RedX) and WhatsApp notifications function after you enter valid API credentials in Settings. They do not operate prior to configuration.
-            </span>
+          <div className="p-5 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400 space-y-2.5">
+            <div className="font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <Info className="w-4 h-4 text-blue-500 shrink-0" />
+              <span>External Provider Fees &amp; Optional Standalone Services</span>
+            </div>
+            <ul className="space-y-1.5 list-disc pl-5 leading-relaxed">
+              {FREE_MERCHANT_DASHBOARD_PLAN.externalDisclosures.map((note, idx) => (
+                <li key={idx}>{note}</li>
+              ))}
+            </ul>
           </div>
         </div>
       )}
@@ -1114,23 +1016,25 @@ export const BillingPage: React.FC = () => {
                       ৳{req.amount.toLocaleString()}
                     </span>
 
-                    {req.status === 'rejected' && !hasActivePendingForSameService && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setCheckoutPayload({
-                            serviceType: req.serviceType,
-                            serviceId: req.serviceId,
-                            serviceName: req.serviceName,
-                            planTier: req.planTier,
-                            amount: req.amount,
-                          })
-                        }
-                        className="min-h-[40px] px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs cursor-pointer whitespace-nowrap"
-                      >
-                        Resubmit Payment
-                      </button>
-                    )}
+                    {req.status === 'rejected' &&
+                      !hasActivePendingForSameService &&
+                      req.serviceType !== 'dashboard_plan' && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setCheckoutPayload({
+                              serviceType: req.serviceType,
+                              serviceId: req.serviceId,
+                              serviceName: req.serviceName,
+                              planTier: req.planTier,
+                              amount: req.amount,
+                            })
+                          }
+                          className="min-h-[40px] px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs cursor-pointer whitespace-nowrap"
+                        >
+                          Resubmit Payment
+                        </button>
+                      )}
                   </div>
                 </div>
               );
@@ -1207,77 +1111,6 @@ export const BillingPage: React.FC = () => {
           </table>
         </div>
       </div>
-
-      {/* Upgrade / Plan Change Confirmation Dialog */}
-      {selectedDashboardPlan && (() => {
-        const selectedPlanState = getDashboardPlanState(selectedDashboardPlan);
-        const canProceed = selectedPlanState.isAvailable && selectedPlanState.priceBdt !== null && selectedPlanState.priceBdt > 0;
-        return (
-          <Modal
-            isOpen={!!selectedDashboardPlan}
-            onClose={() => setSelectedDashboardPlan(null)}
-            title={`Confirm Subscription Change — ${selectedPlanState.planTierLabel}`}
-            maxWidth="md"
-          >
-            <div className="space-y-4 text-xs">
-              <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800 space-y-2">
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-500">Billing Type:</span>
-                  <span className="font-semibold text-slate-900 dark:text-white">Monthly Subscription</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-500">Subscription Fee:</span>
-                  <span className="font-bold text-base font-mono text-blue-600">
-                    {canProceed && selectedPlanState.priceBdt !== null
-                      ? `৳${selectedPlanState.priceBdt.toLocaleString()} / month`
-                      : 'Currently Unavailable'}
-                  </span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-slate-500">Included Limits:</span>
-                  <span className="font-semibold text-slate-700 dark:text-slate-300">
-                    {selectedDashboardPlan.subtitle}
-                  </span>
-                </div>
-              </div>
-
-              <div>
-                <span className="font-bold text-slate-900 dark:text-white block mb-1">
-                  Included Features:
-                </span>
-                <ul className="space-y-1 text-slate-600 dark:text-slate-300">
-                  {selectedDashboardPlan.features.map((f, i) => (
-                    <li key={i} className="flex items-center gap-1.5">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-                      <span>{f}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-
-              <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setSelectedDashboardPlan(null)}
-                  className="px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  disabled={!canProceed}
-                  onClick={handleConfirmPlanChange}
-                  className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-semibold cursor-pointer"
-                >
-                  {canProceed && selectedPlanState.priceBdt !== null
-                    ? `Proceed to Payment (৳${selectedPlanState.priceBdt.toLocaleString()})`
-                    : 'Plan Unavailable'}
-                </button>
-              </div>
-            </div>
-          </Modal>
-        );
-      })()}
 
       {/* Confirmation Modal for AI Automation */}
       {selectedAutoPackage && (() => {

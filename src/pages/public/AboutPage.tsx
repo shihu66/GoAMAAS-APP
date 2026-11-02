@@ -100,9 +100,6 @@ export const AboutPage: React.FC = () => {
                     <p className="text-xs text-slate-600 dark:text-slate-400">
                       {ap.founderRole}
                     </p>
-                    <p className="text-xs font-mono text-blue-600 dark:text-blue-400 mt-0.5 truncate">
-                      official.amaas.dev@gmail.com
-                    </p>
                   </div>
                 </div>
 

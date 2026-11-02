@@ -239,39 +239,118 @@ async function run() {
     'Unverified email status on official.amaas.dev@gmail.com is strictly denied'
   );
 
+  // Linked Google identity on an account with legacy user_metadata.email_verified=false -> verified!
+  assert(
+    isAuthUserEmailVerified({
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      email: 'Official.AMAAS.Dev@Gmail.com',
+      email_confirmed_at: '2026-10-01T00:00:00Z',
+      user_metadata: { email_verified: false },
+      identities: [
+        {
+          provider: 'google',
+          identity_data: {
+            email: 'official.amaas.dev@gmail.com',
+            email_verified: true,
+          },
+        },
+      ],
+    }) === true,
+    'Confirmed Google OAuth identity with email_verified=true passes verification even if legacy merged user_metadata had email_verified=false'
+  );
+
+  // Transient HTTP 429 rate-limit from GoTrue -> network_error (never wipes active admin session!)
+  const rateLimitedAuthRes = await verifyServerAdminSession({
+    isConfigured: true,
+    getAuthUser: async () => ({
+      user: null,
+      error: Object.assign(new Error('Request rate limit reached'), { status: 429 }),
+    }),
+  });
+  assert(
+    rateLimitedAuthRes.status === 'network_error',
+    'Transient GoTrue HTTP 429 rate-limit is classified as network_error instead of ejecting an active admin session'
+  );
+
   // ---------------------------------------------------------------------------
-  // 3. Admin Login UI Inspection (Google-Only, Zero Email/Password Login)
+  // 3. Zero Public Admin Email Exposure & Clean Minimal AdminLoginPage UI
   // ---------------------------------------------------------------------------
-  console.log('\n[3] Verifying email/password login is completely removed from AdminLoginPage.tsx...');
+  console.log('\n[3] Verifying zero public admin email exposure & minimal AdminLoginPage UI...');
+  const filesZeroEmailAllowed = [
+    'index.html',
+    'public/admin-manifest.webmanifest',
+    'public/admin-offline.html',
+    'src/components/layout/Footer.tsx',
+    'src/components/layout/Navbar.tsx',
+    'src/components/layout/PublicLayout.tsx',
+    'src/components/layout/AdminLayout.tsx',
+    'src/components/admin/AdminPWAInstallBanner.tsx',
+    'src/pages/public/HomePage.tsx',
+    'src/pages/public/AboutPage.tsx',
+    'src/pages/public/ContactPage.tsx',
+    'src/pages/public/PricingPage.tsx',
+    'src/pages/admin/AdminLoginPage.tsx',
+    'src/pages/admin/AdminDashboardPage.tsx',
+  ];
+  for (const file of filesZeroEmailAllowed) {
+    const content = fs.readFileSync(file, 'utf8');
+    assert(
+      !content.toLowerCase().includes('official.amaas.dev@gmail.com'),
+      `Zero literal admin email exposure in ${file}`
+    );
+  }
+  assert(
+    !UNIFORM_ADMIN_AUTH_ERROR.toLowerCase().includes('official.amaas.dev@gmail.com'),
+    'UNIFORM_ADMIN_AUTH_ERROR never reveals which email address is authorized'
+  );
+
   const adminLoginSrc = fs.readFileSync('src/pages/admin/AdminLoginPage.tsx', 'utf8');
   assert(
     !adminLoginSrc.includes('signInWithPassword') &&
       !adminLoginSrc.includes('handlePasswordSignIn') &&
       !adminLoginSrc.includes('type="password"') &&
       !adminLoginSrc.includes('type="email"') &&
-      !adminLoginSrc.includes('current-password'),
-    'Email/password inputs and signInWithPassword are completely absent from AdminLoginPage.tsx'
+      !adminLoginSrc.includes('current-password') &&
+      !adminLoginSrc.includes('loginHint') &&
+      !adminLoginSrc.includes('{AUTHORIZED_ADMIN_EMAIL}'),
+    'Email/password inputs, loginHint, and visible AUTHORIZED_ADMIN_EMAIL JSX are completely absent from AdminLoginPage.tsx'
   );
   assert(
-    adminLoginSrc.includes('signInWithGoogle') &&
-      adminLoginSrc.includes('AUTHORIZED_ADMIN_EMAIL') &&
-      adminLoginSrc.includes('Sign in with Google'),
-    'AdminLoginPage.tsx provides exclusively Google Sign-In restricted to AUTHORIZED_ADMIN_EMAIL'
+    adminLoginSrc.includes('GoAMAAS Admin') &&
+      adminLoginSrc.includes('Admin Sign In') &&
+      adminLoginSrc.includes('Continue with Google') &&
+      adminLoginSrc.includes('Authorized administrators only.'),
+    'AdminLoginPage.tsx displays strictly GoAMAAS Admin branding, Admin Sign In heading, Continue with Google button, and Authorized administrators only.'
+  );
+
+  const supabaseSrc = fs.readFileSync('src/lib/supabase.ts', 'utf8');
+  assert(
+    !supabaseSrc.includes('login_hint'),
+    'signInWithGoogle never leaks login_hint in Google OAuth redirect URLs'
   );
 
   // ---------------------------------------------------------------------------
-  // 4 & 5. Protected Routes, Sign-Out Purge, OAuth Callback & Session Restoration
+  // 4 & 5. Protected Routes, Standalone PWA Intent Recovery, OAuth Callback & Loop Prevention
   // ---------------------------------------------------------------------------
-  console.log('\n[4 & 5] Verifying OAuth callback handling, intent preservation & protected route guards...');
+  console.log('\n[4 & 5] Verifying standalone PWA OAuth intent handoff, callback hash error handling & route guards...');
   setAdminOAuthIntent('/admin/payments');
   assert(
+    peekAdminOAuthIntent() === '/admin/payments' &&
+      sessionStore.getItem(ADMIN_OAUTH_INTENT_KEY) !== null &&
+      localStore.getItem(ADMIN_OAUTH_INTENT_KEY) !== null,
+    'setAdminOAuthIntent persists /admin/payments in both sessionStorage and localStorage'
+  );
+  // Simulate standalone PWA -> browser tab boundary where sessionStorage is empty in the callback tab
+  sessionStore.clear();
+  assert(
     peekAdminOAuthIntent() === '/admin/payments',
-    'setAdminOAuthIntent stores deep /admin/payments destination in sessionStorage'
+    'peekAdminOAuthIntent recovers /admin/payments from same-origin localStorage across standalone PWA callback tab boundary'
   );
   assert(
     consumeAdminOAuthIntent() === '/admin/payments' &&
-      sessionStore.getItem(ADMIN_OAUTH_INTENT_KEY) === null,
-    'consumeAdminOAuthIntent returns deep /admin/payments destination once and clears sessionStorage'
+      sessionStore.getItem(ADMIN_OAUTH_INTENT_KEY) === null &&
+      localStore.getItem(ADMIN_OAUTH_INTENT_KEY) === null,
+    'consumeAdminOAuthIntent returns deep /admin/payments destination once and clears both sessionStorage and localStorage'
   );
   setAdminOAuthIntent('/dashboard/orders');
   assert(
@@ -283,9 +362,26 @@ async function run() {
   assert(
     callbackSrc.includes('await supabase.auth.getSession()') &&
       callbackSrc.includes('if (!session?.user && code)') &&
+      callbackSrc.includes('window.location.hash') &&
       callbackSrc.includes('verifyServerAdminSession()') &&
       callbackSrc.includes("navigate('/admin/login?denied=1', { replace: true })"),
-    'AuthCallbackPage prevents double-PKCE exchange race, verifies server admin session, and signs out/redirects unauthorized accounts'
+    'AuthCallbackPage parses hash & query OAuth errors, prevents double-PKCE exchange race, verifies server admin session, and redirects unauthorized accounts'
+  );
+
+  const appRouterSrc = fs.readFileSync('src/App.tsx', 'utf8');
+  assert(
+    appRouterSrc.includes('OAuthCallbackRedirectBridge') &&
+      appRouterSrc.includes('<Route path="payments"') &&
+      appRouterSrc.includes('<Route path="websites"') &&
+      appRouterSrc.includes('<Route path="settings"'),
+    'App.tsx bridges fallback root OAuth callbacks to /auth/callback and protects /admin, /admin/payments, /admin/websites, and /admin/settings'
+  );
+
+  const appContextSrc = fs.readFileSync('src/context/AppContext.tsx', 'utf8');
+  assert(
+    appContextSrc.includes('const setAuthenticatedUser = useCallback(') &&
+      appContextSrc.includes('const logout = useCallback('),
+    'AppContext memoizes setAuthenticatedUser and logout to prevent infinite AdminProtectedRoute re-verification loops'
   );
 
   const guardSrc = fs.readFileSync('src/components/auth/AdminProtectedRoute.tsx', 'utf8');

@@ -25,12 +25,8 @@ import {
   Legend,
 } from 'recharts';
 
-import { TrialStatusBadge } from '../../components/ui/TrialStatusBadge';
-import { TrialGateBanner } from '../../components/ui/TrialGateBanner';
-
 export const AnalyticsPage: React.FC = () => {
-  const { orders, products, customers, showToast, getServiceAccess } = useApp();
-  const serviceAccess = getServiceAccess('dashboard_business', 'Dashboard Business Tier', 'dashboard');
+  const { orders, products, customers, showToast } = useApp();
   const [dateFilter, setDateFilter] = useState<'7d' | '30d' | '90d' | '12m'>('30d');
 
   const productLookup = useMemo(() => {
@@ -178,6 +174,82 @@ export const AnalyticsPage: React.FC = () => {
       ? ((customers.filter((c) => c.ordersCount > 1).length / customers.length) * 100).toFixed(1)
       : '0.0';
 
+  // Previous-Month vs. Current-Month Sales Comparison (calendar-accurate from authentic orders)
+  const monthlySalesComparison = useMemo(() => {
+    const now = new Date();
+    const currYear = now.getFullYear();
+    const currMonth = now.getMonth();
+    const prevDate = new Date(currYear, currMonth - 1, 1);
+    const prevYear = prevDate.getFullYear();
+    const prevMonth = prevDate.getMonth();
+
+    const currentLabel = now.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+    const previousLabel = prevDate.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+
+    const buckets = [
+      { week: 'Week 1 (1–7)', min: 1, max: 7 },
+      { week: 'Week 2 (8–14)', min: 8, max: 14 },
+      { week: 'Week 3 (15–21)', min: 15, max: 21 },
+      { week: 'Week 4 (22–28)', min: 22, max: 28 },
+      { week: 'Week 5 (29–31)', min: 29, max: 31 },
+    ];
+
+    let previousMonthTotal = 0;
+    let currentMonthTotal = 0;
+
+    const data = buckets.map((b) => {
+      let prevSales = 0;
+      let currSales = 0;
+      for (const o of orders) {
+        if (o.status === 'cancelled') continue;
+        const od = new Date(o.createdAt);
+        const day = od.getDate();
+        if (day < b.min || day > b.max) continue;
+        if (od.getFullYear() === prevYear && od.getMonth() === prevMonth) {
+          prevSales += o.total;
+        } else if (od.getFullYear() === currYear && od.getMonth() === currMonth) {
+          currSales += o.total;
+        }
+      }
+      previousMonthTotal += prevSales;
+      currentMonthTotal += currSales;
+      return {
+        week: b.week,
+        previousMonthSales: prevSales,
+        currentMonthSales: currSales,
+      };
+    });
+
+    const momChangePct =
+      previousMonthTotal > 0
+        ? (((currentMonthTotal - previousMonthTotal) / previousMonthTotal) * 100).toFixed(1)
+        : currentMonthTotal > 0
+        ? '100.0'
+        : '0.0';
+
+    return {
+      currentLabel,
+      previousLabel,
+      previousMonthTotal,
+      currentMonthTotal,
+      momChangePct,
+      hasMonthlyData: previousMonthTotal > 0 || currentMonthTotal > 0,
+      data,
+    };
+  }, [orders]);
+
+  const deliveredOrderRate = useMemo(() => {
+    if (validOrderCount === 0) return '0.0';
+    const delivered = orders.filter((o) => o.status === 'delivered').length;
+    return ((delivered / validOrderCount) * 100).toFixed(1);
+  }, [orders, validOrderCount]);
+
+  const healthyInventoryPct = useMemo(() => {
+    if (products.length === 0) return '100.0';
+    const healthy = products.filter((p) => p.stock > p.lowStockThreshold).length;
+    return ((healthy / products.length) * 100).toFixed(1);
+  }, [products]);
+
   const hasData = validOrderCount > 0;
 
   const handleExportReport = () => {
@@ -203,18 +275,11 @@ export const AnalyticsPage: React.FC = () => {
       {/* Title & Date Selector */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <div className="flex flex-wrap items-center gap-3">
-            <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
-              Financial Analytics & Growth Reports
-            </h1>
-            <TrialStatusBadge
-              serviceId="dashboard_business"
-              serviceName="Dashboard Business Tier"
-              category="dashboard"
-            />
-          </div>
+          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
+            Financial Analytics & Growth Reports
+          </h1>
           <p className="text-xs text-slate-500 mt-1">
-            Examine gross revenue, SKU-level COGS net margins, order acquisition velocity, and retention.
+            Examine gross revenue, previous-month vs. current-month sales, SKU-level COGS net margins, and business performance insights.
           </p>
         </div>
 
@@ -264,8 +329,8 @@ export const AnalyticsPage: React.FC = () => {
 
           <button
             onClick={handleExportReport}
-            disabled={!hasData || !serviceAccess.hasAccess}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer"
+            disabled={!hasData}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer whitespace-nowrap shrink-0"
           >
             <Download className="w-3.5 h-3.5" />
             <span>Export Report</span>
@@ -273,26 +338,7 @@ export const AnalyticsPage: React.FC = () => {
         </div>
       </div>
 
-      {!serviceAccess.hasAccess ? (
-        <TrialGateBanner
-          serviceId="dashboard_business"
-          serviceName="Dashboard Business Tier"
-          category="dashboard"
-          serviceDescription="Unlock revenue & COGS profit trajectory charts, acquisition channel breakdowns, and CSV financial report exports with a 7-day free Dashboard trial."
-          features={[
-            'Gross Sales & SKU-Level COGS Net Profit Tracking',
-            '7D, 30D, 90D & 12M Interactive Trend Charts',
-            'Acquisition Channel Revenue Breakdown',
-            'Repeat Buyer Retention & AOV Benchmarks',
-            '1-Click Accounting CSV Export',
-            'Multi-Store Workspace Filtering',
-          ]}
-          subscribePath="/dashboard/billing"
-          subscribePriceLabel="From ৳299/mo"
-        />
-      ) : (
-        <>
-          {/* 4 Financial Metric Cards (Real values) */}
+      {/* 4 Financial Metric Cards (Real values) */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
               <span className="text-xs font-medium text-slate-500">Gross Sales</span>
@@ -509,8 +555,131 @@ export const AnalyticsPage: React.FC = () => {
           </div>
         </div>
       </div>
-        </>
-      )}
+
+      {/* Previous-Month vs. Current-Month Sales Graph + Business Performance Insights */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2 p-5 sm:p-6 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                Previous-Month vs. Current-Month Sales Graph
+              </h3>
+              <p className="text-[11px] text-slate-500">
+                Side-by-side weekly sales comparison ({monthlySalesComparison.previousLabel} vs. {monthlySalesComparison.currentLabel})
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-4 text-xs font-mono tabular-nums">
+              <span className="text-slate-500">
+                {monthlySalesComparison.previousLabel}:{' '}
+                <strong className="text-slate-900 dark:text-white">
+                  ৳{monthlySalesComparison.previousMonthTotal.toLocaleString()}
+                </strong>
+              </span>
+              <span className="text-blue-600 dark:text-blue-400">
+                {monthlySalesComparison.currentLabel}:{' '}
+                <strong>৳{monthlySalesComparison.currentMonthTotal.toLocaleString()}</strong>
+              </span>
+            </div>
+          </div>
+
+          <div className="h-64 w-full">
+            {!monthlySalesComparison.hasMonthlyData ? (
+              <div className="h-full w-full flex flex-col items-center justify-center p-6 text-center border border-dashed border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50/50 dark:bg-slate-900/40">
+                <Calendar className="w-8 h-8 text-slate-300 dark:text-slate-600 mb-2" />
+                <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  No sales recorded in current or previous calendar month
+                </p>
+                <p className="text-[11px] text-slate-500 max-w-xs mt-0.5">
+                  Monthly comparison bars populate automatically from validated store orders.
+                </p>
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={monthlySalesComparison.data} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.2} />
+                  <XAxis dataKey="week" tick={{ fontSize: 11 }} stroke="#64748B" />
+                  <YAxis tick={{ fontSize: 11 }} stroke="#64748B" tickFormatter={(val) => `৳${val}`} />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: '#0F172A',
+                      borderColor: '#1E293B',
+                      borderRadius: '8px',
+                      fontSize: '12px',
+                      color: '#fff',
+                    }}
+                    formatter={(val: any, name: any) => [
+                      `৳${Number(val).toLocaleString()}`,
+                      name === 'previousMonthSales'
+                        ? monthlySalesComparison.previousLabel
+                        : monthlySalesComparison.currentLabel,
+                    ]}
+                  />
+                  <Legend
+                    formatter={(value) =>
+                      value === 'previousMonthSales'
+                        ? monthlySalesComparison.previousLabel
+                        : monthlySalesComparison.currentLabel
+                    }
+                    wrapperStyle={{ fontSize: '11px' }}
+                  />
+                  <Bar dataKey="previousMonthSales" fill="#94A3B8" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="currentMonthSales" fill="#2563EB" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </div>
+
+        {/* Business Performance Insights */}
+        <div className="p-5 sm:p-6 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col justify-between space-y-4">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+              Business Performance Insights
+            </h3>
+            <p className="text-[11px] text-slate-500">
+              Authentic store efficiency and unit economics indicators
+            </p>
+          </div>
+
+          <div className="divide-y divide-slate-100 dark:divide-slate-800 text-xs">
+            <div className="py-3 flex items-center justify-between">
+              <span className="text-slate-600 dark:text-slate-400">MoM Sales Change</span>
+              <span
+                className={`font-mono font-bold tabular-nums ${
+                  Number(monthlySalesComparison.momChangePct) >= 0
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : 'text-rose-600 dark:text-rose-400'
+                }`}
+              >
+                {Number(monthlySalesComparison.momChangePct) > 0 ? '+' : ''}
+                {monthlySalesComparison.momChangePct}%
+              </span>
+            </div>
+            <div className="py-3 flex items-center justify-between">
+              <span className="text-slate-600 dark:text-slate-400">COGS Realized Margin</span>
+              <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400 tabular-nums">
+                {realizedMarginPct}%
+              </span>
+            </div>
+            <div className="py-3 flex items-center justify-between">
+              <span className="text-slate-600 dark:text-slate-400">Delivered Order Rate</span>
+              <span className="font-mono font-bold text-blue-600 dark:text-blue-400 tabular-nums">
+                {deliveredOrderRate}%
+              </span>
+            </div>
+            <div className="py-3 flex items-center justify-between">
+              <span className="text-slate-600 dark:text-slate-400">Inventory Stock Readiness</span>
+              <span className="font-mono font-bold text-slate-900 dark:text-white tabular-nums">
+                {healthyInventoryPct}%
+              </span>
+            </div>
+          </div>
+
+          <p className="text-[11px] text-slate-500">
+            Calculated directly from your store&apos;s validated orders, SKU cost prices, and inventory levels.
+          </p>
+        </div>
+      </div>
     </div>
   );
 };

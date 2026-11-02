@@ -31,7 +31,6 @@ import {
 } from 'lucide-react';
 import { ToastContainer } from '../ui/Toast';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
-import { getDashboardPlanById } from '../../data/pricingConfig';
 
 export const DashboardLayout: React.FC = () => {
   const {
@@ -510,7 +509,7 @@ export const DashboardLayout: React.FC = () => {
                       onClick={() => setUserMenuOpen(false)}
                       className="block px-4 py-2 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
                     >
-                      Subscription ({getDashboardPlanById(currentPlan)?.name || 'Starter'})
+                      Services &amp; Billing (Free Dashboard)
                     </Link>
 
                     <div className="border-t border-slate-100 dark:border-slate-800 my-1" />

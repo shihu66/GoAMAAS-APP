@@ -76,7 +76,9 @@ function resolveSectionFromPathname(pathname: string): AdminSection {
   if (pathname.startsWith('/admin/customers') || pathname.startsWith('/admin/requests')) {
     return 'customers';
   }
-  if (pathname.startsWith('/admin/gateways')) return 'gateways';
+  if (pathname.startsWith('/admin/gateways') || pathname.startsWith('/admin/settings')) {
+    return 'gateways';
+  }
   if (pathname.startsWith('/admin/audit') || pathname.startsWith('/admin/security')) {
     return 'audit';
   }
@@ -2385,7 +2387,7 @@ export const AdminDashboardPage: React.FC = () => {
                     Two-Factor Authentication (TOTP)
                   </h2>
                   <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">
-                    Account: <span className="font-mono">{verifiedAdmin.email}</span> &middot; Assurance Level:{' '}
+                    Session: <span className="font-medium text-slate-700 dark:text-slate-300">{verifiedAdmin.name}</span> &middot; Assurance Level:{' '}
                     <strong className="font-mono uppercase text-slate-900 dark:text-white">
                       {mfa.currentLevel || 'aal1'}
                     </strong>

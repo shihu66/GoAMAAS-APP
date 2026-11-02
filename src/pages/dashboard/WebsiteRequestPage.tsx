@@ -67,7 +67,7 @@ export const WebsiteRequestPage: React.FC = () => {
       phone,
       email,
       description,
-      domainIncluded: true,
+      domainIncluded: false,
     });
     setActiveTab('myRequests');
   };
@@ -81,7 +81,7 @@ export const WebsiteRequestPage: React.FC = () => {
             Custom Website Engineering Requests
           </h1>
           <p className="text-xs text-slate-500 mt-1">
-            Let the AMAAS development studio engineer your bespoke online store. Free domain and hosting included.
+            Let the AMAAS development studio engineer your bespoke online store. Cloud deployment setup included; custom domain registration billed separately.
           </p>
         </div>
 
@@ -111,16 +111,16 @@ export const WebsiteRequestPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Free Domain & Hosting Guarantee Banner */}
+      {/* Cloud Deployment & Domain Transparency Banner */}
       <div className="p-5 rounded-2xl bg-gradient-to-r from-blue-900 to-slate-900 text-white border border-blue-800 flex items-center justify-between gap-4 shadow-sm">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center font-bold text-sm shrink-0">
             <Globe2 className="w-5 h-5" />
           </div>
           <div>
-            <h3 className="font-bold text-sm">1st Year Domain & High-Speed Hosting Free</h3>
+            <h3 className="font-bold text-sm">Cloud Deployment Setup Included · Custom Domains Billed Separately</h3>
             <p className="text-xs text-slate-300">
-              All AMAAS web development packages (starting at ৳8,000) include top-level domain registration (.com) and dedicated cloud SSD hosting at zero extra charge.
+              All AMAAS bespoke web development packages (starting at ৳8,000 one-time) include cloud deployment configuration. Custom top-level domain (.com / .com.bd) registration and third-party API fees are billed separately.
             </p>
           </div>
         </div>
@@ -193,9 +193,9 @@ export const WebsiteRequestPage: React.FC = () => {
                   onChange={(e) => setBudgetTier(e.target.value as any)}
                   className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
                 >
-                  <option value="Starter Website (৳8,000)">Starter Website (৳8,000) — Domain + Hosting Free</option>
-                  <option value="Business Website (৳15,000)">Business Website (৳15,000) — Domain + Hosting Free (Most Popular)</option>
-                  <option value="Advanced Website (৳25,000)">Advanced Website (৳25,000) — Domain + Hosting Free</option>
+                  <option value="Starter Website (৳8,000)">Starter Website (৳8,000) — Cloud Setup Included</option>
+                  <option value="Business Website (৳15,000)">Business Website (৳15,000) — Cloud Setup Included (Most Popular)</option>
+                  <option value="Advanced Website (৳25,000)">Advanced Website (৳25,000) — Cloud Setup Included</option>
                 </select>
               </div>
             </div>
@@ -394,8 +394,8 @@ export const WebsiteRequestPage: React.FC = () => {
                 <span className="font-semibold text-blue-600 dark:text-blue-400">{selectedRequest.budgetTier}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slate-400">Domain & Cloud Hosting:</span>
-                <span className="font-semibold text-emerald-600">1st Year Included Free</span>
+                <span className="text-slate-400">Deployment &amp; Custom Domain:</span>
+                <span className="font-semibold text-slate-700 dark:text-slate-300">Cloud Setup Included · Domain Separate</span>
               </div>
             </div>
 

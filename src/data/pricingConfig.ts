@@ -68,86 +68,86 @@ export function normalizeDashboardPlanId(raw: string | null | undefined): Dashbo
   return LEGACY_DASHBOARD_PLAN_ALIASES[cleaned] ?? null;
 }
 
+export interface FreeMerchantDashboardConfig {
+  id: 'free_merchant_dashboard';
+  name: string;
+  priceMonthly: 0;
+  badge: string;
+  subtitle: string;
+  description: string;
+  features: string[];
+  externalDisclosures: string[];
+}
+
+export const FREE_MERCHANT_DASHBOARD_PLAN: FreeMerchantDashboardConfig = {
+  id: 'free_merchant_dashboard',
+  name: 'Free Merchant Dashboard',
+  priceMonthly: 0,
+  badge: '100% Free Forever',
+  subtitle: 'Complete commerce operations workspace for every registered merchant',
+  description:
+    'Every registered GoAMAAS merchant gets permanent, unrestricted access to all core dashboard, product, inventory, order, CRM, analytics, landing page, website sync, and integration settings tools at ৳0/month.',
+  features: [
+    'Business Overview, KPIs & Real-Time Revenue Analytics',
+    'Previous-Month & Current-Month Sales Comparison Graphs',
+    'Unlimited Product Management, COGS & Website Product Sync',
+    'Warehouse Inventory Management, Low-Stock Alerts & Audit Logs',
+    'Multi-Channel Order Management, Printable Invoices & CSV Export',
+    'Customer Directory, VIP Segmentation & Purchase History CRM',
+    'Landing Page Visual Builder with Direct COD Checkout',
+    'Connected Website Management & Live Catalog Synchronization',
+    'Courier Integration Settings (Steadfast, Pathao, RedX — credentials required)',
+    'Merchant Payment Gateway Settings (COD, bKash, Nagad, Bank — credentials required)',
+    'Business Performance Insights & Multi-Member Team Roles',
+  ],
+  externalDisclosures: [
+    'Courier & Delivery Charges: Parcel shipping rates and Cash-on-Delivery (COD) settlement fees are billed directly by your selected courier provider (e.g., Steadfast, Pathao, RedX) under your merchant agreement.',
+    'Payment Gateway Processing Fees: Merchant bKash, Nagad, SSLCommerz, or bank settlement fees are charged directly by the respective payment provider and require valid merchant API/account credentials.',
+    'Custom Domains & Optional Standalone Services: Custom domain registration fees, GoAMAAS Website cloud hosting (৳600/month), bespoke Website Development packages (৳8,000–৳25,000 one-time), and managed AI Automation packages (৳999–৳7,999/month) are separate optional services and never restrict access to the free Merchant Dashboard.',
+  ],
+};
+
 export const DASHBOARD_SUBSCRIPTION_PLANS: DashboardPlanConfig[] = [
   {
     id: 'starter',
     name: 'Starter',
-    priceMonthly: 299,
-    subtitle: 'For small online sellers',
-    description: 'Essential operating tools to manage products, orders, and sales performance.',
-    trialDays: 7,
-    features: [
-      'Product Management',
-      'Order Management',
-      'Customer Management',
-      'Basic Sales Dashboard',
-      'Order Status Tracking',
-      'Up to 300 Orders/month',
-      '1 User',
-      '7-Day Free Trial',
-    ],
-    ctaLabel: 'Start Free Trial',
+    priceMonthly: 0,
+    subtitle: 'Included free for all merchants',
+    description: 'Core merchant workspace included 100% free permanently for every registered merchant.',
+    trialDays: 0,
+    features: FREE_MERCHANT_DASHBOARD_PLAN.features.slice(0, 6),
+    ctaLabel: 'Included Free',
   },
   {
     id: 'business',
     name: 'Business',
-    priceMonthly: 599,
-    subtitle: 'For growing online businesses',
-    description: 'Complete operational control with inventory tracking, reports, and courier dispatch.',
+    priceMonthly: 0,
+    subtitle: 'Included free for all merchants',
+    description: 'Complete inventory, analytics, courier settings, and order operations — 100% free forever.',
     isPopular: true,
-    trialDays: 7,
-    features: [
-      'Everything in Starter',
-      'Unlimited Orders',
-      'Inventory & Stock Management',
-      'Advanced Sales Analytics',
-      'Customer Purchase History',
-      'CSV/Excel Export',
-      'Courier Management',
-      'Up to 3 Staff Users',
-      '7-Day Free Trial',
-    ],
-    ctaLabel: 'Start Free Trial',
+    trialDays: 0,
+    features: FREE_MERCHANT_DASHBOARD_PLAN.features.slice(0, 8),
+    ctaLabel: 'Included Free',
   },
   {
     id: 'pro',
     name: 'Pro',
-    priceMonthly: 999,
-    subtitle: 'For established businesses',
-    description: 'Multi-store control with profit/loss metrics and automated communication integrations.',
-    trialDays: 7,
-    features: [
-      'Everything in Business',
-      'Multiple Stores',
-      'Profit/Loss Tracking',
-      'Advanced Reports',
-      'Courier API Integration (when configured)',
-      'WhatsApp Notification Integration (when configured)',
-      'Up to 10 Staff Users',
-      'Priority Support',
-      '7-Day Free Trial',
-    ],
-    ctaLabel: 'Start Free Trial',
+    priceMonthly: 0,
+    subtitle: 'Included free for all merchants',
+    description: 'Multi-store control, profit tracking, landing pages, and integration settings — 100% free forever.',
+    trialDays: 0,
+    features: FREE_MERCHANT_DASHBOARD_PLAN.features,
+    ctaLabel: 'Included Free',
   },
   {
     id: 'enterprise',
     name: 'Enterprise',
-    priceMonthly: 1999,
-    subtitle: 'For larger businesses',
-    description: 'Multi-branch operations with custom business intelligence, AI assistant, and full API.',
-    trialDays: 7,
-    features: [
-      'Everything in Pro',
-      'Multiple Branches',
-      'Advanced Business Automation',
-      'AI Business Assistant',
-      'Custom Reports',
-      'API Access',
-      'Unlimited Staff',
-      'Dedicated Support',
-      '7-Day Free Trial',
-    ],
-    ctaLabel: 'Start Free Trial',
+    priceMonthly: 0,
+    subtitle: 'Included free for all merchants',
+    description: 'Unrestricted core merchant dashboard and multi-member team access — 100% free forever.',
+    trialDays: 0,
+    features: FREE_MERCHANT_DASHBOARD_PLAN.features,
+    ctaLabel: 'Included Free',
   },
 ];
 
@@ -420,6 +420,17 @@ export function resolveCatalogPlanState(params: {
       ? normalizeDashboardPlanId(rawCode) || ''
       : rawCode;
 
+  // Core Merchant Dashboard is 100% free permanently — paid checkout is retired for dashboard_plan
+  if (params.serviceType === 'dashboard_plan') {
+    return {
+      serviceCode: canonicalCode || rawCode || FREE_MERCHANT_DASHBOARD_PLAN.id,
+      planTierLabel: FREE_MERCHANT_DASHBOARD_PLAN.name,
+      priceBdt: null,
+      setupFeeBdt: 0,
+      isAvailable: false,
+    };
+  }
+
   const enforceCatalogOnly = Boolean(params.requireCatalog || params.catalog !== undefined);
 
   if (!canonicalCode) {
@@ -547,24 +558,8 @@ export function resolveAuthoritativeServicePrice(params: {
   }
 
   if (params.serviceType === 'dashboard_plan') {
-    const canonicalPlanId = normalizeDashboardPlanId(code);
-    if (!canonicalPlanId) return null;
-
-    const catMatch = activeCatalog.find(
-      (entry) => entry.serviceCode.trim().toLowerCase() === canonicalPlanId
-    );
-    if (catMatch && Number.isFinite(catMatch.priceBdt) && catMatch.priceBdt > 0) {
-      return catMatch.priceBdt;
-    }
-    if (enforceCatalogOnly) return null;
-
-    const offlineDashboardMap: Record<DashboardPlanId, number> = {
-      starter: 299,
-      business: 599,
-      pro: 999,
-      enterprise: 1999,
-    };
-    return offlineDashboardMap[canonicalPlanId] ?? null;
+    // Merchant Dashboard is 100% free permanently — never resolve a paid BDT charge
+    return null;
   }
 
   if (params.serviceType === 'ai_automation') {
@@ -599,5 +594,160 @@ export function resolveAuthoritativeServicePrice(params: {
 
   return null;
 }
+
+/**
+ * Pure, deterministic evaluator for merchant service access.
+ * Core Merchant Dashboard ('dashboard') and Landing Page Builder ('landing_pages')
+ * are 100% free permanently for every merchant — ignoring legacy plan tiers or expired trials.
+ * Standalone Website hosting ('website') and AI Automation ('ai_automation') retain their
+ * verified payment / trial rules.
+ */
+export function evaluateServiceAccessState(params: {
+  serviceId: string;
+  serviceName: string;
+  category: import('../types').ServiceTrialCategory;
+  role: import('../types').UserRole;
+  userId?: string;
+  paymentRequests: import('../types').PaymentRequest[];
+  subscribedWebsites: import('../types').SubscribedWebsite[];
+  serviceTrials: import('../types').ServiceTrialRecord[];
+  now?: Date;
+}): import('../types').ServiceAccessStatus {
+  const {
+    serviceId,
+    serviceName,
+    category,
+    role,
+    userId,
+    paymentRequests,
+    subscribedWebsites,
+    serviceTrials,
+  } = params;
+
+  if (role === 'admin' || category === 'dashboard' || category === 'landing_pages') {
+    return {
+      serviceId,
+      serviceName,
+      serviceCategory: category,
+      status: 'subscribed',
+      hasAccess: true,
+      isExpired: false,
+    };
+  }
+
+  if (userId) {
+    const normalizedId = (serviceId || '').trim().toLowerCase();
+    const userApprovedPayments = paymentRequests.filter(
+      (r) => r.userId === userId && r.status === 'approved'
+    );
+
+    if (category === 'ai_automation') {
+      const hasApprovedAuto = userApprovedPayments.some(
+        (r) =>
+          r.serviceType === 'ai_automation' &&
+          (r.serviceId.trim().toLowerCase() === normalizedId ||
+            normalizedId === 'ai_automations')
+      );
+      if (hasApprovedAuto) {
+        return {
+          serviceId,
+          serviceName,
+          serviceCategory: category,
+          status: 'subscribed',
+          hasAccess: true,
+          isExpired: false,
+        };
+      }
+    } else if (category === 'website') {
+      const hasPaidSite = subscribedWebsites.some(
+        (w) =>
+          w.userId === userId &&
+          w.paymentStatus === 'paid' &&
+          (w.subscriptionStatus === 'active' || w.subscriptionStatus === 'grace_period')
+      );
+      if (hasPaidSite) {
+        return {
+          serviceId,
+          serviceName,
+          serviceCategory: category,
+          status: 'subscribed',
+          hasAccess: true,
+          isExpired: false,
+        };
+      }
+    }
+  }
+
+  if (category === 'website') {
+    return {
+      serviceId,
+      serviceName,
+      serviceCategory: category,
+      status: 'available',
+      hasAccess: false,
+      isExpired: false,
+    };
+  }
+
+  const record = serviceTrials.find(
+    (t) => t.serviceId === serviceId && (!t.userId || t.userId === userId)
+  );
+
+  if (!record) {
+    return {
+      serviceId,
+      serviceName,
+      serviceCategory: category,
+      status: 'available',
+      hasAccess: false,
+      isExpired: false,
+    };
+  }
+
+  const now = params.now || new Date();
+  const expiresAt = new Date(record.expiresAt);
+  const diffMs = expiresAt.getTime() - now.getTime();
+  const isExpired = diffMs <= 0 || record.status === 'expired';
+
+  if (isExpired) {
+    return {
+      serviceId,
+      serviceName,
+      serviceCategory: category,
+      status: 'trial_expired',
+      hasAccess: false,
+      trialRecord: record,
+      daysRemaining: 0,
+      hoursRemaining: 0,
+      formattedExpiresAt: expiresAt.toLocaleDateString(undefined, {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      }),
+      isExpired: true,
+    };
+  }
+
+  const daysRemaining = Math.max(1, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
+  const hoursRemaining = Math.max(1, Math.ceil(diffMs / (1000 * 60 * 60)));
+
+  return {
+    serviceId,
+    serviceName,
+    serviceCategory: category,
+    status: 'trial_active',
+    hasAccess: true,
+    trialRecord: record,
+    daysRemaining,
+    hoursRemaining,
+    formattedExpiresAt: expiresAt.toLocaleDateString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    }),
+    isExpired: false,
+  };
+}
+
 
 

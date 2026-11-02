@@ -341,7 +341,7 @@ export const OnboardingFlow: React.FC = () => {
 
               <div className="flex items-center gap-2 p-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 text-xs">
                 <ShieldCheck className="w-4 h-4 shrink-0" />
-                <span>Independent 7-Day Free Trials available for eligible services · Clean workspace ready.</span>
+                <span>100% Free Forever Merchant Dashboard · Full store workspace unlocked immediately.</span>
               </div>
             </div>
           )}

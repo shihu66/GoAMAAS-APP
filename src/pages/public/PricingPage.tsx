@@ -17,15 +17,12 @@ import {
   Code2,
 } from 'lucide-react';
 import {
-  DASHBOARD_SUBSCRIPTION_PLANS,
+  FREE_MERCHANT_DASHBOARD_PLAN,
   AI_AUTOMATION_PACKAGES,
   WEBSITE_DEVELOPMENT_PACKAGES,
-  DashboardPlanConfig,
   AutomationPackageConfig,
   WebsitePackageConfig,
-  resolveCatalogPlanState,
 } from '../../data/pricingConfig';
-import { isSupabaseConfigured } from '../../lib/supabase';
 import { Modal } from '../../components/ui/Modal';
 
 type PricingCategory = 'webSubscription' | 'dashboard' | 'automations' | 'website';
@@ -39,12 +36,9 @@ function resolveInitialTab(param: string | null): PricingCategory {
 
 export const PricingPage: React.FC = () => {
   const {
-    currentPlan,
     isAuthenticated,
     showToast,
     websiteSubscriptionPlan,
-    servicePricingCatalog,
-    isPricingCatalogLoaded,
   } = useApp();
   const { t } = useLanguage();
   const pp = t.pricingPage;
@@ -57,39 +51,16 @@ export const PricingPage: React.FC = () => {
     description: pp.seoDescription,
   });
 
-  const useLiveCatalog = isAuthenticated && isSupabaseConfigured && isPricingCatalogLoaded;
-  const getPlanDisplayState = (plan: DashboardPlanConfig) =>
-    resolveCatalogPlanState({
-      serviceType: 'dashboard_plan',
-      serviceId: plan.id,
-      fallbackLabel: pp.dashboardTab.plans[plan.id]?.name || plan.name,
-      fallbackPriceBdt: plan.priceMonthly,
-      catalog: useLiveCatalog ? servicePricingCatalog : undefined,
-      requireCatalog: useLiveCatalog,
-    });
-
   const [activeCategory, setActiveCategory] = useState<PricingCategory>(() =>
     resolveInitialTab(searchParams.get('tab'))
   );
 
-  // Confirmation modal state for choosing packages
-  const [selectedDashboardPlan, setSelectedDashboardPlan] = useState<DashboardPlanConfig | null>(null);
+  // Confirmation modal state for standalone paid add-on packages
   const [selectedAutoPackage, setSelectedAutoPackage] = useState<AutomationPackageConfig | null>(null);
   const [selectedWebPackage, setSelectedWebPackage] = useState<WebsitePackageConfig | null>(null);
 
   // FAQ Accordion
   const [openFaqIndex, setOpenFaqIndex] = useState<number | null>(0);
-
-  const handleConfirmDashboardPlan = () => {
-    if (!selectedDashboardPlan) return;
-    const targetPlanId = selectedDashboardPlan.id;
-    setSelectedDashboardPlan(null);
-    if (isAuthenticated) {
-      navigate(`/dashboard/billing?plan=${encodeURIComponent(targetPlanId)}`);
-    } else {
-      navigate('/register');
-    }
-  };
 
   const handleConfirmAutomation = () => {
     if (!selectedAutoPackage) return;
@@ -430,124 +401,88 @@ export const PricingPage: React.FC = () => {
         )}
 
         {/* =========================================================================
-            CATEGORY 2: DASHBOARD SUBSCRIPTION PLANS
+            CATEGORY 2: 100% FREE FOREVER MERCHANT DASHBOARD
            ========================================================================= */}
         {activeCategory === 'dashboard' && (
-          <div className="space-y-12">
-            <div className="text-center space-y-1.5">
-              <p className="text-xs font-semibold text-blue-600 dark:text-blue-400">
+          <div className="space-y-10 max-w-4xl mx-auto">
+            <div className="text-center space-y-2">
+              <p className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">
                 {pp.dashboardTab.kicker}
               </p>
-              <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400">
+              <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-950 dark:text-white tracking-tight text-balance">
+                {pp.dashboardTab.plans.pro.name}
+              </h2>
+              <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 max-w-2xl mx-auto leading-relaxed">
                 {pp.dashboardTab.subnote}
               </p>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-              {DASHBOARD_SUBSCRIPTION_PLANS.map((plan) => {
-                const isCurrent = isAuthenticated && currentPlan === plan.id;
-                const planState = getPlanDisplayState(plan);
-                const isUnavailable = useLiveCatalog && (!planState.isAvailable || planState.priceBdt === null);
-                const localized = pp.dashboardTab.plans[plan.id];
-
-                return (
-                  <div
-                    key={plan.id}
-                    className={`p-6 sm:p-7 rounded-2xl flex flex-col justify-between transition-colors ${
-                      plan.isPopular && !isUnavailable
-                        ? 'bg-slate-950 dark:bg-slate-900 text-white border-2 border-blue-600'
-                        : 'bg-slate-50/70 dark:bg-slate-900/70 border border-slate-200/90 dark:border-slate-800 text-slate-900 dark:text-white'
-                    } ${isUnavailable ? 'opacity-70' : ''}`}
-                  >
-                    <div className="space-y-4">
-                      <div>
-                        <div className="flex items-center justify-between gap-2 text-[11px] font-semibold mb-1.5">
-                          <span className={plan.isPopular && !isUnavailable ? 'text-emerald-400' : 'text-emerald-600 dark:text-emerald-400'}>
-                            {pp.common.freeTrialBadge}
-                          </span>
-                          {plan.isPopular && !isUnavailable && (
-                            <span className="text-blue-400">{pp.common.mostPopular}</span>
-                          )}
-                        </div>
-                        <h3 className="text-lg font-bold tracking-tight">
-                          {useLiveCatalog ? planState.planTierLabel : localized?.name || plan.name}
-                        </h3>
-                        <p className={`text-xs mt-1 font-medium ${plan.isPopular && !isUnavailable ? 'text-blue-300' : 'text-slate-600 dark:text-slate-400'}`}>
-                          {localized?.subtitle || plan.subtitle}
-                        </p>
-                        <p className={`text-xs mt-1.5 leading-relaxed ${plan.isPopular && !isUnavailable ? 'text-slate-400' : 'text-slate-500 dark:text-slate-400'}`}>
-                          {localized?.description || plan.description}
-                        </p>
-                      </div>
-
-                      <div className="flex items-baseline gap-1 pt-1">
-                        {planState.priceBdt !== null ? (
-                          <>
-                            <span className="text-3xl sm:text-4xl font-extrabold font-mono tabular-nums">
-                              ৳{planState.priceBdt.toLocaleString()}
-                            </span>
-                            <span className={`text-xs ${plan.isPopular && !isUnavailable ? 'text-slate-400' : 'text-slate-500'}`}>
-                              {pp.common.perMonth}
-                            </span>
-                          </>
-                        ) : (
-                          <span className="text-base font-bold text-slate-400">
-                            {pp.common.currentlyUnavailable}
-                          </span>
-                        )}
-                      </div>
-
-                      <div className={`pt-4 space-y-2.5 text-xs border-t ${plan.isPopular && !isUnavailable ? 'border-slate-800' : 'border-slate-200/80 dark:border-slate-800'}`}>
-                        {(localized?.features || plan.features).map((feat, fIdx) => (
-                          <div key={fIdx} className="flex items-start gap-2">
-                            <Check
-                              className={`w-3.5 h-3.5 shrink-0 mt-0.5 ${
-                                plan.isPopular && !isUnavailable ? 'text-blue-400' : 'text-blue-600 dark:text-blue-400'
-                              }`}
-                            />
-                            <span className={plan.isPopular && !isUnavailable ? 'text-slate-200' : 'text-slate-700 dark:text-slate-300'}>
-                              {feat}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div className="pt-6">
-                      <button
-                        type="button"
-                        disabled={isCurrent || isUnavailable}
-                        onClick={() => {
-                          if (!isUnavailable) setSelectedDashboardPlan(plan);
-                        }}
-                        className={`w-full min-h-[44px] py-2.5 rounded-xl text-xs font-semibold transition-colors ${
-                          isCurrent
-                            ? 'bg-emerald-600 text-white cursor-default'
-                            : isUnavailable
-                            ? 'bg-slate-200 dark:bg-slate-800 text-slate-400 cursor-not-allowed'
-                            : plan.isPopular
-                            ? 'bg-blue-600 hover:bg-blue-500 text-white cursor-pointer'
-                            : 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-900 dark:text-white cursor-pointer'
-                        }`}
-                      >
-                        {isCurrent
-                          ? pp.common.currentActivePlan
-                          : isUnavailable
-                          ? pp.common.currentlyUnavailable
-                          : localized?.ctaLabel || plan.ctaLabel}
-                      </button>
-                    </div>
+            <div className="p-7 sm:p-10 rounded-2xl bg-slate-50/80 dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 space-y-7">
+              <div className="flex flex-wrap items-baseline justify-between gap-4 pb-6 border-b border-slate-200/80 dark:border-slate-800">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+                    <span>{pp.common.freeTrialBadge}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{pp.dashboardTab.plans.pro.subtitle}</span>
                   </div>
-                );
-              })}
+                  <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300 max-w-xl leading-relaxed">
+                    {pp.dashboardTab.plans.pro.description}
+                  </p>
+                </div>
+
+                <div className="flex items-baseline gap-1.5">
+                  <span className="text-4xl sm:text-5xl font-extrabold font-mono text-slate-950 dark:text-white tabular-nums">
+                    ৳{FREE_MERCHANT_DASHBOARD_PLAN.priceMonthly}
+                  </span>
+                  <span className="text-sm text-slate-500 dark:text-slate-400">
+                    {pp.common.perMonth}
+                  </span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs sm:text-[13px] text-slate-700 dark:text-slate-200">
+                {FREE_MERCHANT_DASHBOARD_PLAN.features.map((feat, fIdx) => {
+                  const localizedList = pp.dashboardTab.plans.pro.features;
+                  const label = localizedList[fIdx] || feat;
+                  return (
+                    <div key={fIdx} className="flex items-start gap-2.5">
+                      <Check className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                      <span className="leading-snug">{label}</span>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="pt-4 border-t border-slate-200/80 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  {isAuthenticated
+                    ? pp.common.currentActivePlan
+                    : pp.dashboardTab.subnote}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => navigate(isAuthenticated ? '/dashboard' : '/register')}
+                  className="min-h-[46px] px-6 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs sm:text-sm transition-colors inline-flex items-center justify-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <span>
+                    {isAuthenticated ? t.nav.openDashboard : pp.dashboardTab.plans.pro.ctaLabel}
+                  </span>
+                  <ArrowRight className="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
-            <div className="p-4 sm:p-5 rounded-xl bg-slate-50 dark:bg-slate-900/70 border border-slate-200/90 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400 flex items-start gap-2.5 leading-relaxed">
-              <Info className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
-              <span>
-                <strong className="text-slate-900 dark:text-white">{pp.dashboardTab.integrationNoteLabel}</strong>{' '}
-                {pp.dashboardTab.integrationNoteBody}
-              </span>
+            <div className="p-5 sm:p-6 rounded-2xl bg-slate-50 dark:bg-slate-900/70 border border-slate-200/90 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400 space-y-2.5 leading-relaxed">
+              <div className="flex items-center gap-2 font-bold text-slate-900 dark:text-white">
+                <Info className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+                <span>{pp.dashboardTab.integrationNoteLabel}</span>
+              </div>
+              <p>{pp.dashboardTab.integrationNoteBody}</p>
+              <ul className="list-disc pl-5 space-y-1 text-[11px] sm:text-xs">
+                {FREE_MERCHANT_DASHBOARD_PLAN.externalDisclosures.map((item, idx) => (
+                  <li key={idx}>{item}</li>
+                ))}
+              </ul>
             </div>
           </div>
         )}
@@ -782,12 +717,14 @@ export const PricingPage: React.FC = () => {
               <thead className="border-b border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 font-semibold">
                 <tr>
                   <th className="py-3 px-4">{pp.matrix.colCapability}</th>
-                  <th className="py-3 px-4 font-mono tabular-nums">Starter (৳299)</th>
-                  <th className="py-3 px-4 font-mono tabular-nums text-blue-600 dark:text-blue-400">
-                    Business (৳599)
+                  <th className="py-3 px-4 font-mono tabular-nums text-emerald-600 dark:text-emerald-400">
+                    Free Dashboard (৳0)
                   </th>
-                  <th className="py-3 px-4 font-mono tabular-nums">Pro (৳999)</th>
-                  <th className="py-3 px-4 font-mono tabular-nums">Enterprise (৳1,999)</th>
+                  <th className="py-3 px-4 font-mono tabular-nums text-blue-600 dark:text-blue-400">
+                    GoAMAAS Website (৳600/mo)
+                  </th>
+                  <th className="py-3 px-4 font-mono tabular-nums">AI Automation (৳999+/mo)</th>
+                  <th className="py-3 px-4 font-mono tabular-nums">Custom Web (৳8,000+)</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800">
@@ -883,84 +820,6 @@ export const PricingPage: React.FC = () => {
           </div>
         </div>
       </div>
-
-      {/* Confirmation Modal for Dashboard Plan */}
-      {selectedDashboardPlan &&
-        (() => {
-          const selectedState = getPlanDisplayState(selectedDashboardPlan);
-          const localized = pp.dashboardTab.plans[selectedDashboardPlan.id];
-          const displayLabel = useLiveCatalog
-            ? selectedState.planTierLabel
-            : localized?.name || selectedDashboardPlan.name;
-
-          return (
-            <Modal
-              isOpen={!!selectedDashboardPlan}
-              onClose={() => setSelectedDashboardPlan(null)}
-              title={pp.modals.confirmPlanTitle(displayLabel)}
-              maxWidth="md"
-            >
-              <div className="space-y-4 text-xs">
-                <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800 space-y-2">
-                  <div className="flex justify-between items-center gap-2">
-                    <span className="text-slate-500">{pp.modals.billingType}</span>
-                    <span className="font-semibold text-slate-900 dark:text-white">
-                      {pp.modals.monthlySubscription}
-                    </span>
-                  </div>
-                  <div className="flex justify-between items-center gap-2">
-                    <span className="text-slate-500">{pp.modals.subscriptionPrice}</span>
-                    <span className="font-bold text-base font-mono tabular-nums text-blue-600 dark:text-blue-400">
-                      {selectedState.priceBdt !== null
-                        ? `৳${selectedState.priceBdt.toLocaleString()} ${pp.common.perMonth}`
-                        : pp.common.currentlyUnavailable}
-                    </span>
-                  </div>
-                  <div className="flex justify-between items-center gap-2">
-                    <span className="text-slate-500">{pp.modals.trialPeriod}</span>
-                    <span className="font-semibold text-emerald-600 dark:text-emerald-400">
-                      {pp.common.freeTrialBadge}
-                    </span>
-                  </div>
-                </div>
-
-                <div>
-                  <span className="font-bold text-slate-900 dark:text-white block mb-1.5">
-                    {pp.modals.includedFeatures}
-                  </span>
-                  <ul className="space-y-1.5 text-slate-600 dark:text-slate-300">
-                    {(localized?.features || selectedDashboardPlan.features).map((f, i) => (
-                      <li key={i} className="flex items-center gap-2">
-                        <Check className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
-                        <span>{f}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-
-                <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setSelectedDashboardPlan(null)}
-                    className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium cursor-pointer"
-                  >
-                    {pp.common.cancel}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={
-                      useLiveCatalog && (!selectedState.isAvailable || selectedState.priceBdt === null)
-                    }
-                    onClick={handleConfirmDashboardPlan}
-                    className="min-h-[40px] px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold cursor-pointer"
-                  >
-                    {isAuthenticated ? pp.modals.confirmApplyPlan : pp.modals.proceedTrialSignup}
-                  </button>
-                </div>
-              </div>
-            </Modal>
-          );
-        })()}
 
       {/* Confirmation Modal for AI Automation */}
       {selectedAutoPackage &&

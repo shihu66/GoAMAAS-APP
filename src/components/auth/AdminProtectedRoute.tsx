@@ -64,23 +64,28 @@ export const AdminProtectedRoute: React.FC<AdminProtectedRouteProps> = ({ childr
   const [totpError, setTotpError] = useState<string | null>(null);
   const [isVerifyingTotp, setIsVerifyingTotp] = useState<boolean>(false);
 
-  const purgeUnauthorizedSession = useCallback(async () => {
-    if (purgingForbiddenRef.current) return;
-    purgingForbiddenRef.current = true;
-    try {
-      hadAuthorizedSessionRef.current = false;
-      clearAdminSessionEvents();
-      notifyAdminServiceWorkerSignOut();
-      if (isSupabaseConfigured) {
-        await signOutFromSupabase();
+  const purgeUnauthorizedSession = useCallback(
+    async (forbiddenReason?: AdminVerificationResult['forbiddenReason']) => {
+      if (purgingForbiddenRef.current) return;
+      purgingForbiddenRef.current = true;
+      try {
+        hadAuthorizedSessionRef.current = false;
+        clearAdminSessionEvents();
+        notifyAdminServiceWorkerSignOut();
+        if (isSupabaseConfigured) {
+          await signOutFromSupabase();
+        }
+        await logout({ silent: true });
+        if (forbiddenReason !== 'missing_admin_role') {
+          recordAdminLoginFailure();
+        }
+      } finally {
+        setForbiddenSignedOut(true);
+        purgingForbiddenRef.current = false;
       }
-      await logout();
-      recordAdminLoginFailure();
-    } finally {
-      setForbiddenSignedOut(true);
-      purgingForbiddenRef.current = false;
-    }
-  }, [logout]);
+    },
+    [logout]
+  );
 
   const runVerification = useCallback(
     async (options?: { silent?: boolean }): Promise<AdminVerificationResult> => {
@@ -103,7 +108,7 @@ export const AdminProtectedRoute: React.FC<AdminProtectedRouteProps> = ({ childr
           storeId: '',
         });
       } else if (result.status === 'forbidden') {
-        await purgeUnauthorizedSession();
+        await purgeUnauthorizedSession(result.forbiddenReason);
       }
       if (!options?.silent) {
         setIsChecking(false);
@@ -128,7 +133,7 @@ export const AdminProtectedRoute: React.FC<AdminProtectedRouteProps> = ({ childr
     if (isSupabaseConfigured) {
       await signOutFromSupabase();
     }
-    await logout();
+    await logout({ silent: true });
     navigate('/admin/login', { replace: true });
   }, [logout, navigate, verification?.admin?.id]);
 
@@ -153,7 +158,7 @@ export const AdminProtectedRoute: React.FC<AdminProtectedRouteProps> = ({ childr
           storeId: '',
         });
       } else if (res.status === 'forbidden') {
-        await purgeUnauthorizedSession();
+        await purgeUnauthorizedSession(res.forbiddenReason);
       }
       if (active) {
         setIsChecking(false);

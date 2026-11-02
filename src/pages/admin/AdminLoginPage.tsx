@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ShieldCheck,
@@ -31,11 +31,27 @@ import {
   verifyServerAdminSession,
 } from '../../lib/adminSecurity';
 import { notifyAdminServiceWorkerSignOut, useAdminPWA } from '../../hooks/useAdminPWA';
-import {
-  AdminPWAInstallButton,
-  AdminPWAInstallPrompt,
-} from '../../components/admin/AdminPWAInstallBanner';
+import { AdminPWAInstallPrompt } from '../../components/admin/AdminPWAInstallBanner';
 import { useApp } from '../../context/AppContext';
+
+function resolveOAuthErrorMessage(reason: string | null): string {
+  switch (reason) {
+    case 'access_denied':
+      return 'Google sign-in was cancelled.';
+    case 'provider_disabled':
+      return 'Google Sign-In is currently disabled in authentication settings.';
+    case 'profile_sync_error':
+      return 'Authentication service could not initialize the account session.';
+    case 'pkce_mismatch':
+      return 'Sign-in session expired or opened in a different browser. Please try again.';
+    case 'network_error':
+      return 'Network interruption while verifying administrator access. Please try again.';
+    case 'unconfigured':
+      return 'Authentication service credentials are not configured.';
+    default:
+      return 'Google authentication could not be completed. Please try again.';
+  }
+}
 
 export const AdminLoginPage: React.FC = () => {
   const navigate = useNavigate();
@@ -43,6 +59,7 @@ export const AdminLoginPage: React.FC = () => {
   const [searchParams] = useSearchParams();
   const { theme, toggleTheme, setAuthenticatedUser, logout } = useApp();
   const { isOnline, isEmbeddedIframe } = useAdminPWA(theme);
+  const checkedInitialRef = useRef(false);
 
   const intendedDestination = (() => {
     const fromState = (location.state as { from?: string } | null)?.from;
@@ -57,25 +74,39 @@ export const AdminLoginPage: React.FC = () => {
     searchParams.get('denied') === '1' || searchParams.get('unauthorized') === '1';
   const isOauthErrorQuery =
     searchParams.get('oauth_error') === '1' || Boolean(searchParams.get('error'));
+  const oauthReason = searchParams.get('reason');
 
   const [isCheckingExisting, setIsCheckingExisting] = useState(true);
   const [isSubmittingMfa, setIsSubmittingMfa] = useState(false);
   const [isGoogleRedirecting, setIsGoogleRedirecting] = useState(false);
+  const [externalTabOAuthUrl, setExternalTabOAuthUrl] = useState<string | null>(null);
   const [errorBanner, setErrorBanner] = useState<string | null>(() => {
     if (isDeniedQuery) return UNIFORM_ADMIN_AUTH_ERROR;
     if (isOauthErrorQuery) {
-      return 'Google authentication could not be completed. Please try again with the authorized administrator account.';
+      return resolveOAuthErrorMessage(oauthReason);
     }
     return null;
   });
   const [lockoutSeconds, setLockoutSeconds] = useState<number>(0);
 
-  // MFA step-up challenge right inside login when enrolled on the authorized admin account
+  // MFA step-up challenge when enrolled on the verified admin account
   const [mfaChallengeFactor, setMfaChallengeFactor] = useState<VerifiedAdminFactor | null>(null);
   const [totpCode, setTotpCode] = useState('');
 
-  // Check if user already holds a valid server-verified admin session, or purge any unauthorized session
+  // Sync query-string error banners when redirected back to /admin/login
   useEffect(() => {
+    if (isDeniedQuery) {
+      setErrorBanner(UNIFORM_ADMIN_AUTH_ERROR);
+    } else if (isOauthErrorQuery) {
+      setErrorBanner(resolveOAuthErrorMessage(oauthReason));
+    }
+  }, [isDeniedQuery, isOauthErrorQuery, oauthReason]);
+
+  // Check once on mount whether user already holds a valid server-verified admin session, or purge any unauthorized session
+  useEffect(() => {
+    if (checkedInitialRef.current) return;
+    checkedInitialRef.current = true;
+
     let active = true;
     void (async () => {
       const rate = checkAdminLoginRateLimit();
@@ -120,16 +151,19 @@ export const AdminLoginPage: React.FC = () => {
         return;
       }
 
-      // If an unauthorized Google or merchant session is present, immediately sign out and show generic denial
+      // Immediately purge any unauthorized Google or merchant session and show generic denial
       if (res.status === 'forbidden') {
         await enforceMinimumAuthFloor(startedAt, 350);
         clearAdminSessionEvents();
         notifyAdminServiceWorkerSignOut();
         await signOutFromSupabase();
-        await logout();
-        const failure = recordAdminLoginFailure();
+        await logout({ silent: true });
+        const failure =
+          res.forbiddenReason === 'missing_admin_role'
+            ? null
+            : recordAdminLoginFailure();
         if (!active) return;
-        if (failure.lockedOut) {
+        if (failure?.lockedOut) {
           setLockoutSeconds(failure.retryAfterSeconds);
           setErrorBanner(
             `Too many unsuccessful sign-in attempts. Sign-in is temporarily locked for ${failure.retryAfterSeconds}s.`
@@ -199,7 +233,7 @@ export const AdminLoginPage: React.FC = () => {
         clearAdminSessionEvents();
         notifyAdminServiceWorkerSignOut();
         await signOutFromSupabase();
-        await logout();
+        await logout({ silent: true });
         setMfaChallengeFactor(null);
         setTotpCode('');
         setErrorBanner(UNIFORM_ADMIN_AUTH_ERROR);
@@ -232,18 +266,25 @@ export const AdminLoginPage: React.FC = () => {
 
     setIsGoogleRedirecting(true);
     setErrorBanner(null);
+    setExternalTabOAuthUrl(null);
 
     // Clean callback URL without query string guarantees exact allowlist match in Supabase GoTrue
     const callbackUrl = `${window.location.origin}/auth/callback`;
-    const { error } = await signInWithGoogle(callbackUrl, {
+    const { data, error } = await signInWithGoogle(callbackUrl, {
       isAdminFlow: true,
       nextPath: intendedDestination,
-      loginHint: AUTHORIZED_ADMIN_EMAIL,
+      skipWindowRedirect: isEmbeddedIframe,
     });
 
     if (error) {
       setIsGoogleRedirecting(false);
       setErrorBanner(error.message || 'Unable to start Google sign-in. Please retry.');
+      return;
+    }
+
+    if (isEmbeddedIframe && data?.url) {
+      setIsGoogleRedirecting(false);
+      setExternalTabOAuthUrl(data.url);
     }
   };
 
@@ -274,21 +315,18 @@ export const AdminLoginPage: React.FC = () => {
           </span>
         </div>
 
-        <div className="flex items-center gap-2">
-          <AdminPWAInstallButton theme={theme} variant="compact" />
-          <button
-            type="button"
-            onClick={toggleTheme}
-            className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors cursor-pointer"
-            aria-label="Toggle color theme"
-          >
-            {theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={toggleTheme}
+          className="min-h-[40px] min-w-[40px] inline-flex items-center justify-center rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors cursor-pointer"
+          aria-label="Toggle color theme"
+        >
+          {theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
+        </button>
       </header>
 
       {/* Main Dedicated Sign-In Card */}
-      <main className="w-full max-w-md mx-auto my-6 space-y-5">
+      <main className="w-full max-w-sm mx-auto my-8 space-y-4">
         {!isOnline && (
           <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-200 text-xs flex items-center gap-2.5">
             <WifiOff className="w-4 h-4 shrink-0" />
@@ -298,13 +336,13 @@ export const AdminLoginPage: React.FC = () => {
 
         {isExpiredSession && !errorBanner && (
           <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-200 text-xs">
-            Your administrator session expired. Sign in with Google again to continue.
+            Your session expired. Please sign in again.
           </div>
         )}
 
         <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 sm:p-8 shadow-sm space-y-6">
-          <div className="space-y-1.5">
-            <div className="w-11 h-11 rounded-2xl bg-blue-600 text-white flex items-center justify-center mb-3">
+          <div className="space-y-1.5 text-center">
+            <div className="w-11 h-11 rounded-2xl bg-blue-600 text-white flex items-center justify-center mx-auto mb-3">
               {mfaChallengeFactor ? (
                 <KeyRound className="w-5 h-5" />
               ) : (
@@ -312,12 +350,12 @@ export const AdminLoginPage: React.FC = () => {
               )}
             </div>
             <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-white">
-              {mfaChallengeFactor ? 'Two-Factor Verification' : 'Administrator Sign In'}
+              {mfaChallengeFactor ? 'Two-Factor Verification' : 'Admin Sign In'}
             </h1>
-            <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+            <p className="text-xs text-slate-500 dark:text-slate-400">
               {mfaChallengeFactor
                 ? `Enter the 6-digit code from ${mfaChallengeFactor.friendlyName}.`
-                : 'Restricted operations console for AMAAS Technologies. Sign in exclusively with the authorized Google account.'}
+                : 'Authorized administrators only.'}
             </p>
           </div>
 
@@ -363,7 +401,7 @@ export const AdminLoginPage: React.FC = () => {
                 className="w-full min-h-[48px] rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold text-xs inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
               >
                 {isSubmittingMfa && <Loader2 className="w-4 h-4 animate-spin" />}
-                <span>Verify &amp; Enter Console</span>
+                <span>Verify &amp; Continue</span>
               </button>
 
               <button
@@ -372,7 +410,7 @@ export const AdminLoginPage: React.FC = () => {
                   clearAdminSessionEvents();
                   notifyAdminServiceWorkerSignOut();
                   await signOutFromSupabase();
-                  await logout();
+                  await logout({ silent: true });
                   setMfaChallengeFactor(null);
                   setTotpCode('');
                   setErrorBanner(null);
@@ -383,16 +421,7 @@ export const AdminLoginPage: React.FC = () => {
               </button>
             </form>
           ) : (
-            <div className="space-y-4">
-              <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-1">
-                <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
-                  Authorized Administrator Account
-                </p>
-                <p className="text-xs font-mono font-semibold text-slate-900 dark:text-white break-all">
-                  {AUTHORIZED_ADMIN_EMAIL}
-                </p>
-              </div>
-
+            <div className="space-y-3">
               <button
                 type="button"
                 disabled={isGoogleRedirecting || lockoutSeconds > 0 || !isOnline}
@@ -402,7 +431,7 @@ export const AdminLoginPage: React.FC = () => {
                 {isGoogleRedirecting ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-                    <span>Redirecting to Google...</span>
+                    <span>Connecting to Google...</span>
                   </>
                 ) : lockoutSeconds > 0 ? (
                   <span className="tabular-nums">Temporarily Locked ({lockoutSeconds}s)</span>
@@ -428,45 +457,28 @@ export const AdminLoginPage: React.FC = () => {
                         />
                       </svg>
                     </span>
-                    <span>Sign in with Google</span>
+                    <span>Continue with Google</span>
                   </>
                 )}
               </button>
 
-              {isEmbeddedIframe && typeof window !== 'undefined' && (
-                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-[11px] text-slate-600 dark:text-slate-400 space-y-1.5 leading-relaxed">
-                  <p>
-                    Google blocks sign-in inside embedded preview frames. Open Admin Login in a
-                    dedicated browser tab to complete Google authentication:
-                  </p>
-                  <a
-                    href={window.location.href}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 font-semibold text-blue-600 dark:text-blue-400 hover:underline"
-                  >
-                    <span>Open Admin Login in Full Tab</span>
-                    <ExternalLink className="w-3 h-3" />
-                  </a>
-                </div>
+              {externalTabOAuthUrl && (
+                <a
+                  href={externalTabOAuthUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-900 dark:text-white font-semibold text-xs inline-flex items-center justify-center gap-2 transition-colors"
+                >
+                  <span>Open Google Sign-In in New Tab</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
               )}
-
-              <p className="text-[11px] text-slate-500 dark:text-slate-400 text-center leading-relaxed">
-                Any other Google account is automatically rejected and signed out. Server-side
-                administrator role verification is enforced on every request.
-              </p>
             </div>
           )}
         </div>
-
-        {/* Dedicated Android / Desktop / iOS PWA Install Card */}
-        <AdminPWAInstallButton theme={theme} variant="card" />
       </main>
 
-      {/* Quiet Security Footer */}
-      <footer className="w-full max-w-5xl mx-auto py-3 text-center text-[11px] text-slate-500 dark:text-slate-500">
-        GoAMAAS Admin &middot; AMAAS Technologies &middot; Server-verified access only
-      </footer>
+      <div className="h-4" aria-hidden="true" />
     </div>
   );
 };

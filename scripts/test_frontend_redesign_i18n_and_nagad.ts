@@ -10,6 +10,7 @@ import {
   getNagadManualSteps,
 } from '../src/data/paymentGatewaysConfig';
 import {
+  FREE_MERCHANT_DASHBOARD_PLAN,
   DASHBOARD_SUBSCRIPTION_PLANS,
   AI_AUTOMATION_PACKAGES,
   WEBSITE_DEVELOPMENT_PACKAGES,
@@ -146,9 +147,10 @@ async function main() {
 
   // 5. Verify Pricing Honesty & Zero Misleading Free-Custom-Domain Claims
   assert(DEFAULT_WEBSITE_SUBSCRIPTION_PLAN.priceMonthly === 600, 'GoAMAAS Website subscription must remain ৳600/month');
+  assert(FREE_MERCHANT_DASHBOARD_PLAN.priceMonthly === 0, 'Free Merchant Dashboard must be ৳0/month');
   assert(
-    JSON.stringify(DASHBOARD_SUBSCRIPTION_PLANS.map((p) => p.priceMonthly)) === JSON.stringify([299, 599, 999, 1999]),
-    'Dashboard plan prices must remain 299, 599, 999, 1999'
+    JSON.stringify(DASHBOARD_SUBSCRIPTION_PLANS.map((p) => p.priceMonthly)) === JSON.stringify([0, 0, 0, 0]),
+    'Dashboard plan prices must all be ৳0/month (100% free forever)'
   );
   assert(
     JSON.stringify(AI_AUTOMATION_PACKAGES.map((p) => p.priceMonthly)) === JSON.stringify([999, 2499, 3999, 7999]),

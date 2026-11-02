@@ -21,6 +21,8 @@ import {
 import {
   AreaChart,
   Area,
+  BarChart,
+  Bar,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -37,8 +39,6 @@ export const DashboardOverviewPage: React.FC = () => {
     products,
     orders,
     customers,
-    currentPlan,
-    trialDaysLeft,
   } = useApp();
   const navigate = useNavigate();
 
@@ -132,6 +132,112 @@ export const DashboardOverviewPage: React.FC = () => {
       .slice(0, 4);
   }, [products]);
 
+  // Previous-Month vs. Current-Month Sales Comparison (authentic non-cancelled orders only)
+  const monthlyComparison = useMemo(() => {
+    const now = new Date();
+    const currYear = now.getFullYear();
+    const currMonth = now.getMonth();
+    const prevDate = new Date(currYear, currMonth - 1, 1);
+    const prevYear = prevDate.getFullYear();
+    const prevMonth = prevDate.getMonth();
+
+    const currentMonthLabel = now.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+    const previousMonthLabel = prevDate.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+
+    const ranges = [
+      { bucket: 'Days 1–7', min: 1, max: 7 },
+      { bucket: 'Days 8–14', min: 8, max: 14 },
+      { bucket: 'Days 15–21', min: 15, max: 21 },
+      { bucket: 'Days 22–28', min: 22, max: 28 },
+      { bucket: 'Days 29–31', min: 29, max: 31 },
+    ];
+
+    let previousTotal = 0;
+    let currentTotal = 0;
+    let previousOrderCount = 0;
+    let currentOrderCount = 0;
+
+    const series = ranges.map((r) => {
+      let prevBucketSum = 0;
+      let currBucketSum = 0;
+
+      for (const o of orders) {
+        if (o.status === 'cancelled') continue;
+        const od = new Date(o.createdAt);
+        const day = od.getDate();
+        if (day < r.min || day > r.max) continue;
+
+        if (od.getFullYear() === prevYear && od.getMonth() === prevMonth) {
+          prevBucketSum += o.total;
+        } else if (od.getFullYear() === currYear && od.getMonth() === currMonth) {
+          currBucketSum += o.total;
+        }
+      }
+
+      previousTotal += prevBucketSum;
+      currentTotal += currBucketSum;
+      return {
+        bucket: r.bucket,
+        previousMonth: prevBucketSum,
+        currentMonth: currBucketSum,
+      };
+    });
+
+    for (const o of orders) {
+      if (o.status === 'cancelled') continue;
+      const od = new Date(o.createdAt);
+      if (od.getFullYear() === prevYear && od.getMonth() === prevMonth) {
+        previousOrderCount += 1;
+      } else if (od.getFullYear() === currYear && od.getMonth() === currMonth) {
+        currentOrderCount += 1;
+      }
+    }
+
+    const momDeltaPct =
+      previousTotal > 0
+        ? (((currentTotal - previousTotal) / previousTotal) * 100).toFixed(1)
+        : currentTotal > 0
+        ? '100.0'
+        : '0.0';
+
+    return {
+      currentMonthLabel,
+      previousMonthLabel,
+      previousTotal,
+      currentTotal,
+      previousOrderCount,
+      currentOrderCount,
+      momDeltaPct,
+      hasMonthlySales: previousTotal > 0 || currentTotal > 0,
+      series,
+    };
+  }, [orders]);
+
+  // Business Performance Insights derived strictly from real store records
+  const performanceInsights = useMemo(() => {
+    const validOrders = orders.filter((o) => o.status !== 'cancelled');
+    const deliveredOrders = validOrders.filter((o) => o.status === 'delivered');
+    const aov = validOrders.length > 0 ? Math.round(totalSales / validOrders.length) : 0;
+    const deliveryRate =
+      validOrders.length > 0 ? Math.round((deliveredOrders.length / validOrders.length) * 100) : 0;
+    const repeatBuyers = customers.filter((c) => c.ordersCount > 1).length;
+    const repeatRate =
+      customers.length > 0 ? Math.round((repeatBuyers / customers.length) * 100) : 0;
+    const healthyStockPct =
+      products.length > 0
+        ? Math.round(((products.length - lowStockCount) / products.length) * 100)
+        : 100;
+
+    return {
+      aov,
+      deliveryRate,
+      repeatRate,
+      repeatBuyers,
+      healthyStockPct,
+      validOrderCount: validOrders.length,
+    };
+  }, [orders, totalSales, customers, products.length, lowStockCount]);
+
   const hasSalesData = orders.length > 0 && totalSales > 0;
 
   return (
@@ -192,27 +298,27 @@ export const DashboardOverviewPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Independent Service Trials Summary Strip */}
+      {/* Core Merchant Dashboard — 100% Free Forever Workspace Notice */}
       <div className="p-4 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-lg bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
-            <Clock className="w-5 h-5" />
+          <div className="w-9 h-9 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
+            <CheckCircle2 className="w-5 h-5" />
           </div>
           <div>
             <span className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white block">
-              Independent 7-Day Free Trials Available
+              Core Merchant Dashboard — 100% Free Forever (৳0/month)
             </span>
             <span className="text-xs text-slate-500 dark:text-slate-400">
-              Eligible GoAMAAS services (Dashboard Plans, AI Automations, Landing Page Builder) include an independent 7-day free trial.
+              Products, inventory, orders, customers, sales graphs, landing pages, website sync, and courier/payment settings are permanently unlocked. External courier, gateway, domain, and optional Website/AI service fees apply separately.
             </span>
           </div>
         </div>
         <Link
-          to="/dashboard/billing"
-          className="self-start sm:self-auto px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-xs transition-colors shrink-0 flex items-center gap-1.5"
+          to="/dashboard/settings"
+          className="self-start sm:self-auto px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 text-xs font-semibold transition-colors shrink-0 flex items-center gap-1.5 whitespace-nowrap"
         >
-          <span>Manage Service Trials</span>
-          <ArrowRight className="w-3.5 h-3.5" />
+          <Truck className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+          <span>Courier &amp; Payment Settings</span>
         </Link>
       </div>
 
@@ -404,6 +510,137 @@ export const DashboardOverviewPage: React.FC = () => {
               ))}
             </div>
           )}
+        </div>
+      </div>
+
+      {/* Previous-Month vs. Current-Month Sales Graph + Business Performance Insights */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2 p-5 sm:p-6 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                Previous-Month vs. Current-Month Sales
+              </h3>
+              <p className="text-[11px] text-slate-500">
+                Calendar comparison: {monthlyComparison.previousMonthLabel} vs. {monthlyComparison.currentMonthLabel}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-4 text-xs font-mono tabular-nums">
+              <span className="text-slate-500">
+                Prev: <strong className="text-slate-900 dark:text-white">৳{monthlyComparison.previousTotal.toLocaleString()}</strong> ({monthlyComparison.previousOrderCount})
+              </span>
+              <span className="text-blue-600 dark:text-blue-400">
+                Curr: <strong>৳{monthlyComparison.currentTotal.toLocaleString()}</strong> ({monthlyComparison.currentOrderCount})
+              </span>
+            </div>
+          </div>
+
+          <div className="h-60 w-full">
+            {!monthlyComparison.hasMonthlySales ? (
+              <div className="h-full w-full flex flex-col items-center justify-center p-6 text-center border border-dashed border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50/50 dark:bg-slate-900/40">
+                <Calendar className="w-8 h-8 text-slate-300 dark:text-slate-600 mb-2" />
+                <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  No current or previous month sales recorded yet
+                </p>
+                <p className="text-[11px] text-slate-500 max-w-xs mt-0.5">
+                  Weekly previous-month and current-month sales bars appear automatically once orders are placed.
+                </p>
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={monthlyComparison.series} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.2} />
+                  <XAxis dataKey="bucket" tick={{ fontSize: 11 }} stroke="#64748B" />
+                  <YAxis tick={{ fontSize: 11 }} stroke="#64748B" tickFormatter={(val) => `৳${val}`} />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: '#0F172A',
+                      borderColor: '#1E293B',
+                      borderRadius: '8px',
+                      fontSize: '12px',
+                      color: '#fff',
+                    }}
+                    formatter={(val: any, name: any) => [
+                      `৳${Number(val).toLocaleString()}`,
+                      name === 'previousMonth' ? monthlyComparison.previousMonthLabel : monthlyComparison.currentMonthLabel,
+                    ]}
+                  />
+                  <Bar
+                    dataKey="previousMonth"
+                    name="previousMonth"
+                    fill="#94A3B8"
+                    radius={[4, 4, 0, 0]}
+                  />
+                  <Bar
+                    dataKey="currentMonth"
+                    name="currentMonth"
+                    fill="#2563EB"
+                    radius={[4, 4, 0, 0]}
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </div>
+
+        {/* Business Performance Insights */}
+        <div className="p-5 sm:p-6 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col justify-between space-y-4">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+              Business Performance Insights
+            </h3>
+            <p className="text-[11px] text-slate-500">
+              Live operational benchmarks from your store activity
+            </p>
+          </div>
+
+          <div className="divide-y divide-slate-100 dark:divide-slate-800 text-xs">
+            <div className="py-2.5 flex items-center justify-between">
+              <span className="text-slate-600 dark:text-slate-400">Month-over-Month Growth</span>
+              <span
+                className={`font-mono font-bold tabular-nums ${
+                  Number(monthlyComparison.momDeltaPct) >= 0
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : 'text-rose-600 dark:text-rose-400'
+                }`}
+              >
+                {Number(monthlyComparison.momDeltaPct) > 0 ? '+' : ''}
+                {monthlyComparison.momDeltaPct}%
+              </span>
+            </div>
+            <div className="py-2.5 flex items-center justify-between">
+              <span className="text-slate-600 dark:text-slate-400">Average Order Value</span>
+              <span className="font-mono font-bold text-slate-900 dark:text-white tabular-nums">
+                ৳{performanceInsights.aov.toLocaleString()}
+              </span>
+            </div>
+            <div className="py-2.5 flex items-center justify-between">
+              <span className="text-slate-600 dark:text-slate-400">Fulfillment Completion</span>
+              <span className="font-mono font-bold text-blue-600 dark:text-blue-400 tabular-nums">
+                {performanceInsights.deliveryRate}%
+              </span>
+            </div>
+            <div className="py-2.5 flex items-center justify-between">
+              <span className="text-slate-600 dark:text-slate-400">Repeat Customer Share</span>
+              <span className="font-mono font-bold text-slate-900 dark:text-white tabular-nums">
+                {performanceInsights.repeatRate}% ({performanceInsights.repeatBuyers})
+              </span>
+            </div>
+            <div className="py-2.5 flex items-center justify-between">
+              <span className="text-slate-600 dark:text-slate-400">Healthy Catalog Stock</span>
+              <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400 tabular-nums">
+                {performanceInsights.healthyStockPct}%
+              </span>
+            </div>
+          </div>
+
+          <Link
+            to="/dashboard/analytics"
+            className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline inline-flex items-center gap-1"
+          >
+            <span>Open Detailed Analytics</span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </Link>
         </div>
       </div>
 

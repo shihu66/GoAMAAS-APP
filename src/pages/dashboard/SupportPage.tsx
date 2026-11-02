@@ -57,8 +57,8 @@ export const SupportPage: React.FC = () => {
       a: 'When an online visitor enters their phone number on your landing page or store checkout but does not finalize the order within 30 minutes, GoAMAAS automatically sends a polite follow-up message with their cart link and free shipping incentive.',
     },
     {
-      q: 'Are website development fees recurring?',
-      a: 'No. Website development packages starting at ৳8,000 are one-time project fees. They include your first year domain registration and SSD cloud hosting completely free.',
+      q: 'Are Merchant Dashboard or custom website development fees recurring?',
+      a: 'The core GoAMAAS Merchant Dashboard is 100% free forever (৳0/month). Bespoke website development packages starting at ৳8,000 are one-time engineering fees with cloud deployment setup included; custom domain registration and recurring hosting/third-party costs are billed separately.',
     },
   ];
 

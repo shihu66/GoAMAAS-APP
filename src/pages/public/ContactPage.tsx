@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
 import { useLanguage, usePageSeo } from '../../context/LanguageContext';
 import { Reveal } from '../../components/ui/MotionPrimitives';
-import { Mail, Phone, MapPin, Clock, Send, CheckCircle2, Globe, ExternalLink } from 'lucide-react';
+import { Phone, MapPin, Clock, Send, CheckCircle2, Globe, ExternalLink } from 'lucide-react';
 
 const OFFICIAL_MAPS_URL =
   'https://www.google.com/maps/dir/?api=1&destination=Fulbarigate,+KUET-9203,+Khulna,+Bangladesh';
@@ -116,21 +116,6 @@ export const ContactPage: React.FC = () => {
                         className="text-slate-600 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 font-mono transition-colors"
                       >
                         {cp.hotlineVal}
-                      </a>
-                    </div>
-                  </div>
-
-                  <div className="flex items-start gap-3.5">
-                    <Mail className="w-4 h-4 text-blue-600 dark:text-blue-400 mt-1 shrink-0" />
-                    <div>
-                      <strong className="text-slate-950 dark:text-white block font-semibold">
-                        {cp.engSales}
-                      </strong>
-                      <a
-                        href="mailto:official.amaas.dev@gmail.com"
-                        className="text-slate-600 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 font-mono transition-colors"
-                      >
-                        official.amaas.dev@gmail.com
                       </a>
                     </div>
                   </div>
