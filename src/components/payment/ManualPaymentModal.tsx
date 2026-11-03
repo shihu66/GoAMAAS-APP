@@ -67,6 +67,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethodType>('bKash');
   const [transactionId, setTransactionId] = useState('');
   const [senderNumber, setSenderNumber] = useState('');
+  const [amountPaidInput, setAmountPaidInput] = useState<string>('');
   const [bankName, setBankName] = useState('');
   const [bankAccountName, setBankAccountName] = useState('');
   const [loading, setLoading] = useState(false);
@@ -132,6 +133,12 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
     serviceType === 'website_subscription' && boundWebsite
       ? boundWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly || amount
       : amount;
+
+  useEffect(() => {
+    if (isOpen && Number.isFinite(effectiveAmount) && effectiveAmount > 0) {
+      setAmountPaidInput(String(effectiveAmount));
+    }
+  }, [isOpen, effectiveServiceId, effectiveAmount]);
 
   const formattedAmount = `৳${effectiveAmount.toLocaleString()}`;
 
@@ -260,12 +267,27 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
       }
     }
 
+    const cleanedAmountText = amountPaidInput.replace(/[^\d.]/g, '').trim();
+    const parsedAmountPaid = cleanedAmountText ? Number(cleanedAmountText) : NaN;
+    if (!Number.isFinite(parsedAmountPaid) || parsedAmountPaid <= 0) {
+      const msg = 'Please enter the exact BDT amount paid.';
+      setSubmitError(msg);
+      showToast(msg, 'warning');
+      return;
+    }
+    if (parsedAmountPaid !== effectiveAmount) {
+      const msg = `Entered amount (৳${parsedAmountPaid.toLocaleString()}) must match the exact payable amount (${formattedAmount}).`;
+      setSubmitError(msg);
+      showToast(msg, 'warning');
+      return;
+    }
+
     const validation = validateManualPaymentSubmissionInput({
       paymentMethod,
       transactionId,
       bankReference: paymentMethod === 'Bank Transfer' ? transactionId : undefined,
       senderNumber,
-      amount: effectiveAmount,
+      amount: parsedAmountPaid,
       serviceId: effectiveServiceId,
     });
 
@@ -299,7 +321,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
         serviceId: effectiveServiceId,
         serviceName: effectiveServiceName,
         planTier: effectivePlanTier,
-        amount: effectiveAmount,
+        amount: parsedAmountPaid,
         paymentMethod,
         transactionId: validation.normalizedReference,
         senderNumber: validation.normalizedSender,
@@ -308,23 +330,19 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
         bankReference: isBank ? validation.normalizedReference : undefined,
       });
 
-      if (res.success && res.request) {
+      if (res.success && res.request && res.request.id && res.request.status === 'pending') {
         setTransactionId('');
         setSenderNumber('');
         setBankName('');
         setBankAccountName('');
         setSubmitError(null);
         setSubmittedRequest(res.request);
-      } else if (res.success) {
-        setTransactionId('');
-        setSenderNumber('');
-        setBankName('');
-        setBankAccountName('');
-        setSubmitError(null);
-        if (onSuccess) onSuccess();
-        onClose();
       } else {
-        setSubmitError(res.message || pm.errors.submitFailed);
+        setSubmitError(
+          res.message ||
+            pm.errors.submitFailed ||
+            'Unable to confirm payment submission in database. Please try again.'
+        );
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : pm.errors.submitFailed;
@@ -872,13 +890,27 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                 <label className="block text-slate-700 dark:text-slate-300 font-semibold mb-1">
                   {pm.payableAmountInputLabel}
                 </label>
-                <input
-                  type="text"
-                  readOnly
-                  value={formattedAmount}
-                  aria-label="Exact Payable Amount"
-                  className="w-full min-h-[44px] px-3 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800/80 font-mono font-bold text-xs text-slate-900 dark:text-white tabular-nums cursor-not-allowed"
-                />
+                <div className="relative">
+                  <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 font-mono font-bold text-xs text-slate-500 dark:text-slate-400">
+                    ৳
+                  </span>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    required
+                    value={amountPaidInput}
+                    onChange={(e) => {
+                      setAmountPaidInput(e.target.value.replace(/[^\d.]/g, ''));
+                      if (submitError) setSubmitError(null);
+                    }}
+                    placeholder={String(effectiveAmount)}
+                    aria-label="Amount Paid (BDT)"
+                    className="w-full min-h-[44px] pl-7 pr-12 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 font-mono font-bold text-xs text-slate-900 dark:text-white tabular-nums"
+                  />
+                  <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 font-mono text-[10px] font-bold text-slate-400">
+                    BDT
+                  </span>
+                </div>
               </div>
 
               <div>

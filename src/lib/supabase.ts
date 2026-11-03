@@ -28,6 +28,7 @@ import {
   resolveAuthoritativeServicePrice,
 } from '../data/pricingConfig';
 import { validateManualPaymentSubmissionInput } from './paymentWorkflow';
+import { emitPaymentDiagnostic } from './paymentDiagnostics';
 
 export const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -1159,26 +1160,103 @@ export interface RawPaymentRequestRow {
   updated_at: string;
 }
 
-export async function fetchUserPaymentRequests(userId?: string): Promise<{ data: RawPaymentRequestRow[] | null; error: Error | null }> {
+export async function fetchUserPaymentRequests(
+  userId?: string,
+  options?: { isAdminQueue?: boolean }
+): Promise<{
+  data: RawPaymentRequestRow[] | null;
+  error: Error | null;
+  status?: number;
+  code?: string;
+}> {
   if (!isSupabaseConfigured || !supabase) {
     return { data: null, error: null };
   }
+  const isAdminQueue = Boolean(options?.isAdminQueue || !userId);
+  if (isAdminQueue) {
+    emitPaymentDiagnostic({
+      stage: 'ADMIN_QUEUE_FETCH_STARTED',
+      httpStatus: null,
+      errorCode: null,
+      requestId: null,
+      projectRef: supabaseProjectRef,
+      hasUserId: Boolean(userId),
+      hasWebsiteId: false,
+    });
+  }
   try {
-    let query = supabase.from('payment_requests').select('*').order('created_at', { ascending: false });
-    if (userId) {
+    let query = supabase
+      .from('payment_requests')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (!isAdminQueue && userId) {
       query = query.eq('user_id', userId);
     }
-    const { data, error } = await query;
+    const { data, error, status } = await query;
     if (error) {
-      return { data: null, error: new Error(error.message || 'Failed to fetch payment requests') };
+      if (isAdminQueue) {
+        emitPaymentDiagnostic({
+          stage: 'ADMIN_QUEUE_FETCH_FAILED',
+          httpStatus: typeof status === 'number' ? status : null,
+          errorCode: error.code || 'QUERY_ERROR',
+          requestId: null,
+          projectRef: supabaseProjectRef,
+          hasUserId: Boolean(userId),
+          hasWebsiteId: false,
+        });
+      }
+      return {
+        data: null,
+        error: new Error(error.message || 'Failed to fetch payment requests'),
+        status: typeof status === 'number' ? status : undefined,
+        code: error.code,
+      };
     }
-    return { data: (data as RawPaymentRequestRow[]) || [], error: null };
+    const rows = (data as RawPaymentRequestRow[]) || [];
+    if (isAdminQueue) {
+      emitPaymentDiagnostic({
+        stage: 'ADMIN_QUEUE_FETCH_SUCCEEDED',
+        httpStatus: typeof status === 'number' ? status : 200,
+        errorCode: null,
+        requestId: null,
+        projectRef: supabaseProjectRef,
+        hasUserId: Boolean(userId),
+        hasWebsiteId: false,
+        rowCount: rows.length,
+      });
+    }
+    return {
+      data: rows,
+      error: null,
+      status: typeof status === 'number' ? status : 200,
+    };
   } catch (err: unknown) {
+    if (isAdminQueue) {
+      emitPaymentDiagnostic({
+        stage: 'ADMIN_QUEUE_FETCH_FAILED',
+        httpStatus: null,
+        errorCode: 'FETCH_EXCEPTION',
+        requestId: null,
+        projectRef: supabaseProjectRef,
+        hasUserId: Boolean(userId),
+        hasWebsiteId: false,
+      });
+    }
     return {
       data: null,
       error: err instanceof Error ? err : new Error('Failed to fetch payment requests'),
+      code: 'FETCH_EXCEPTION',
     };
   }
+}
+
+export async function fetchAdminPaymentRequestsFromDb(): Promise<{
+  data: RawPaymentRequestRow[] | null;
+  error: Error | null;
+  status?: number;
+  code?: string;
+}> {
+  return fetchUserPaymentRequests(undefined, { isAdminQueue: true });
 }
 
 export async function createPaymentRequestInDb(params: {
@@ -1237,6 +1315,10 @@ export async function createPaymentRequestInDb(params: {
     let resolvedServiceId = cleanServiceId;
     let resolvedPlanTier = (params.planTier || '').trim();
 
+    let siteStoreId: string | null = null;
+    let siteBusinessName = '';
+    let siteConfig: Record<string, unknown> = {};
+
     if (
       params.serviceType === 'website_subscription' ||
       params.serviceType === 'website_package'
@@ -1250,7 +1332,7 @@ export async function createPaymentRequestInDb(params: {
 
       const { data: siteRow, error: siteErr } = await supabase
         .from('subscribed_websites')
-        .select('id, user_id, monthly_fee, plan_tier')
+        .select('id, user_id, store_id, business_name, monthly_fee, plan_tier, config')
         .eq('id', cleanServiceId)
         .maybeSingle();
 
@@ -1272,6 +1354,20 @@ export async function createPaymentRequestInDb(params: {
           error: new Error('Unauthorized: You can only submit a payment request for your own website.'),
         };
       }
+
+      siteStoreId =
+        typeof (siteRow as { store_id?: unknown }).store_id === 'string'
+          ? ((siteRow as { store_id: string }).store_id || '').trim() || null
+          : null;
+      siteBusinessName =
+        typeof (siteRow as { business_name?: unknown }).business_name === 'string'
+          ? ((siteRow as { business_name: string }).business_name || '').trim()
+          : '';
+      siteConfig =
+        typeof (siteRow as { config?: unknown }).config === 'object' &&
+        (siteRow as { config?: unknown }).config !== null
+          ? ((siteRow as { config: Record<string, unknown> }).config)
+          : {};
 
       if (params.serviceType === 'website_subscription') {
         const { data: liteRow, error: liteErr } = await supabase
@@ -1555,8 +1651,23 @@ export async function createPaymentRequestInDb(params: {
       };
     }
 
-    const validStoreId =
-      params.storeId && UUID_REGEX.test(params.storeId.trim()) ? params.storeId.trim() : null;
+    const candidateStoreId =
+      (params.storeId && UUID_REGEX.test(params.storeId.trim()) ? params.storeId.trim() : null) ||
+      (siteStoreId && UUID_REGEX.test(siteStoreId) ? siteStoreId : null);
+
+    // Verify store_id exists in public.stores before inserting into payment_requests
+    // so an orphaned subscribed_websites.store_id can never trigger FK violation 23503.
+    let validStoreId: string | null = null;
+    if (candidateStoreId) {
+      const { data: storeCheck } = await supabase
+        .from('stores')
+        .select('id')
+        .eq('id', candidateStoreId)
+        .maybeSingle();
+      if (storeCheck && typeof (storeCheck as { id?: unknown }).id === 'string') {
+        validStoreId = (storeCheck as { id: string }).id;
+      }
+    }
 
     const canonicalTrxId = validation.normalizedReference;
     const canonicalBankRef =
@@ -1564,18 +1675,58 @@ export async function createPaymentRequestInDb(params: {
         ? validation.normalizedReference
         : (params.bankReference || '').trim().toUpperCase() || null;
 
-    const { data, error } = await supabase
+    const meta = (authUser.user_metadata || {}) as Record<string, unknown>;
+    const safeCustomerName =
+      (params.customerName || '').trim() ||
+      (typeof siteConfig.ownerName === 'string' ? siteConfig.ownerName.trim() : '') ||
+      (typeof meta.full_name === 'string' ? meta.full_name.trim() : '') ||
+      (typeof meta.name === 'string' ? meta.name.trim() : '') ||
+      siteBusinessName ||
+      'Merchant';
+
+    const safeCustomerEmail =
+      (params.customerEmail || '').trim() ||
+      (authUser.email || '').trim() ||
+      (typeof siteConfig.email === 'string' ? siteConfig.email.trim() : '') ||
+      'not-provided@amaas.xyz';
+
+    const safeCustomerPhone =
+      (params.customerPhone || '').trim() ||
+      validation.normalizedSender ||
+      (typeof siteConfig.phone === 'string' ? siteConfig.phone.trim() : '') ||
+      'Not provided';
+
+    const safeServiceName =
+      (params.serviceName || '').trim() ||
+      (siteBusinessName ? `GoAMAAS Website (${siteBusinessName})` : 'GoAMAAS Service');
+
+    const safePlanTier = resolvedPlanTier || 'GoAMAAS Website';
+
+    const isWebsiteTarget =
+      params.serviceType === 'website_subscription' || params.serviceType === 'website_package';
+
+    emitPaymentDiagnostic({
+      stage: 'PAYMENT_REQUEST_INSERT_STARTED',
+      httpStatus: null,
+      errorCode: null,
+      requestId: null,
+      projectRef: supabaseProjectRef,
+      hasUserId: Boolean(authUser.id),
+      hasWebsiteId: isWebsiteTarget && UUID_REGEX.test(resolvedServiceId),
+    });
+
+    const { data, error, status } = await supabase
       .from('payment_requests')
       .insert({
         user_id: authUser.id,
         store_id: validStoreId,
-        customer_name: params.customerName,
-        customer_phone: params.customerPhone,
-        customer_email: params.customerEmail,
+        customer_name: safeCustomerName,
+        customer_phone: safeCustomerPhone,
+        customer_email: safeCustomerEmail,
         service_type: params.serviceType,
         service_id: resolvedServiceId,
-        service_name: params.serviceName,
-        plan_tier: resolvedPlanTier,
+        service_name: safeServiceName,
+        plan_tier: safePlanTier,
         amount: submittedAmount,
         currency: '৳',
         payment_method: params.paymentMethod,
@@ -1590,6 +1741,16 @@ export async function createPaymentRequestInDb(params: {
       .single();
 
     if (error) {
+      emitPaymentDiagnostic({
+        stage: 'PAYMENT_REQUEST_INSERT_FAILED',
+        httpStatus: typeof status === 'number' ? status : null,
+        errorCode: error.code || 'INSERT_ERROR',
+        requestId: null,
+        projectRef: supabaseProjectRef,
+        hasUserId: Boolean(authUser.id),
+        hasWebsiteId: isWebsiteTarget && UUID_REGEX.test(resolvedServiceId),
+      });
+
       if (error.code === '23505') {
         const errMsg = `${error.message || ''} ${error.details || ''}`.toLowerCase();
         if (errMsg.includes('uq_payment_requests_pending_user_service')) {
@@ -1616,11 +1777,52 @@ export async function createPaymentRequestInDb(params: {
       }
       return { data: null, error: new Error(error.message || 'Failed to submit payment request to database') };
     }
-    if (!data) {
-      return { data: null, error: new Error('Failed to submit payment request: no record returned from database') };
+
+    const insertedRow = data as RawPaymentRequestRow | null;
+    if (
+      !insertedRow ||
+      !UUID_REGEX.test(String(insertedRow.id || '')) ||
+      insertedRow.status !== 'pending'
+    ) {
+      emitPaymentDiagnostic({
+        stage: 'PAYMENT_REQUEST_INSERT_FAILED',
+        httpStatus: typeof status === 'number' ? status : null,
+        errorCode: 'UNCONFIRMED_ROW',
+        requestId: null,
+        projectRef: supabaseProjectRef,
+        hasUserId: Boolean(authUser.id),
+        hasWebsiteId: isWebsiteTarget && UUID_REGEX.test(resolvedServiceId),
+      });
+      return {
+        data: null,
+        error: new Error('Failed to confirm payment request creation in database. Please retry.'),
+      };
     }
-    return { data: data as RawPaymentRequestRow, error: null };
+
+    emitPaymentDiagnostic({
+      stage: 'PAYMENT_REQUEST_INSERT_SUCCEEDED',
+      httpStatus: typeof status === 'number' ? status : 201,
+      errorCode: null,
+      requestId: insertedRow.id,
+      projectRef: supabaseProjectRef,
+      hasUserId: Boolean(authUser.id),
+      hasWebsiteId: isWebsiteTarget && UUID_REGEX.test(resolvedServiceId),
+    });
+
+    return { data: insertedRow, error: null };
   } catch (err: unknown) {
+    emitPaymentDiagnostic({
+      stage: 'PAYMENT_REQUEST_INSERT_FAILED',
+      httpStatus: null,
+      errorCode: 'INSERT_EXCEPTION',
+      requestId: null,
+      projectRef: supabaseProjectRef,
+      hasUserId: Boolean(params.userId),
+      hasWebsiteId:
+        (params.serviceType === 'website_subscription' ||
+          params.serviceType === 'website_package') &&
+        UUID_REGEX.test((params.serviceId || '').trim()),
+    });
     return {
       data: null,
       error: err instanceof Error ? err : new Error('Failed to submit payment request'),

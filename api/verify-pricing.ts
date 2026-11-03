@@ -1,38 +1,93 @@
 import type { IncomingMessage, ServerResponse } from 'http';
-import {
-  AI_AUTOMATION_PACKAGES,
-  DASHBOARD_SUBSCRIPTION_PLANS,
-  DEFAULT_WEBSITE_SUBSCRIPTION_PLAN,
-  WEBSITE_DEVELOPMENT_PACKAGES,
-  normalizeDashboardPlanId,
-} from '../src/data/pricingConfig';
-import type { ServicePricingCatalogEntry } from '../src/types';
 
 interface RequestWithBody extends IncomingMessage {
   body?: unknown;
   url?: string;
 }
 
+type PricingServiceType =
+  | 'website_subscription'
+  | 'website_package'
+  | 'dashboard_plan'
+  | 'ai_automation';
+
+interface PricingCatalogEntry {
+  serviceType: PricingServiceType;
+  serviceCode: string;
+  planTierLabel: string;
+  priceBdt: number;
+  setupFeeBdt: number;
+  isActive: boolean;
+  updatedAt?: string;
+}
+
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function buildServerAuthoritativeCatalog(): ServicePricingCatalogEntry[] {
-  const entries: ServicePricingCatalogEntry[] = [
+const LEGACY_DASHBOARD_PLAN_ALIASES: Readonly<
+  Record<string, 'starter' | 'business' | 'pro' | 'enterprise'>
+> = {
+  starter: 'starter',
+  dashboard_starter: 'starter',
+  plan_starter: 'starter',
+  business: 'business',
+  dashboard_business: 'business',
+  plan_growth: 'business',
+  growth: 'business',
+  pro: 'pro',
+  dashboard_pro: 'pro',
+  plan_pro: 'pro',
+  enterprise: 'enterprise',
+  dashboard_enterprise: 'enterprise',
+  plan_enterprise: 'enterprise',
+};
+
+function normalizeDashboardPlanId(
+  raw: string | null | undefined
+): 'starter' | 'business' | 'pro' | 'enterprise' | null {
+  const cleaned = (raw || '').trim().toLowerCase();
+  if (!cleaned) return null;
+  return LEGACY_DASHBOARD_PLAN_ALIASES[cleaned] ?? null;
+}
+
+/**
+ * Self-contained server-authoritative pricing catalog for Vercel Node ESM runtime.
+ * Avoids cross-directory extensionless ESM relative imports that trigger
+ * ERR_MODULE_NOT_FOUND / 500 FUNCTION_INVOCATION_FAILED on Vercel Production.
+ */
+function buildServerAuthoritativeCatalog(): PricingCatalogEntry[] {
+  return [
     {
       serviceType: 'website_subscription',
       serviceCode: 'website_lite',
-      planTierLabel: DEFAULT_WEBSITE_SUBSCRIPTION_PLAN.name,
-      priceBdt: DEFAULT_WEBSITE_SUBSCRIPTION_PLAN.priceMonthly,
+      planTierLabel: 'GoAMAAS Website',
+      priceBdt: 600,
       setupFeeBdt: 0,
       isActive: true,
     },
-    ...WEBSITE_DEVELOPMENT_PACKAGES.map((pkg) => ({
-      serviceType: 'website_package' as const,
-      serviceCode: pkg.id,
-      planTierLabel: pkg.name,
-      priceBdt: pkg.priceOneTime,
+    {
+      serviceType: 'website_package',
+      serviceCode: 'starter_web',
+      planTierLabel: 'Starter Website',
+      priceBdt: 8000,
       setupFeeBdt: 0,
       isActive: true,
-    })),
+    },
+    {
+      serviceType: 'website_package',
+      serviceCode: 'business_web',
+      planTierLabel: 'Business Website',
+      priceBdt: 15000,
+      setupFeeBdt: 0,
+      isActive: true,
+    },
+    {
+      serviceType: 'website_package',
+      serviceCode: 'advanced_web',
+      planTierLabel: 'Advanced Website',
+      priceBdt: 25000,
+      setupFeeBdt: 0,
+      isActive: true,
+    },
     {
       serviceType: 'website_package',
       serviceCode: 'custom_setup',
@@ -41,30 +96,77 @@ function buildServerAuthoritativeCatalog(): ServicePricingCatalogEntry[] {
       setupFeeBdt: 0,
       isActive: true,
     },
-    ...DASHBOARD_SUBSCRIPTION_PLANS.map((plan) => ({
-      serviceType: 'dashboard_plan' as const,
-      serviceCode: plan.id,
-      planTierLabel: plan.name,
-      priceBdt: plan.priceMonthly,
+    {
+      serviceType: 'dashboard_plan',
+      serviceCode: 'starter',
+      planTierLabel: 'Starter',
+      priceBdt: 0,
       setupFeeBdt: 0,
       isActive: true,
-    })),
-    ...AI_AUTOMATION_PACKAGES.map((auto) => ({
-      serviceType: 'ai_automation' as const,
-      serviceCode: auto.id,
-      planTierLabel: auto.name,
-      priceBdt: auto.priceMonthly,
-      setupFeeBdt: typeof auto.setupFee === 'number' ? auto.setupFee : 0,
+    },
+    {
+      serviceType: 'dashboard_plan',
+      serviceCode: 'business',
+      planTierLabel: 'Business',
+      priceBdt: 0,
+      setupFeeBdt: 0,
       isActive: true,
-    })),
+    },
+    {
+      serviceType: 'dashboard_plan',
+      serviceCode: 'pro',
+      planTierLabel: 'Pro',
+      priceBdt: 0,
+      setupFeeBdt: 0,
+      isActive: true,
+    },
+    {
+      serviceType: 'dashboard_plan',
+      serviceCode: 'enterprise',
+      planTierLabel: 'Enterprise',
+      priceBdt: 0,
+      setupFeeBdt: 0,
+      isActive: true,
+    },
+    {
+      serviceType: 'ai_automation',
+      serviceCode: 'basic_auto',
+      planTierLabel: 'Basic Automation',
+      priceBdt: 999,
+      setupFeeBdt: 1000,
+      isActive: true,
+    },
+    {
+      serviceType: 'ai_automation',
+      serviceCode: 'growth_auto',
+      planTierLabel: 'Growth Automation',
+      priceBdt: 2499,
+      setupFeeBdt: 1500,
+      isActive: true,
+    },
+    {
+      serviceType: 'ai_automation',
+      serviceCode: 'ai_chatbot',
+      planTierLabel: 'AI Chatbot',
+      priceBdt: 3999,
+      setupFeeBdt: 0,
+      isActive: true,
+    },
+    {
+      serviceType: 'ai_automation',
+      serviceCode: 'biz_auto_pro',
+      planTierLabel: 'Business Automation Pro',
+      priceBdt: 7999,
+      setupFeeBdt: 0,
+      isActive: true,
+    },
   ];
-
-  return entries;
 }
 
 function resolveSupabaseServerEnv(): {
   supabaseUrl: string;
   supabaseAnonKey: string;
+  supabaseProjectRef: string;
   valid: boolean;
 } {
   const supabaseUrl = (
@@ -84,6 +186,7 @@ function resolveSupabaseServerEnv(): {
     ''
   ).trim();
 
+  let supabaseProjectRef = 'unconfigured';
   let valid =
     Boolean(supabaseUrl) &&
     supabaseUrl.startsWith('https://') &&
@@ -98,6 +201,7 @@ function resolveSupabaseServerEnv(): {
       const parsedHost = new URL(supabaseUrl).hostname;
       const hostMatch = parsedHost.match(/^([a-z0-9-]+)\.supabase\.co$/i);
       const urlRef = hostMatch ? hostMatch[1].toLowerCase() : '';
+      supabaseProjectRef = urlRef || parsedHost.toLowerCase();
       const parts = supabaseAnonKey.split('.');
       if (parts.length === 3) {
         const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
@@ -116,7 +220,37 @@ function resolveSupabaseServerEnv(): {
     }
   }
 
-  return { supabaseUrl, supabaseAnonKey, valid };
+  return { supabaseUrl, supabaseAnonKey, supabaseProjectRef, valid };
+}
+
+function logServerPricingDiagnostic(params: {
+  stage: 'PRICING_VERIFICATION_SUCCEEDED' | 'PRICING_VERIFICATION_FAILED';
+  httpStatus: number;
+  errorCode: string | null;
+  supabaseProjectRef: string;
+  hasUserId: boolean;
+  hasWebsiteId: boolean;
+  catalogSource?: string;
+}): void {
+  const safeCode = params.errorCode
+    ? params.errorCode.replace(/[^A-Za-z0-9_:-]/g, '_').slice(0, 48)
+    : null;
+  const payload = {
+    timestamp: new Date().toISOString(),
+    stage: params.stage,
+    httpStatus: params.httpStatus,
+    errorCode: safeCode,
+    requestId: null,
+    supabaseProjectRef: params.supabaseProjectRef || 'unconfigured',
+    hasUserId: Boolean(params.hasUserId),
+    hasWebsiteId: Boolean(params.hasWebsiteId),
+    ...(params.catalogSource ? { source: params.catalogSource } : {}),
+  };
+  if (params.stage === 'PRICING_VERIFICATION_FAILED') {
+    console.error('[GoAMAAS][PaymentDiag]', JSON.stringify(payload));
+  } else {
+    console.info('[GoAMAAS][PaymentDiag]', JSON.stringify(payload));
+  }
 }
 
 async function readJsonBody(req: RequestWithBody): Promise<Record<string, unknown>> {
@@ -181,9 +315,20 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
     return;
   }
 
+  const { supabaseUrl, supabaseAnonKey, supabaseProjectRef, valid } = resolveSupabaseServerEnv();
+  let hasUserId = false;
+  let hasWebsiteId = false;
+
   try {
-    const { supabaseUrl, supabaseAnonKey, valid } = resolveSupabaseServerEnv();
     if (!valid) {
+      logServerPricingDiagnostic({
+        stage: 'PRICING_VERIFICATION_FAILED',
+        httpStatus: 503,
+        errorCode: 'SUPABASE_NOT_CONFIGURED',
+        supabaseProjectRef,
+        hasUserId: false,
+        hasWebsiteId: false,
+      });
       sendJson(res, 503, {
         ok: false,
         code: 'SUPABASE_NOT_CONFIGURED',
@@ -216,6 +361,14 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
     });
 
     if (!userResp.ok) {
+      logServerPricingDiagnostic({
+        stage: 'PRICING_VERIFICATION_FAILED',
+        httpStatus: 401,
+        errorCode: 'AUTH_EXPIRED',
+        supabaseProjectRef,
+        hasUserId: false,
+        hasWebsiteId: false,
+      });
       sendJson(res, 401, {
         ok: false,
         code: 'AUTH_EXPIRED',
@@ -226,6 +379,14 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
 
     const authUser = (await userResp.json()) as { id?: string; email?: string };
     if (!authUser?.id) {
+      logServerPricingDiagnostic({
+        stage: 'PRICING_VERIFICATION_FAILED',
+        httpStatus: 401,
+        errorCode: 'AUTH_INVALID',
+        supabaseProjectRef,
+        hasUserId: false,
+        hasWebsiteId: false,
+      });
       sendJson(res, 401, {
         ok: false,
         code: 'AUTH_INVALID',
@@ -233,6 +394,7 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       });
       return;
     }
+    hasUserId = true;
 
     // 2. Parse optional target service parameters from query or JSON body
     const hostHeader = (req.headers['x-forwarded-host'] as string) || req.headers.host || 'localhost';
@@ -256,6 +418,10 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       body.includeSetupFee === true || parsedUrl.searchParams.get('includeSetupFee') === 'true'
     );
 
+    hasWebsiteId =
+      (serviceType === 'website_subscription' || serviceType === 'website_package') &&
+      UUID_REGEX.test(serviceId);
+
     // 3. Query public.service_pricing_catalog with the authenticated user's JWT
     const catalogUrl = `${supabaseUrl}/rest/v1/service_pricing_catalog?select=*&order=service_type.asc,service_code.asc`;
     const catalogResp = await fetch(catalogUrl, {
@@ -267,14 +433,14 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       },
     });
 
-    let catalog: ServicePricingCatalogEntry[] = [];
+    let catalog: PricingCatalogEntry[] = [];
     let catalogSource: 'database' | 'server_authoritative_fallback' = 'database';
 
     if (catalogResp.ok) {
       const rows = (await catalogResp.json()) as Array<Record<string, unknown>>;
       if (Array.isArray(rows) && rows.length > 0) {
         catalog = rows.map((row) => ({
-          serviceType: String(row.service_type) as ServicePricingCatalogEntry['serviceType'],
+          serviceType: String(row.service_type) as PricingServiceType,
           serviceCode: String(row.service_code || ''),
           planTierLabel: String(row.plan_tier_label || ''),
           priceBdt: Number(row.price_bdt) || 0,
@@ -283,7 +449,6 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
           updatedAt: typeof row.updated_at === 'string' ? row.updated_at : undefined,
         }));
       } else {
-        // Table exists in Production DB but has not been seeded yet — use server-owned authoritative catalog
         catalog = buildServerAuthoritativeCatalog();
         catalogSource = 'server_authoritative_fallback';
       }
@@ -306,6 +471,14 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
         catalog = buildServerAuthoritativeCatalog();
         catalogSource = 'server_authoritative_fallback';
       } else {
+        logServerPricingDiagnostic({
+          stage: 'PRICING_VERIFICATION_FAILED',
+          httpStatus: 502,
+          errorCode: errCode || 'PRICING_QUERY_FAILED',
+          supabaseProjectRef,
+          hasUserId,
+          hasWebsiteId,
+        });
         sendJson(res, 502, {
           ok: false,
           code: 'PRICING_QUERY_FAILED',
@@ -317,6 +490,15 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
 
     // If caller only requested the active catalog (no specific serviceType), return immediately
     if (!serviceType) {
+      logServerPricingDiagnostic({
+        stage: 'PRICING_VERIFICATION_SUCCEEDED',
+        httpStatus: 200,
+        errorCode: null,
+        supabaseProjectRef,
+        hasUserId,
+        hasWebsiteId: false,
+        catalogSource,
+      });
       sendJson(res, 200, {
         ok: true,
         catalog,
@@ -328,6 +510,14 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
     // 4. Verify exact target service & compute authoritative server BDT price
     if (serviceType === 'website_subscription' || serviceType === 'website_package') {
       if (!UUID_REGEX.test(serviceId)) {
+        logServerPricingDiagnostic({
+          stage: 'PRICING_VERIFICATION_FAILED',
+          httpStatus: 400,
+          errorCode: 'INVALID_WEBSITE_ID',
+          supabaseProjectRef,
+          hasUserId,
+          hasWebsiteId: false,
+        });
         sendJson(res, 400, {
           ok: false,
           code: 'INVALID_WEBSITE_ID',
@@ -350,6 +540,14 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       });
 
       if (!siteResp.ok) {
+        logServerPricingDiagnostic({
+          stage: 'PRICING_VERIFICATION_FAILED',
+          httpStatus: 502,
+          errorCode: 'WEBSITE_LOOKUP_FAILED',
+          supabaseProjectRef,
+          hasUserId,
+          hasWebsiteId: true,
+        });
         sendJson(res, 502, {
           ok: false,
           code: 'WEBSITE_LOOKUP_FAILED',
@@ -362,6 +560,14 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       const siteRow = Array.isArray(siteRows) ? siteRows[0] : undefined;
 
       if (!siteRow) {
+        logServerPricingDiagnostic({
+          stage: 'PRICING_VERIFICATION_FAILED',
+          httpStatus: 404,
+          errorCode: 'WEBSITE_NOT_FOUND',
+          supabaseProjectRef,
+          hasUserId,
+          hasWebsiteId: true,
+        });
         sendJson(res, 404, {
           ok: false,
           code: 'WEBSITE_NOT_FOUND',
@@ -371,6 +577,14 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       }
 
       if (String(siteRow.user_id || '') !== authUser.id) {
+        logServerPricingDiagnostic({
+          stage: 'PRICING_VERIFICATION_FAILED',
+          httpStatus: 403,
+          errorCode: 'WEBSITE_OWNERSHIP_MISMATCH',
+          supabaseProjectRef,
+          hasUserId,
+          hasWebsiteId: true,
+        });
         sendJson(res, 403, {
           ok: false,
           code: 'WEBSITE_OWNERSHIP_MISMATCH',
@@ -387,6 +601,14 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
         );
 
         if (!liteEntry || !liteEntry.isActive || !(liteEntry.priceBdt > 0)) {
+          logServerPricingDiagnostic({
+            stage: 'PRICING_VERIFICATION_FAILED',
+            httpStatus: 422,
+            errorCode: 'PLAN_INACTIVE',
+            supabaseProjectRef,
+            hasUserId,
+            hasWebsiteId: true,
+          });
           sendJson(res, 422, {
             ok: false,
             code: 'PLAN_INACTIVE',
@@ -400,6 +622,16 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
           Number.isFinite(rowMonthlyFee) && rowMonthlyFee > 0
             ? rowMonthlyFee
             : liteEntry.priceBdt;
+
+        logServerPricingDiagnostic({
+          stage: 'PRICING_VERIFICATION_SUCCEEDED',
+          httpStatus: 200,
+          errorCode: null,
+          supabaseProjectRef,
+          hasUserId,
+          hasWebsiteId: true,
+          catalogSource,
+        });
 
         sendJson(res, 200, {
           ok: true,
@@ -444,6 +676,14 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       });
 
       if (!matchedPkg) {
+        logServerPricingDiagnostic({
+          stage: 'PRICING_VERIFICATION_FAILED',
+          httpStatus: 422,
+          errorCode: 'PACKAGE_INACTIVE',
+          supabaseProjectRef,
+          hasUserId,
+          hasWebsiteId: true,
+        });
         sendJson(res, 422, {
           ok: false,
           code: 'PACKAGE_INACTIVE',
@@ -451,6 +691,16 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
         });
         return;
       }
+
+      logServerPricingDiagnostic({
+        stage: 'PRICING_VERIFICATION_SUCCEEDED',
+        httpStatus: 200,
+        errorCode: null,
+        supabaseProjectRef,
+        hasUserId,
+        hasWebsiteId: true,
+        catalogSource,
+      });
 
       sendJson(res, 200, {
         ok: true,
@@ -480,6 +730,14 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       );
 
       if (!matchedAuto) {
+        logServerPricingDiagnostic({
+          stage: 'PRICING_VERIFICATION_FAILED',
+          httpStatus: 422,
+          errorCode: 'AUTOMATION_INACTIVE',
+          supabaseProjectRef,
+          hasUserId,
+          hasWebsiteId: false,
+        });
         sendJson(res, 422, {
           ok: false,
           code: 'AUTOMATION_INACTIVE',
@@ -491,6 +749,16 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       const amount = includeSetupFee
         ? matchedAuto.priceBdt + (matchedAuto.setupFeeBdt || 0)
         : matchedAuto.priceBdt;
+
+      logServerPricingDiagnostic({
+        stage: 'PRICING_VERIFICATION_SUCCEEDED',
+        httpStatus: 200,
+        errorCode: null,
+        supabaseProjectRef,
+        hasUserId,
+        hasWebsiteId: false,
+        catalogSource,
+      });
 
       sendJson(res, 200, {
         ok: true,
@@ -511,6 +779,14 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
 
     if (serviceType === 'dashboard_plan') {
       const canonical = normalizeDashboardPlanId(serviceId);
+      logServerPricingDiagnostic({
+        stage: 'PRICING_VERIFICATION_FAILED',
+        httpStatus: 422,
+        errorCode: 'DASHBOARD_FREE',
+        supabaseProjectRef,
+        hasUserId,
+        hasWebsiteId: false,
+      });
       sendJson(res, 422, {
         ok: false,
         code: 'DASHBOARD_FREE',
@@ -520,12 +796,28 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       return;
     }
 
+    logServerPricingDiagnostic({
+      stage: 'PRICING_VERIFICATION_FAILED',
+      httpStatus: 400,
+      errorCode: 'UNSUPPORTED_SERVICE_TYPE',
+      supabaseProjectRef,
+      hasUserId,
+      hasWebsiteId: false,
+    });
     sendJson(res, 400, {
       ok: false,
       code: 'UNSUPPORTED_SERVICE_TYPE',
       error: 'Unsupported service type requested for pricing verification.',
     });
   } catch {
+    logServerPricingDiagnostic({
+      stage: 'PRICING_VERIFICATION_FAILED',
+      httpStatus: 500,
+      errorCode: 'INTERNAL_ERROR',
+      supabaseProjectRef,
+      hasUserId,
+      hasWebsiteId,
+    });
     sendJson(res, 500, {
       ok: false,
       code: 'INTERNAL_ERROR',

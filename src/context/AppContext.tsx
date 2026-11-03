@@ -74,6 +74,7 @@ import {
 } from '../lib/paymentWorkflow';
 import {
   supabase,
+  supabaseProjectRef,
   isSupabaseConfigured,
   ensureActiveSupabaseSession,
   verifyServicePricingViaServer,
@@ -140,9 +141,12 @@ import {
   deleteWebsiteAssetFromStorage,
 } from '../lib/supabase';
 import {
+  AUTHORIZED_ADMIN_EMAIL,
   isAuthorizedAdminEmail,
   isAuthUserEmailVerified,
+  verifyServerAdminSession,
 } from '../lib/adminSecurity';
+import { emitPaymentDiagnostic } from '../lib/paymentDiagnostics';
 
 export interface ToastMessage {
   id: string;
@@ -230,6 +234,7 @@ interface AppContextType {
   updateWebsiteSubscriptionPlanConfig: (updates: Partial<WebsiteSubscriptionPlanConfig>) => void;
   subscribedWebsites: SubscribedWebsite[];
   isWebsitesLoading: boolean;
+  websitesLoadError: string | null;
   createSubscribedWebsite: (data: CreateSubscribedWebsiteInput) => Promise<SubscribedWebsite>;
   updateSubscribedWebsite: (
     id: string,
@@ -277,6 +282,7 @@ interface AppContextType {
   // Payment Requests & Gateways System
   paymentRequests: PaymentRequest[];
   isPaymentsLoading: boolean;
+  paymentsLoadError: string | null;
   paymentGatewayConfigs: PaymentGatewayConfig[];
   isGatewaysLoading: boolean;
   refreshPaymentGatewayConfigs: () => Promise<PaymentGatewayConfig[] | null>;
@@ -300,7 +306,7 @@ interface AppContextType {
   ) => Promise<ApproveAndPublishResult>;
   adminRetryPublishForPayment: (requestId: string) => Promise<ApproveAndPublishResult>;
   adminRejectPayment: (requestId: string, reason: string) => Promise<{ success: boolean; message: string }>;
-  refreshPaymentRequests: () => Promise<void>;
+  refreshPaymentRequests: (options?: { asAdmin?: boolean }) => Promise<void>;
   updatePaymentGatewayConfig: (id: string, updates: Partial<PaymentGatewayConfig>) => Promise<boolean>;
   publishWebsite: (websiteId: string) => Promise<{ success: boolean; message: string }>;
   unpublishWebsite: (websiteId: string) => Promise<{ success: boolean; message: string }>;
@@ -398,6 +404,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return stored ? { ...stored, role: 'merchant' } : null;
   });
   const [role, setRole] = useState<UserRole>('merchant');
+  const verifiedAdminUserIdRef = useRef<string | null>(null);
 
   // Real Stores (persisted in public.stores when Supabase is configured)
   const [stores, setStores] = useState<Store[]>(() =>
@@ -457,14 +464,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // require authorized email + verified email + profile.role === 'admin' + server RPC is_admin()
     let verifiedRole: UserRole = 'merchant';
     if (
-      profile?.role === 'admin' &&
       isAuthorizedAdminEmail(sessionUser.email) &&
       isAuthUserEmailVerified(sessionUser) &&
       isSupabaseConfigured &&
-      supabase
+      supabase &&
+      (profile?.role === 'admin' || verifiedAdminUserIdRef.current === userId)
     ) {
       const { data: rpcAdmin, error: rpcErr } = await supabase.rpc('is_admin');
       if (!rpcErr && rpcAdmin === true) {
+        verifiedRole = 'admin';
+        verifiedAdminUserIdRef.current = userId;
+      } else if (!rpcErr && rpcAdmin === false) {
+        verifiedAdminUserIdRef.current = null;
+      } else if (rpcErr && verifiedAdminUserIdRef.current === userId) {
+        // Preserve already-verified admin role in this tab across transient TOKEN_REFRESHED network blips
         verifiedRole = 'admin';
       }
     }
@@ -486,8 +499,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const clearAuthenticatedSessionState = useCallback(() => {
     syncingStoresUserRef.current = null;
+    verifiedAdminUserIdRef.current = null;
     setUser(null);
     setRole('merchant');
+    setPaymentsLoadError(null);
+    setWebsitesLoadError(null);
     if (isSupabaseConfigured) {
       setStores([]);
       setActiveStoreIdState('');
@@ -596,6 +612,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       isAuthorizedAdminEmail(newUser.email)
         ? 'admin'
         : 'merchant';
+    if (safeRole === 'admin') {
+      verifiedAdminUserIdRef.current = newUser.id;
+    }
     setUser((prev) => {
       if (
         prev &&
@@ -1652,6 +1671,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const [isWebsitesLoading, setIsWebsitesLoading] = useState(false);
+  const [websitesLoadError, setWebsitesLoadError] = useState<string | null>(null);
 
   const refreshSubscribedWebsites = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase || !user) return;
@@ -1659,11 +1679,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const { data, error } = await fetchUserSubscribedWebsitesFromDb();
       if (!error && data) {
+        setWebsitesLoadError(null);
         setSubscribedWebsites(data);
       } else if (error) {
+        setWebsitesLoadError(error.message || 'Failed to load websites from database.');
         console.warn('[GoAMAAS] Failed to load websites from database:', error);
       }
-    } catch (err) {
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to load websites from database.';
+      setWebsitesLoadError(msg);
       console.warn('[GoAMAAS] Error loading websites:', err);
     } finally {
       setIsWebsitesLoading(false);
@@ -2757,6 +2781,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     isSupabaseConfigured ? [] : getStored('payment_requests', [])
   );
   const [isPaymentsLoading, setIsPaymentsLoading] = useState<boolean>(false);
+  const [paymentsLoadError, setPaymentsLoadError] = useState<string | null>(null);
   const isSubmittingPaymentRef = useRef<boolean>(false);
   const processingPaymentIdsRef = useRef<Set<string>>(new Set());
 
@@ -2795,27 +2820,49 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     updatedAt: r.updated_at,
   });
 
-  const refreshPaymentRequests = useCallback(async () => {
-    if (!user?.id || !isSupabaseConfigured) return;
-    setIsPaymentsLoading(true);
-    try {
-      const isVerifiedAdmin = role === 'admin' && user.role === 'admin';
-      const { data, error } = await fetchUserPaymentRequests(isVerifiedAdmin ? undefined : user.id);
-      if (!error && data) {
-        setPaymentRequests(data.map(mapRawPaymentRow));
+  const refreshPaymentRequests = useCallback(
+    async (options?: { asAdmin?: boolean }) => {
+      if (!user?.id || !isSupabaseConfigured) return;
+      setIsPaymentsLoading(true);
+      try {
+        const isOnAdminSurface =
+          typeof window !== 'undefined' &&
+          (window.location.pathname === '/admin' ||
+            window.location.pathname.startsWith('/admin/'));
+        const isAdminQueue =
+          Boolean(options?.asAdmin) ||
+          (role === 'admin' && user.role === 'admin') ||
+          verifiedAdminUserIdRef.current === user.id ||
+          (isOnAdminSurface && isAuthorizedAdminEmail(user.email));
+
+        const { data, error } = await fetchUserPaymentRequests(
+          isAdminQueue ? undefined : user.id,
+          { isAdminQueue }
+        );
+        if (error) {
+          setPaymentsLoadError(error.message || 'Failed to load payment requests from Supabase.');
+        } else if (data) {
+          setPaymentsLoadError(null);
+          setPaymentRequests(data.map(mapRawPaymentRow));
+        }
+      } catch (err: unknown) {
+        const msg =
+          err instanceof Error ? err.message : 'Failed to sync payment requests from Supabase.';
+        setPaymentsLoadError(msg);
+        console.warn('Failed to sync payment requests from Supabase:', err);
+      } finally {
+        setIsPaymentsLoading(false);
       }
-    } catch (err) {
-      console.warn('Failed to sync payment requests from Supabase:', err);
-    } finally {
-      setIsPaymentsLoading(false);
-    }
-  }, [user?.id, user?.role, role]);
+    },
+    [user?.id, user?.role, user?.email, role]
+  );
 
   useEffect(() => {
     if (user?.id) {
       void refreshPaymentRequests();
     } else if (isSupabaseConfigured) {
       setPaymentRequests([]);
+      setPaymentsLoadError(null);
     }
   }, [user?.id, role, refreshPaymentRequests]);
 
@@ -2922,6 +2969,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const isWebsitePayment =
       params.serviceType === 'website_subscription' || params.serviceType === 'website_package';
 
+    emitPaymentDiagnostic({
+      stage: 'PAYMENT_SUBMIT_STARTED',
+      httpStatus: null,
+      errorCode: null,
+      requestId: null,
+      projectRef: supabaseProjectRef,
+      hasUserId: Boolean(effectiveUserId),
+      hasWebsiteId: isWebsitePayment && Boolean(cleanServiceId),
+    });
+
     let targetWebsite: SubscribedWebsite | undefined;
     if (isWebsitePayment) {
       if (isSupabaseConfigured && !UUID_REGEX.test(cleanServiceId)) {
@@ -2950,6 +3007,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const msg = 'Unauthorized: You can only submit a payment request for your own website.';
         showToast(msg, 'error');
         return { success: false, message: msg };
+      }
+      if (
+        (!user?.name || user.name === 'Merchant') &&
+        targetWebsite.ownerName &&
+        targetWebsite.ownerName.trim()
+      ) {
+        effectiveUserName = targetWebsite.ownerName.trim();
+      }
+      if (!effectiveUserEmail && targetWebsite.email && targetWebsite.email.trim()) {
+        effectiveUserEmail = targetWebsite.email.trim();
       }
     }
 
@@ -3188,8 +3255,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
 
+      emitPaymentDiagnostic({
+        stage: 'PRICING_VERIFICATION_SUCCEEDED',
+        httpStatus: 200,
+        errorCode: null,
+        requestId: null,
+        projectRef: supabaseProjectRef,
+        hasUserId: Boolean(effectiveUserId),
+        hasWebsiteId: isWebsitePayment && Boolean(resolvedServiceId),
+        source:
+          serverVerifiedAmount !== null
+            ? 'server_api'
+            : isSupabaseConfigured
+              ? 'supabase_fallback'
+              : 'local',
+      });
+
       const submitCustomerPhone =
-        activeStore?.phone || onboarding.phone || canonicalSender || 'Not provided';
+        canonicalSender ||
+        targetWebsite?.phone ||
+        targetWebsite?.whatsappNumber ||
+        activeStore?.phone ||
+        onboarding.phone ||
+        'Not provided';
       const canonicalBankRef =
         params.paymentMethod === 'Bank Transfer'
           ? canonicalTrx
@@ -3211,8 +3299,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           amount: authoritativeAmount,
         });
 
-        if (error || !data) {
-          const errorMsg = error?.message || 'Failed to submit payment request to database';
+        if (error || !data || !UUID_REGEX.test(String(data.id || '')) || data.status !== 'pending') {
+          const errorMsg =
+            error?.message ||
+            'Failed to confirm payment request creation in database. Please try again.';
           showToast(errorMsg, 'error');
           return { success: false, message: errorMsg };
         }
@@ -3258,7 +3348,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     notes?: string
   ): Promise<ApproveAndPublishResult> => {
     const cleanId = (requestId || '').trim();
-    if (role !== 'admin' || (isSupabaseConfigured && user?.role !== 'admin')) {
+    let effectiveAdminUserId = user?.id;
+    let isCallerVerifiedAdmin = role === 'admin' && (!isSupabaseConfigured || user?.role === 'admin');
+
+    if (!isCallerVerifiedAdmin && isSupabaseConfigured) {
+      const serverCheck = await verifyServerAdminSession();
+      if (
+        serverCheck.status === 'authorized' &&
+        serverCheck.admin &&
+        isAuthorizedAdminEmail(serverCheck.admin.email)
+      ) {
+        isCallerVerifiedAdmin = true;
+        effectiveAdminUserId = serverCheck.admin.id;
+        setAuthenticatedUser({
+          id: serverCheck.admin.id,
+          name: serverCheck.admin.name,
+          email: AUTHORIZED_ADMIN_EMAIL,
+          role: 'admin',
+          storeId: '',
+        });
+      }
+    }
+
+    if (!isCallerVerifiedAdmin) {
       return {
         success: false,
         paymentApproved: false,
@@ -3306,8 +3418,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           mode,
           request: targetRequest,
           notes,
-          callerRole: user?.role === 'admin' ? 'admin' : 'merchant',
-          callerUserId: user?.id,
+          callerRole: 'admin',
+          callerUserId: effectiveAdminUserId,
           adapters: {
             requireUuidServiceId: true,
             approvePaymentRpc: (id, adminNotes) => adminApprovePaymentInDb(id, adminNotes),
@@ -3323,7 +3435,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           },
         });
 
-        await Promise.all([refreshPaymentRequests(), refreshSubscribedWebsites()]);
+        await Promise.all([
+          refreshPaymentRequests({ asAdmin: true }),
+          refreshSubscribedWebsites(),
+        ]);
 
         if (result.success) {
           showToast(result.message, result.suspendedHold ? 'warning' : 'success');
@@ -3559,7 +3674,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     requestId: string,
     reason: string
   ): Promise<{ success: boolean; message: string }> => {
-    if (role !== 'admin' || (isSupabaseConfigured && user?.role !== 'admin')) {
+    let isCallerVerifiedAdmin = role === 'admin' && (!isSupabaseConfigured || user?.role === 'admin');
+    if (!isCallerVerifiedAdmin && isSupabaseConfigured) {
+      const serverCheck = await verifyServerAdminSession();
+      if (
+        serverCheck.status === 'authorized' &&
+        serverCheck.admin &&
+        isAuthorizedAdminEmail(serverCheck.admin.email)
+      ) {
+        isCallerVerifiedAdmin = true;
+        setAuthenticatedUser({
+          id: serverCheck.admin.id,
+          name: serverCheck.admin.name,
+          email: AUTHORIZED_ADMIN_EMAIL,
+          role: 'admin',
+          storeId: '',
+        });
+      }
+    }
+    if (!isCallerVerifiedAdmin) {
       return { success: false, message: 'Unauthorized. Admin role required.' };
     }
 
@@ -3584,7 +3717,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           showToast(msg, 'error');
           return { success: false, message: msg };
         }
-        await refreshPaymentRequests();
+        await refreshPaymentRequests({ asAdmin: true });
         showToast('Payment rejected and reason recorded.', 'info');
         return { success: true, message: 'Payment rejected' };
       }
@@ -4183,6 +4316,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateWebsiteSubscriptionPlanConfig,
         subscribedWebsites,
         isWebsitesLoading,
+        websitesLoadError,
         createSubscribedWebsite,
         updateSubscribedWebsite,
         saveWebsiteDraft,
@@ -4216,6 +4350,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         refreshServiceTrials,
         paymentRequests,
         isPaymentsLoading,
+        paymentsLoadError,
         paymentGatewayConfigs,
         isGatewaysLoading,
         refreshPaymentGatewayConfigs,

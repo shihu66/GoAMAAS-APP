@@ -50,7 +50,13 @@ interface AdminProtectedRouteProps {
 export const AdminProtectedRoute: React.FC<AdminProtectedRouteProps> = ({ children }) => {
   const location = useLocation();
   const navigate = useNavigate();
-  const { theme, setAuthenticatedUser, logout } = useApp();
+  const {
+    theme,
+    setAuthenticatedUser,
+    logout,
+    refreshPaymentRequests,
+    refreshSubscribedWebsites,
+  } = useApp();
   const { isOnline } = useAdminPWA(theme);
 
   const [verification, setVerification] = useState<AdminVerificationResult | null>(null);
@@ -107,6 +113,8 @@ export const AdminProtectedRoute: React.FC<AdminProtectedRouteProps> = ({ childr
           role: 'admin',
           storeId: '',
         });
+        void refreshPaymentRequests({ asAdmin: true });
+        void refreshSubscribedWebsites();
       } else if (result.status === 'forbidden') {
         await purgeUnauthorizedSession(result.forbiddenReason);
       }
@@ -115,7 +123,12 @@ export const AdminProtectedRoute: React.FC<AdminProtectedRouteProps> = ({ childr
       }
       return result;
     },
-    [purgeUnauthorizedSession, setAuthenticatedUser]
+    [
+      purgeUnauthorizedSession,
+      refreshPaymentRequests,
+      refreshSubscribedWebsites,
+      setAuthenticatedUser,
+    ]
   );
 
   const secureSignOut = useCallback(async () => {
@@ -157,6 +170,8 @@ export const AdminProtectedRoute: React.FC<AdminProtectedRouteProps> = ({ childr
           role: 'admin',
           storeId: '',
         });
+        void refreshPaymentRequests({ asAdmin: true });
+        void refreshSubscribedWebsites();
       } else if (res.status === 'forbidden') {
         await purgeUnauthorizedSession(res.forbiddenReason);
       }
@@ -167,7 +182,13 @@ export const AdminProtectedRoute: React.FC<AdminProtectedRouteProps> = ({ childr
     return () => {
       active = false;
     };
-  }, [location.pathname, purgeUnauthorizedSession, setAuthenticatedUser]);
+  }, [
+    location.pathname,
+    purgeUnauthorizedSession,
+    refreshPaymentRequests,
+    refreshSubscribedWebsites,
+    setAuthenticatedUser,
+  ]);
 
   // Revalidate session on window focus, visibility change, auth state changes, and 2-minute heartbeat
   useEffect(() => {

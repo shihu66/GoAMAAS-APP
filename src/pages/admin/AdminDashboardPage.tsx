@@ -101,6 +101,7 @@ export const AdminDashboardPage: React.FC = () => {
     updateWebsiteRequestStatus,
     subscribedWebsites,
     isWebsitesLoading,
+    websitesLoadError,
     refreshSubscribedWebsites,
     websiteSubscriptionPlan,
     updateWebsiteSubscriptionPlanConfig,
@@ -113,6 +114,7 @@ export const AdminDashboardPage: React.FC = () => {
     invoices,
     paymentRequests,
     isPaymentsLoading,
+    paymentsLoadError,
     refreshPaymentRequests,
     adminApproveAndPublishPayment,
     adminRetryPublishForPayment,
@@ -306,12 +308,24 @@ export const AdminDashboardPage: React.FC = () => {
     };
   };
 
-  // Auto-refresh payment & website queues every 30s while Admin is viewing Overview or Payments
+  // Immediate sync on Admin Console mount and section transitions + 30s background sync
+  useEffect(() => {
+    if (!isOnline) return;
+    if (
+      activeSection === 'overview' ||
+      activeSection === 'payments' ||
+      activeSection === 'websites'
+    ) {
+      void refreshPaymentRequests({ asAdmin: true });
+      void refreshSubscribedWebsites();
+    }
+  }, [isOnline, activeSection, verifiedAdmin.id, refreshPaymentRequests, refreshSubscribedWebsites]);
+
   useEffect(() => {
     if (!isOnline || (activeSection !== 'overview' && activeSection !== 'payments')) return;
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'visible') {
-        void refreshPaymentRequests();
+        void refreshPaymentRequests({ asAdmin: true });
         void refreshSubscribedWebsites();
       }
     }, 30000);
@@ -485,7 +499,7 @@ export const AdminDashboardPage: React.FC = () => {
     }
     await Promise.all([
       refreshVerification(),
-      refreshPaymentRequests(),
+      refreshPaymentRequests({ asAdmin: true }),
       refreshSubscribedWebsites(),
       refreshWebsiteLifecycleAuditLogs(),
     ]);
@@ -1129,6 +1143,35 @@ export const AdminDashboardPage: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {/* Database Queue Load Error Alert (never hide failed payment or website fetches behind an empty state) */}
+      {(paymentsLoadError || websitesLoadError) && (
+        <div
+          role="alert"
+          className="p-4 rounded-2xl bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-800 text-rose-900 dark:text-rose-200 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+        >
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+            <div>
+              <strong className="font-bold text-slate-900 dark:text-white block">
+                Failed to Synchronize Live Admin Queue from Supabase
+              </strong>
+              <p className="text-[11px] mt-0.5 leading-relaxed">
+                {paymentsLoadError || websitesLoadError}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={isPaymentsLoading || isWebsitesLoading || !isOnline}
+            onClick={() => void handleSyncAll()}
+            className="min-h-[40px] px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer shrink-0 whitespace-nowrap"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isPaymentsLoading || isWebsitesLoading ? 'animate-spin' : ''}`} />
+            <span>Retry Sync</span>
+          </button>
+        </div>
+      )}
+
       {/* Workflow Outcome Banner (visible across Overview & Payments when an action completes) */}
       {workflowFeedback && (activeSection === 'overview' || activeSection === 'payments') && (
         <div
