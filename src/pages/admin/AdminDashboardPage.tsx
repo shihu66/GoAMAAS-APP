@@ -10,8 +10,10 @@ import {
   ApproveAndPublishResult,
 } from '../../types';
 import {
+  formatSubscriptionDateDisplay,
   getPublicWebsiteHref,
   isWebsitePaymentService,
+  isWebsiteSubscriptionExpired,
   isWebsiteTrulyLive,
 } from '../../lib/paymentWorkflow';
 import {
@@ -27,6 +29,7 @@ import {
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { WebsitePreviewRenderer } from '../../components/website/WebsitePreviewRenderer';
+import { PaymentReceiptModal } from '../../components/payment/PaymentReceiptModal';
 import {
   NAGAD_ACCOUNT_TYPE_EN,
   NAGAD_DEFAULT_ADMIN_INSTRUCTIONS,
@@ -169,6 +172,8 @@ export const AdminDashboardPage: React.FC = () => {
   const [rejectionModalId, setRejectionModalId] = useState<string | null>(null);
   const [rejectionReason, setRejectionReason] = useState('');
   const [rejectionError, setRejectionError] = useState<string | null>(null);
+  const [selectedPaymentDetails, setSelectedPaymentDetails] = useState<PaymentRequest | null>(null);
+  const [adminReceiptRequest, setAdminReceiptRequest] = useState<PaymentRequest | null>(null);
 
   // Concurrency locks & step status
   const inFlightPaymentIdsRef = useRef<Set<string>>(new Set());
@@ -181,6 +186,9 @@ export const AdminDashboardPage: React.FC = () => {
     title: string;
     detail: string;
     canRetryPublish?: boolean;
+    liveWebsiteHref?: string;
+    liveWebsiteDomain?: string;
+    canViewReceipt?: boolean;
   } | null>(null);
   const [copiedToken, setCopiedToken] = useState<string | null>(null);
 
@@ -262,6 +270,54 @@ export const AdminDashboardPage: React.FC = () => {
     }
   }, [paymentRequests, subscribedWebsites, isWebsitesLoading, refreshSubscribedWebsites]);
 
+  const resolveConfiguredRecipientAccountInfo = (
+    paymentMethod: PaymentRequest['paymentMethod']
+  ): {
+    configuredAccount: string;
+    gatewayLabel: string;
+    disclosure: string;
+  } => {
+    const gatewayId =
+      paymentMethod === 'bKash'
+        ? 'bkash'
+        : paymentMethod === 'Nagad'
+        ? 'nagad'
+        : 'bank_transfer';
+    const gw = paymentGatewayConfigs.find((g) => g.id === gatewayId);
+    if (!gw || !(gw.accountNumber || '').trim()) {
+      return {
+        configuredAccount: 'Not currently configured',
+        gatewayLabel: paymentMethod,
+        disclosure:
+          'Historical per-request recipient account is not stored in payment_requests; displaying live gateway configuration.',
+      };
+    }
+    const configuredAccount =
+      gatewayId === 'bank_transfer'
+        ? `${gw.bankName ? `${gw.bankName} · ` : ''}A/C ${gw.accountNumber}${
+            gw.accountName ? ` (${gw.accountName})` : ''
+          }`
+        : `${gw.accountNumber}${gw.accountName ? ` (${gw.accountName})` : ''}`;
+    return {
+      configuredAccount,
+      gatewayLabel: gw.displayName || paymentMethod,
+      disclosure:
+        'Live configured receiving account (historical per-request recipient number is not stored per payment_requests row).',
+    };
+  };
+
+  // Auto-refresh payment & website queues every 30s while Admin is viewing Overview or Payments
+  useEffect(() => {
+    if (!isOnline || (activeSection !== 'overview' && activeSection !== 'payments')) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void refreshPaymentRequests();
+        void refreshSubscribedWebsites();
+      }
+    }, 30000);
+    return () => window.clearInterval(timer);
+  }, [isOnline, activeSection, refreshPaymentRequests, refreshSubscribedWebsites]);
+
   const doesRequestNeedPublishRecovery = (req: PaymentRequest): boolean => {
     if (req.status !== 'approved' || !isWebsitePaymentService(req.serviceType)) return false;
     const exactSite = findExactWebsiteForRequest(req);
@@ -272,28 +328,34 @@ export const AdminDashboardPage: React.FC = () => {
     ) {
       return false;
     }
+    if (isWebsiteSubscriptionExpired(exactSite)) {
+      return false;
+    }
     return !isWebsiteTrulyLive(exactSite);
   };
 
-  // Platform Aggregates
+  // Platform Aggregates (strictly excluding expired 30-day websites from live/active counts)
   const payingWebsites = useMemo(
     () =>
       subscribedWebsites.filter(
         (s) =>
           s.paymentStatus === 'paid' &&
-          (s.subscriptionStatus === 'active' || s.subscriptionStatus === 'grace_period')
+          s.subscriptionStatus === 'active' &&
+          !isWebsiteSubscriptionExpired(s)
       ),
     [subscribedWebsites]
   );
 
-  const liveWebsitesCount = useMemo(
+  const expiredPaidWebsitesCount = useMemo(
     () =>
       subscribedWebsites.filter(
-        (s) =>
-          s.paymentStatus === 'paid' &&
-          s.subscriptionStatus === 'active' &&
-          s.deploymentStatus === 'live'
+        (s) => s.paymentStatus === 'paid' && isWebsiteSubscriptionExpired(s)
       ).length,
+    [subscribedWebsites]
+  );
+
+  const liveWebsitesCount = useMemo(
+    () => subscribedWebsites.filter((s) => isWebsiteTrulyLive(s)).length,
     [subscribedWebsites]
   );
 
@@ -333,8 +395,11 @@ export const AdminDashboardPage: React.FC = () => {
       const bankRef = (req.bankReference || '').toLowerCase();
       const sender = (req.senderNumber || '').toLowerCase();
       const custName = (req.customerName || '').toLowerCase();
+      const custEmail = (req.customerEmail || '').toLowerCase();
       const custPhone = (req.customerPhone || '').toLowerCase();
       const serviceName = (req.serviceName || '').toLowerCase();
+      const serviceId = (req.serviceId || '').toLowerCase();
+      const planTier = (req.planTier || '').toLowerCase();
       const subdomain = (exactSite?.subdomain || '').toLowerCase();
       const fullDomain = (exactSite?.fullDomainUrl || '').toLowerCase();
       const bizName = (exactSite?.businessName || '').toLowerCase();
@@ -344,8 +409,11 @@ export const AdminDashboardPage: React.FC = () => {
         bankRef.includes(q) ||
         sender.includes(q) ||
         custName.includes(q) ||
+        custEmail.includes(q) ||
         custPhone.includes(q) ||
         serviceName.includes(q) ||
+        serviceId.includes(q) ||
+        planTier.includes(q) ||
         subdomain.includes(q) ||
         fullDomain.includes(q) ||
         bizName.includes(q)
@@ -468,18 +536,31 @@ export const AdminDashboardPage: React.FC = () => {
       });
 
       if (res.success) {
+        const matchedSite = findExactWebsiteForRequest(request);
+        const liveDomain =
+          res.websitePublished && matchedSite ? matchedSite.fullDomainUrl : undefined;
+        const liveHref =
+          res.websitePublished && matchedSite ? getPublicWebsiteHref(matchedSite) : undefined;
         setWorkflowFeedback({
           requestId: request.id,
           tone: res.suspendedHold ? 'warning' : 'success',
           title: res.isWebsiteService
             ? res.websitePublished
-              ? 'Payment Approved & Website Published Live'
+              ? 'Payment Approved & Exact Website Published Live'
               : 'Payment Approved (Suspended Hold)'
             : 'Payment Approved & Plan Activated',
-          detail: res.message,
+          detail: liveDomain
+            ? `${res.message} Public URL: https://${liveDomain}`
+            : res.message,
+          liveWebsiteHref: liveHref,
+          liveWebsiteDomain: liveDomain,
+          canViewReceipt: true,
         });
         setApprovalModalTarget(null);
         setApprovalNotes('');
+        if (selectedPaymentDetails?.id === request.id) {
+          setSelectedPaymentDetails(null);
+        }
       } else if (res.partialFailure) {
         setWorkflowFeedback({
           requestId: request.id,
@@ -559,6 +640,9 @@ export const AdminDashboardPage: React.FC = () => {
           title: 'Payment Request Rejected',
           detail: `Reason recorded: "${cleanReason}"`,
         });
+        if (selectedPaymentDetails?.id === rejectionModalId) {
+          setSelectedPaymentDetails(null);
+        }
         setRejectionModalId(null);
         setRejectionReason('');
       } else {
@@ -745,10 +829,12 @@ export const AdminDashboardPage: React.FC = () => {
     const exactSite = findExactWebsiteForRequest(req);
     const isWebsiteReq = isWebsitePaymentService(req.serviceType);
     const siteTrulyLive = isWebsiteTrulyLive(exactSite);
+    const siteExpired = isWebsiteSubscriptionExpired(exactSite);
     const needsPublish = doesRequestNeedPublishRecovery(req);
     const activeStep = processingPaymentIds[req.id];
     const isRowBusy = Boolean(activeStep);
     const displayTrx = req.transactionId || req.bankReference || '—';
+    const recipientInfo = resolveConfiguredRecipientAccountInfo(req.paymentMethod);
 
     return (
       <div
@@ -770,11 +856,16 @@ export const AdminDashboardPage: React.FC = () => {
               {exactSite ? exactSite.businessName : req.serviceName}
             </div>
             {isWebsiteReq ? (
-              <div className="text-xs font-mono text-blue-600 dark:text-blue-400 flex items-center gap-1.5 break-all">
-                <Globe className="w-3.5 h-3.5 shrink-0" />
-                <span>
-                  {exactSite ? exactSite.fullDomainUrl : `Website ID: ${req.serviceId}`}
-                </span>
+              <div className="space-y-0.5">
+                <div className="text-xs font-mono text-blue-600 dark:text-blue-400 flex items-center gap-1.5 break-all">
+                  <Globe className="w-3.5 h-3.5 shrink-0" />
+                  <span>
+                    {exactSite ? exactSite.fullDomainUrl : `Website ID: ${req.serviceId}`}
+                  </span>
+                </div>
+                <div className="text-[10px] font-mono text-slate-400 break-all">
+                  ID: {req.serviceId}
+                </div>
               </div>
             ) : (
               <div className="text-[11px] text-slate-500 dark:text-slate-400">{req.planTier}</div>
@@ -789,7 +880,7 @@ export const AdminDashboardPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Transaction ID & Sender Phone Strip */}
+        {/* Transaction ID, Sender Phone, Recipient & Client Email Strip */}
         <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800/90 space-y-2 text-xs">
           <div className="flex items-center justify-between gap-2">
             <div className="min-w-0">
@@ -816,21 +907,27 @@ export const AdminDashboardPage: React.FC = () => {
             )}
           </div>
 
-          <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
             <div>
               <span className="text-[11px] text-slate-500 dark:text-slate-400 block">
-                Sender Number
+                Sender Number &amp; Configured Receiver
               </span>
-              <span className="font-mono text-xs text-slate-900 dark:text-slate-200 tabular-nums">
-                {req.senderNumber || 'Not provided'}
+              <span className="font-mono text-xs text-slate-900 dark:text-slate-200 tabular-nums block">
+                From: {req.senderNumber || 'Not provided'}
+              </span>
+              <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400 block">
+                To (Config): {recipientInfo.configuredAccount}
               </span>
             </div>
             <div>
               <span className="text-[11px] text-slate-500 dark:text-slate-400 block">
-                Client &amp; Phone
+                Client, Email &amp; Phone
               </span>
               <span className="text-xs font-semibold text-slate-900 dark:text-white block truncate">
                 {req.customerName}
+              </span>
+              <span className="text-[11px] text-slate-500 dark:text-slate-400 block break-all">
+                {req.customerEmail}
               </span>
               <a
                 href={`tel:${req.customerPhone}`}
@@ -887,6 +984,8 @@ export const AdminDashboardPage: React.FC = () => {
                     ? 'text-blue-600 dark:text-blue-400'
                     : siteTrulyLive
                     ? 'text-emerald-600 dark:text-emerald-400'
+                    : siteExpired
+                    ? 'text-rose-600 dark:text-rose-400'
                     : needsPublish
                     ? 'text-amber-600 dark:text-amber-400'
                     : exactSite?.subscriptionStatus === 'suspended'
@@ -900,6 +999,8 @@ export const AdminDashboardPage: React.FC = () => {
                     ? 'Publishing Website...'
                     : siteTrulyLive
                     ? 'Website Live'
+                    : siteExpired
+                    ? 'Expired (30d Ended)'
                     : needsPublish
                     ? 'Needs Publish Retry'
                     : exactSite?.subscriptionStatus === 'suspended'
@@ -922,7 +1023,7 @@ export const AdminDashboardPage: React.FC = () => {
           </div>
         )}
 
-        {/* Action Buttons (>= 48px touch hitboxes) */}
+        {/* Action Buttons (>= 44-48px touch hitboxes) */}
         {req.status === 'pending' && (
           <div className="grid grid-cols-2 gap-2.5 pt-1">
             <button
@@ -989,8 +1090,28 @@ export const AdminDashboardPage: React.FC = () => {
           </div>
         )}
 
-        {siteTrulyLive && exactSite && (
-          <div className="pt-1">
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          <button
+            type="button"
+            onClick={() => setSelectedPaymentDetails(req)}
+            className="flex-1 min-h-[44px] px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 font-semibold text-xs inline-flex items-center justify-center gap-1.5 cursor-pointer"
+          >
+            <Eye className="w-3.5 h-3.5" />
+            <span>Payment Details</span>
+          </button>
+
+          {req.status === 'approved' && (
+            <button
+              type="button"
+              onClick={() => setAdminReceiptRequest(req)}
+              className="flex-1 min-h-[44px] px-3 py-2 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300 font-semibold text-xs inline-flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              <span>Receipt</span>
+            </button>
+          )}
+
+          {siteTrulyLive && exactSite && (
             <a
               href={getPublicWebsiteHref(exactSite)}
               target="_blank"
@@ -998,10 +1119,10 @@ export const AdminDashboardPage: React.FC = () => {
               className="w-full min-h-[44px] px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 text-emerald-700 dark:text-emerald-300 font-semibold text-xs inline-flex items-center justify-center gap-1.5"
             >
               <ExternalLink className="w-3.5 h-3.5" />
-              <span>View Live Site ({exactSite.fullDomainUrl})</span>
+              <span>View Live Site (https://{exactSite.fullDomainUrl})</span>
             </a>
-          </div>
-        )}
+          )}
+        </div>
       </div>
     );
   };
@@ -1036,7 +1157,32 @@ export const AdminDashboardPage: React.FC = () => {
             </div>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {workflowFeedback.liveWebsiteHref && workflowFeedback.liveWebsiteDomain && (
+              <a
+                href={workflowFeedback.liveWebsiteHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="min-h-[40px] px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs inline-flex items-center gap-1.5 whitespace-nowrap"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>https://{workflowFeedback.liveWebsiteDomain}</span>
+              </a>
+            )}
+            {workflowFeedback.canViewReceipt && (() => {
+              const approvedReq = paymentRequests.find((r) => r.id === workflowFeedback.requestId);
+              if (!approvedReq || approvedReq.status !== 'approved') return null;
+              return (
+                <button
+                  type="button"
+                  onClick={() => setAdminReceiptRequest(approvedReq)}
+                  className="min-h-[40px] px-3.5 py-2 rounded-xl bg-white dark:bg-slate-900 border border-emerald-300 dark:border-emerald-700 text-emerald-800 dark:text-emerald-200 font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>Official Receipt</span>
+                </button>
+              );
+            })()}
             {workflowFeedback.canRetryPublish && (() => {
               const failedReq = paymentRequests.find((r) => r.id === workflowFeedback.requestId);
               if (!failedReq) return null;
@@ -1132,7 +1278,8 @@ export const AdminDashboardPage: React.FC = () => {
                 {liveWebsitesCount}
               </p>
               <span className="text-[11px] text-slate-500 dark:text-slate-500 mt-1 block tabular-nums">
-                {subscribedWebsites.length} total websites &middot; {payingWebsites.length} paid
+                {subscribedWebsites.length} total &middot; {payingWebsites.length} active
+                {expiredPaidWebsitesCount > 0 ? ` · ${expiredPaidWebsitesCount} expired` : ''}
               </span>
             </button>
 
@@ -1245,7 +1392,7 @@ export const AdminDashboardPage: React.FC = () => {
                 type="search"
                 value={paymentSearch}
                 onChange={(e) => setPaymentSearch(e.target.value)}
-                placeholder="Search Transaction ID, sender phone, client, or subdomain..."
+                placeholder="Search Transaction ID, client email, subdomain, phone, or website ID..."
                 aria-label="Search payment requests"
                 className="w-full min-h-[44px] pl-10 pr-10 py-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 focus:border-blue-600 focus:outline-hidden text-slate-900 dark:text-white text-xs placeholder:text-slate-400"
               />
@@ -1332,10 +1479,14 @@ export const AdminDashboardPage: React.FC = () => {
                         const exactSite = findExactWebsiteForRequest(req);
                         const isWebsiteReq = isWebsitePaymentService(req.serviceType);
                         const siteTrulyLive = isWebsiteTrulyLive(exactSite);
+                        const siteExpired = isWebsiteSubscriptionExpired(exactSite);
                         const needsPublish = doesRequestNeedPublishRecovery(req);
                         const activeStep = processingPaymentIds[req.id];
                         const isRowBusy = Boolean(activeStep);
                         const displayTrx = req.transactionId || req.bankReference || '—';
+                        const recipientInfo = resolveConfiguredRecipientAccountInfo(
+                          req.paymentMethod
+                        );
 
                         return (
                           <tr
@@ -1346,11 +1497,11 @@ export const AdminDashboardPage: React.FC = () => {
                               <span className="font-semibold text-slate-900 dark:text-white block">
                                 {req.customerName}
                               </span>
-                              <span className="text-[11px] text-slate-600 dark:text-slate-300 font-mono tabular-nums block mt-0.5">
-                                {req.customerPhone}
-                              </span>
-                              <span className="text-[11px] text-slate-400 block">
+                              <span className="text-[11px] text-slate-500 dark:text-slate-300 block mt-0.5 break-all">
                                 {req.customerEmail}
+                              </span>
+                              <span className="text-[11px] text-slate-600 dark:text-slate-400 font-mono tabular-nums block mt-0.5">
+                                {req.customerPhone}
                               </span>
                             </td>
 
@@ -1358,11 +1509,17 @@ export const AdminDashboardPage: React.FC = () => {
                               <span className="font-semibold text-slate-900 dark:text-white block">
                                 {exactSite ? exactSite.businessName : req.serviceName}
                               </span>
+                              <span className="text-[10px] text-slate-500 dark:text-slate-400 block">
+                                {req.planTier}
+                              </span>
                               {isWebsiteReq ? (
                                 exactSite ? (
                                   <div className="mt-0.5 space-y-0.5">
                                     <span className="font-mono text-[11px] text-blue-600 dark:text-blue-400 block">
                                       {exactSite.fullDomainUrl}
+                                    </span>
+                                    <span className="font-mono text-[10px] text-slate-400 block">
+                                      ID: {exactSite.id.slice(0, 8)}...
                                     </span>
                                     {siteTrulyLive && (
                                       <a
@@ -1381,11 +1538,7 @@ export const AdminDashboardPage: React.FC = () => {
                                     ID: {req.serviceId}
                                   </span>
                                 )
-                              ) : (
-                                <span className="text-[11px] text-slate-500 dark:text-slate-400">
-                                  {req.planTier}
-                                </span>
-                              )}
+                              ) : null}
                             </td>
 
                             <td className="p-4 align-top text-right font-mono font-bold text-sm text-emerald-600 dark:text-emerald-400 tabular-nums whitespace-nowrap">
@@ -1420,6 +1573,9 @@ export const AdminDashboardPage: React.FC = () => {
                               <span className="text-[11px] text-slate-500 dark:text-slate-400 font-mono tabular-nums block mt-0.5">
                                 Sender: {req.senderNumber || '—'}
                               </span>
+                              <span className="text-[10px] text-slate-400 font-mono block">
+                                To (Config): {recipientInfo.configuredAccount}
+                              </span>
                             </td>
 
                             <td className="p-4 align-top space-y-1">
@@ -1447,6 +1603,8 @@ export const AdminDashboardPage: React.FC = () => {
                                       className={`font-semibold ${
                                         siteTrulyLive
                                           ? 'text-emerald-600 dark:text-emerald-400'
+                                          : siteExpired
+                                          ? 'text-rose-600 dark:text-rose-400'
                                           : needsPublish
                                           ? 'text-amber-600 dark:text-amber-400'
                                           : exactSite?.subscriptionStatus === 'suspended'
@@ -1456,6 +1614,8 @@ export const AdminDashboardPage: React.FC = () => {
                                     >
                                       {siteTrulyLive
                                         ? 'Website Live'
+                                        : siteExpired
+                                        ? 'Expired (30d Ended)'
                                         : needsPublish
                                         ? 'Needs Publish'
                                         : exactSite?.subscriptionStatus === 'suspended'
@@ -1485,8 +1645,63 @@ export const AdminDashboardPage: React.FC = () => {
                             </td>
 
                             <td className="p-4 align-top text-right">
-                              {req.status === 'pending' ? (
-                                <div className="flex items-center justify-end gap-2">
+                              <div className="flex flex-wrap items-center justify-end gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedPaymentDetails(req)}
+                                  className="min-h-[38px] px-2.5 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-semibold text-xs inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                                  title="Inspect full payment details"
+                                >
+                                  <Eye className="w-3.5 h-3.5" />
+                                  <span>Details</span>
+                                </button>
+
+                                {req.status === 'approved' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setAdminReceiptRequest(req)}
+                                    className="min-h-[38px] px-2.5 py-1.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 font-semibold text-xs inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                                    title="View or print official receipt"
+                                  >
+                                    <FileText className="w-3.5 h-3.5" />
+                                    <span>Receipt</span>
+                                  </button>
+                                )}
+
+                                {req.status === 'pending' ? (
+                                  <>
+                                    <button
+                                      type="button"
+                                      disabled={isRowBusy || !isOnline}
+                                      onClick={() => {
+                                        setApprovalNotes('');
+                                        setApprovalModalTarget({
+                                          request: req,
+                                          mode: 'approve_and_publish',
+                                        });
+                                      }}
+                                      className="min-h-[38px] px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold text-xs transition-colors cursor-pointer inline-flex items-center gap-1.5 whitespace-nowrap"
+                                    >
+                                      {isRowBusy && activeStep !== 'rejecting' && (
+                                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                      )}
+                                      <span>{isWebsiteReq ? 'Approve & Publish' : 'Approve'}</span>
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      disabled={isRowBusy || !isOnline}
+                                      onClick={() => {
+                                        setRejectionError(null);
+                                        setRejectionReason('');
+                                        setRejectionModalId(req.id);
+                                      }}
+                                      className="min-h-[38px] px-2.5 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-rose-50 dark:hover:bg-rose-900/60 disabled:opacity-50 text-slate-700 dark:text-slate-300 hover:text-rose-700 dark:hover:text-rose-200 font-semibold text-xs transition-colors cursor-pointer whitespace-nowrap"
+                                    >
+                                      Reject
+                                    </button>
+                                  </>
+                                ) : needsPublish ? (
                                   <button
                                     type="button"
                                     disabled={isRowBusy || !isOnline}
@@ -1494,53 +1709,16 @@ export const AdminDashboardPage: React.FC = () => {
                                       setApprovalNotes('');
                                       setApprovalModalTarget({
                                         request: req,
-                                        mode: 'approve_and_publish',
+                                        mode: 'retry_publish',
                                       });
                                     }}
-                                    className="min-h-[40px] px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold text-xs transition-colors cursor-pointer inline-flex items-center gap-1.5 whitespace-nowrap"
+                                    className="min-h-[38px] px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs transition-colors cursor-pointer inline-flex items-center gap-1.5 whitespace-nowrap"
                                   >
-                                    {isRowBusy && activeStep !== 'rejecting' && (
-                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                    )}
-                                    <span>{isWebsiteReq ? 'Approve & Publish' : 'Approve'}</span>
+                                    {isRowBusy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                                    <span>Retry Publish</span>
                                   </button>
-
-                                  <button
-                                    type="button"
-                                    disabled={isRowBusy || !isOnline}
-                                    onClick={() => {
-                                      setRejectionError(null);
-                                      setRejectionReason('');
-                                      setRejectionModalId(req.id);
-                                    }}
-                                    className="min-h-[40px] px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-rose-50 dark:hover:bg-rose-900/60 disabled:opacity-50 text-slate-700 dark:text-slate-300 hover:text-rose-700 dark:hover:text-rose-200 font-semibold text-xs transition-colors cursor-pointer whitespace-nowrap"
-                                  >
-                                    Reject
-                                  </button>
-                                </div>
-                              ) : needsPublish ? (
-                                <button
-                                  type="button"
-                                  disabled={isRowBusy || !isOnline}
-                                  onClick={() => {
-                                    setApprovalNotes('');
-                                    setApprovalModalTarget({
-                                      request: req,
-                                      mode: 'retry_publish',
-                                    });
-                                  }}
-                                  className="min-h-[40px] px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs transition-colors cursor-pointer inline-flex items-center gap-1.5 whitespace-nowrap"
-                                >
-                                  {isRowBusy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                                  <span>Retry Publish</span>
-                                </button>
-                              ) : (
-                                <span className="text-[11px] text-slate-400 font-mono tabular-nums">
-                                  {req.reviewedAt
-                                    ? new Date(req.reviewedAt).toLocaleDateString()
-                                    : 'Settled'}
-                                </span>
-                              )}
+                                ) : null}
+                              </div>
                             </td>
                           </tr>
                         );
@@ -1641,7 +1819,7 @@ export const AdminDashboardPage: React.FC = () => {
                             className={`font-semibold block ${
                               trulyLive
                                 ? 'text-emerald-600 dark:text-emerald-400'
-                                : isSuspended
+                                : isSuspended || isWebsiteSubscriptionExpired(site)
                                 ? 'text-rose-600 dark:text-rose-400'
                                 : 'text-amber-600 dark:text-amber-400'
                             }`}
@@ -1650,12 +1828,17 @@ export const AdminDashboardPage: React.FC = () => {
                               ? 'Published Live'
                               : isSuspended
                               ? 'Suspended'
+                              : site.paymentStatus === 'paid' && isWebsiteSubscriptionExpired(site)
+                              ? 'Expired · Offline (Saved)'
                               : site.paymentStatus === 'paid'
                               ? 'Paid · Unpublished'
                               : 'Unpaid Draft'}
                           </span>
                           <span className="text-[11px] font-mono text-slate-400 tabular-nums block mt-0.5">
-                            Next: {site.nextBillingDate || '—'}
+                            Expiry:{' '}
+                            {formatSubscriptionDateDisplay(
+                              site.currentPeriodEnd || site.nextBillingDate
+                            )}
                           </span>
                         </div>
                       </div>
@@ -1795,7 +1978,7 @@ export const AdminDashboardPage: React.FC = () => {
                               className={`font-semibold block ${
                                 trulyLive
                                   ? 'text-emerald-600 dark:text-emerald-400'
-                                  : isSuspended
+                                  : isSuspended || isWebsiteSubscriptionExpired(site)
                                   ? 'text-rose-600 dark:text-rose-400'
                                   : 'text-amber-600 dark:text-amber-400'
                               }`}
@@ -1804,17 +1987,19 @@ export const AdminDashboardPage: React.FC = () => {
                                 ? 'Active · Live'
                                 : isSuspended
                                 ? 'Suspended · Offline'
+                                : site.paymentStatus === 'paid' &&
+                                  isWebsiteSubscriptionExpired(site)
+                                ? 'Expired (30d) · Offline (Saved)'
                                 : `${site.subscriptionStatus.replace('_', ' ')} · ${site.paymentStatus}`}
                             </span>
                           </td>
 
                           <td className="py-3.5 px-4 font-mono text-[11px] tabular-nums">
-                            <div>{site.nextBillingDate || '—'}</div>
-                            {site.gracePeriodEndsAt && (
-                              <span className="text-amber-600 dark:text-amber-400 text-[10px] block">
-                                Grace: {site.gracePeriodEndsAt.slice(0, 10)}
-                              </span>
-                            )}
+                            <div>
+                              {formatSubscriptionDateDisplay(
+                                site.currentPeriodEnd || site.nextBillingDate
+                              )}
+                            </div>
                           </td>
 
                           <td className="py-3.5 px-4 text-right">
@@ -3333,6 +3518,315 @@ export const AdminDashboardPage: React.FC = () => {
         }
         confirmLabel="Delete Website"
         isDestructive
+      />
+
+      {/* Payment Details Modal */}
+      {selectedPaymentDetails && (() => {
+        const req = selectedPaymentDetails;
+        const exactSite = findExactWebsiteForRequest(req);
+        const isWeb = isWebsitePaymentService(req.serviceType);
+        const siteTrulyLive = isWebsiteTrulyLive(exactSite);
+        const siteExpired = isWebsiteSubscriptionExpired(exactSite);
+        const needsPublish = doesRequestNeedPublishRecovery(req);
+        const isBusy = Boolean(processingPaymentIds[req.id]);
+        const displayTrx = req.transactionId || req.bankReference || '—';
+        const recipientInfo = resolveConfiguredRecipientAccountInfo(req.paymentMethod);
+
+        return (
+          <Modal
+            isOpen={Boolean(selectedPaymentDetails)}
+            onClose={() => setSelectedPaymentDetails(null)}
+            title="Payment Request Verification Details"
+            description={`Request ID: ${req.id} · Submitted ${new Date(req.createdAt).toLocaleString()}`}
+            maxWidth="lg"
+          >
+            <div className="space-y-4 text-xs text-slate-800 dark:text-slate-200">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4 rounded-xl bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700">
+                <div>
+                  <span className="text-[11px] text-slate-500 dark:text-slate-400 block">
+                    Client / Business Name
+                  </span>
+                  <span className="font-bold text-slate-900 dark:text-white block">
+                    {req.customerName}
+                    {exactSite && exactSite.businessName !== req.customerName
+                      ? ` (${exactSite.businessName})`
+                      : ''}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[11px] text-slate-500 dark:text-slate-400 block">
+                    Client Email &amp; Phone
+                  </span>
+                  <span className="font-semibold text-slate-900 dark:text-white block break-all">
+                    {req.customerEmail}
+                  </span>
+                  <span className="font-mono text-[11px] text-slate-600 dark:text-slate-300">
+                    {req.customerPhone}
+                  </span>
+                </div>
+
+                <div>
+                  <span className="text-[11px] text-slate-500 dark:text-slate-400 block">
+                    Service / Package Type
+                  </span>
+                  <span className="font-bold text-slate-900 dark:text-white block">
+                    {req.planTier} ({req.serviceType})
+                  </span>
+                  <span className="text-[11px] text-slate-500 dark:text-slate-400 block">
+                    {req.serviceName}
+                  </span>
+                </div>
+
+                <div>
+                  <span className="text-[11px] text-slate-500 dark:text-slate-400 block">
+                    {isWeb ? 'Target Website Subdomain & Exact ID' : 'Target Service ID'}
+                  </span>
+                  {isWeb && exactSite ? (
+                    <>
+                      <span className="font-mono font-bold text-blue-600 dark:text-blue-400 block break-all">
+                        https://{exactSite.fullDomainUrl}
+                      </span>
+                      <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400 block break-all">
+                        {exactSite.id}
+                      </span>
+                    </>
+                  ) : (
+                    <span className="font-mono font-semibold text-slate-900 dark:text-white block break-all">
+                      {req.serviceId}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="p-4 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 space-y-2.5">
+                <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-200 dark:border-slate-800">
+                  <span className="text-slate-500 dark:text-slate-400">Submitted Amount (BDT)</span>
+                  <span className="text-lg font-extrabold font-mono text-emerald-600 dark:text-emerald-400 tabular-nums">
+                    ৳{req.amount.toLocaleString()}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500 dark:text-slate-400">Payment Method</span>
+                  <span className="font-bold text-slate-900 dark:text-white">
+                    {req.paymentMethod}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500 dark:text-slate-400">Transaction ID / Ref</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-mono font-bold text-slate-900 dark:text-white break-all">
+                      {displayTrx}
+                    </span>
+                    {displayTrx !== '—' && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleCopyValue(displayTrx, `detail-trx-${req.id}`, 'Transaction ID')
+                        }
+                        className="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 cursor-pointer"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500 dark:text-slate-400">Sender Phone Number</span>
+                  <span className="font-mono font-semibold text-slate-900 dark:text-white tabular-nums">
+                    {req.senderNumber || '—'}
+                  </span>
+                </div>
+
+                {(req.bankName || req.bankAccountName) && (
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500 dark:text-slate-400">Bank &amp; Sender Account</span>
+                    <span className="font-semibold text-slate-900 dark:text-white text-right">
+                      {[req.bankName, req.bankAccountName].filter(Boolean).join(' · ')}
+                    </span>
+                  </div>
+                )}
+
+                <div className="pt-2 border-t border-slate-200 dark:border-slate-800 space-y-0.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500 dark:text-slate-400">
+                      Configured Platform Receiver
+                    </span>
+                    <span className="font-mono font-semibold text-slate-900 dark:text-white text-right">
+                      {recipientInfo.configuredAccount}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-slate-400 leading-snug">
+                    {recipientInfo.disclosure}
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
+                  <div>
+                    <span className="text-[11px] text-slate-500 dark:text-slate-400 block">
+                      Payment Status
+                    </span>
+                    <span
+                      className={`font-bold ${
+                        req.status === 'approved'
+                          ? 'text-emerald-600 dark:text-emerald-400'
+                          : req.status === 'rejected'
+                          ? 'text-rose-600 dark:text-rose-400'
+                          : 'text-amber-600 dark:text-amber-400'
+                      }`}
+                    >
+                      {req.status === 'approved'
+                        ? 'APPROVED / PAID'
+                        : req.status === 'rejected'
+                        ? 'REJECTED'
+                        : 'PENDING VERIFICATION'}
+                    </span>
+                  </div>
+                  {isWeb && (
+                    <div>
+                      <span className="text-[11px] text-slate-500 dark:text-slate-400 block">
+                        Website Publication &amp; 30-Day Cycle
+                      </span>
+                      <span className="font-bold text-slate-900 dark:text-white block">
+                        {siteTrulyLive
+                          ? 'Live & Public'
+                          : siteExpired
+                          ? 'Expired — Awaiting Renewal'
+                          : needsPublish
+                          ? 'Needs Publish Retry'
+                          : exactSite?.subscriptionStatus === 'suspended'
+                          ? 'Suspended Hold'
+                          : 'Unpublished Draft'}
+                      </span>
+                      {exactSite && (exactSite.currentPeriodEnd || exactSite.nextBillingDate) && (
+                        <span className="text-[11px] font-mono text-slate-500 block">
+                          Expiry:{' '}
+                          {formatSubscriptionDateDisplay(
+                            exactSite.currentPeriodEnd || exactSite.nextBillingDate
+                          )}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {(req.reviewedAt || req.adminNotes) && (
+                  <div className="pt-2 border-t border-slate-200 dark:border-slate-800 space-y-1">
+                    {req.reviewedAt && (
+                      <div className="text-[11px] text-slate-500 font-mono">
+                        Reviewed: {new Date(req.reviewedAt).toLocaleString()}
+                      </div>
+                    )}
+                    {req.adminNotes && (
+                      <div className="text-xs text-slate-700 dark:text-slate-300">
+                        <strong>Admin Notes / Reason:</strong> {req.adminNotes}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setSelectedPaymentDetails(null)}
+                  className="min-h-[42px] px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-semibold text-xs cursor-pointer"
+                >
+                  Close
+                </button>
+
+                {req.status === 'approved' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedPaymentDetails(null);
+                      setAdminReceiptRequest(req);
+                    }}
+                    className="min-h-[42px] px-4 py-2 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200 font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    <span>View / Print Receipt</span>
+                  </button>
+                )}
+
+                {siteTrulyLive && exactSite && (
+                  <a
+                    href={getPublicWebsiteHref(exactSite)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="min-h-[42px] px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs inline-flex items-center gap-1.5"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>Open Live Website</span>
+                  </a>
+                )}
+
+                {req.status === 'pending' && (
+                  <>
+                    <button
+                      type="button"
+                      disabled={isBusy || !isOnline}
+                      onClick={() => {
+                        setSelectedPaymentDetails(null);
+                        setRejectionError(null);
+                        setRejectionReason('');
+                        setRejectionModalId(req.id);
+                      }}
+                      className="min-h-[42px] px-4 py-2 rounded-xl bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 font-semibold text-xs cursor-pointer"
+                    >
+                      Reject Payment
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isBusy || !isOnline}
+                      onClick={() => {
+                        setSelectedPaymentDetails(null);
+                        setApprovalNotes('');
+                        setApprovalModalTarget({
+                          request: req,
+                          mode: 'approve_and_publish',
+                        });
+                      }}
+                      className="min-h-[42px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>{isWeb ? 'Approve & Publish Website' : 'Approve Payment'}</span>
+                    </button>
+                  </>
+                )}
+
+                {needsPublish && (
+                  <button
+                    type="button"
+                    disabled={isBusy || !isOnline}
+                    onClick={() => {
+                      setSelectedPaymentDetails(null);
+                      setApprovalNotes('');
+                      setApprovalModalTarget({
+                        request: req,
+                        mode: 'retry_publish',
+                      });
+                    }}
+                    className="min-h-[42px] px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Globe className="w-3.5 h-3.5" />
+                    <span>Retry Website Publish</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          </Modal>
+        );
+      })()}
+
+      {/* Official Verified Payment Receipt Modal */}
+      <PaymentReceiptModal
+        isOpen={Boolean(adminReceiptRequest)}
+        onClose={() => setAdminReceiptRequest(null)}
+        request={adminReceiptRequest}
+        website={adminReceiptRequest ? findExactWebsiteForRequest(adminReceiptRequest) || null : null}
       />
 
       {/* Confirm Remove MFA Factor */}

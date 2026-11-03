@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useApp } from '../../context/AppContext';
 import { useLanguage } from '../../context/LanguageContext';
-import { PaymentMethodType } from '../../types';
+import { PaymentMethodType, PaymentRequest, SubscribedWebsite } from '../../types';
 import {
   hasDuplicateActiveTransactionReference,
   isWebsitePaymentService,
@@ -30,6 +30,7 @@ interface ManualPaymentModalProps {
   serviceName: string;
   planTier: string;
   amount: number;
+  targetWebsite?: SubscribedWebsite | null;
   allowWebsiteSelection?: boolean;
   onSuccess?: () => void;
 }
@@ -42,6 +43,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
   serviceName,
   planTier,
   amount,
+  targetWebsite,
   allowWebsiteSelection = false,
   onSuccess,
 }) => {
@@ -54,6 +56,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
     isGatewaysLoading,
     refreshPaymentGatewayConfigs,
     refreshPaymentRequests,
+    refreshServicePricingCatalog,
     submitPaymentRequest,
     showToast,
   } = useApp();
@@ -68,6 +71,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
   const [bankAccountName, setBankAccountName] = useState('');
   const [loading, setLoading] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submittedRequest, setSubmittedRequest] = useState<PaymentRequest | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const submittingRef = useRef(false);
 
@@ -75,10 +79,18 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
     if (isOpen) {
       setSelectedWebsiteId(serviceId);
       setSubmitError(null);
+      setSubmittedRequest(null);
       void refreshPaymentGatewayConfigs();
       void refreshPaymentRequests();
+      void refreshServicePricingCatalog();
     }
-  }, [isOpen, serviceId, refreshPaymentGatewayConfigs, refreshPaymentRequests]);
+  }, [
+    isOpen,
+    serviceId,
+    refreshPaymentGatewayConfigs,
+    refreshPaymentRequests,
+    refreshServicePricingCatalog,
+  ]);
 
   const userWebsites = useMemo(
     () =>
@@ -94,8 +106,18 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
   const boundWebsite = useMemo(() => {
     if (!isWebsiteService) return undefined;
     const targetId = allowWebsiteSelection ? selectedWebsiteId : serviceId;
-    return subscribedWebsites.find((w) => w.id === targetId);
-  }, [isWebsiteService, allowWebsiteSelection, selectedWebsiteId, serviceId, subscribedWebsites]);
+    const fromState = subscribedWebsites.find((w) => w.id === targetId);
+    if (fromState) return fromState;
+    if (targetWebsite && targetWebsite.id === targetId) return targetWebsite;
+    return undefined;
+  }, [
+    isWebsiteService,
+    allowWebsiteSelection,
+    selectedWebsiteId,
+    serviceId,
+    subscribedWebsites,
+    targetWebsite,
+  ]);
 
   const effectiveServiceId = isWebsiteService && boundWebsite ? boundWebsite.id : serviceId;
   const effectiveServiceName =
@@ -166,8 +188,13 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
 
   const handleClose = () => {
     if (loading || submittingRef.current) return;
+    const hadSubmitted = Boolean(submittedRequest);
     setSubmitError(null);
+    setSubmittedRequest(null);
     onClose();
+    if (hadSubmitted && onSuccess) {
+      onSuccess();
+    }
   };
 
   const handleCopy = (text: string, key: string) => {
@@ -281,7 +308,14 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
         bankReference: isBank ? validation.normalizedReference : undefined,
       });
 
-      if (res.success) {
+      if (res.success && res.request) {
+        setTransactionId('');
+        setSenderNumber('');
+        setBankName('');
+        setBankAccountName('');
+        setSubmitError(null);
+        setSubmittedRequest(res.request);
+      } else if (res.success) {
         setTransactionId('');
         setSenderNumber('');
         setBankName('');
@@ -300,6 +334,87 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
       setLoading(false);
     }
   };
+
+  if (submittedRequest) {
+    return (
+      <Modal
+        isOpen={isOpen}
+        onClose={handleClose}
+        title="Payment Submitted — Awaiting Admin Verification"
+        description="Your payment details have been recorded securely and queued for administrator verification."
+        maxWidth="lg"
+      >
+        <div className="space-y-5">
+          <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/70 flex items-start gap-3">
+            <Clock className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+            <div className="space-y-1 text-xs">
+              <p className="font-bold text-amber-950 dark:text-amber-200 text-sm">
+                Payment Under Admin Verification
+              </p>
+              <p className="text-amber-800 dark:text-amber-300/90 leading-relaxed">
+                {boundWebsite
+                  ? `Your website (${boundWebsite.subdomain}.amaas.xyz) remains private until an authorized administrator verifies your payment and approves publishing.`
+                  : 'Your service will be activated immediately once an authorized administrator verifies your Transaction ID.'}
+              </p>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 dark:border-slate-800 divide-y divide-slate-100 dark:divide-slate-800 text-xs">
+            {boundWebsite && (
+              <div className="px-4 py-3 flex items-center justify-between gap-3">
+                <span className="text-slate-500 dark:text-slate-400">Target Website</span>
+                <span className="font-bold text-slate-900 dark:text-white font-mono">
+                  {boundWebsite.subdomain}.amaas.xyz
+                </span>
+              </div>
+            )}
+            <div className="px-4 py-3 flex items-center justify-between gap-3">
+              <span className="text-slate-500 dark:text-slate-400">Submitted Amount</span>
+              <span className="font-extrabold font-mono tabular-nums text-slate-900 dark:text-white">
+                {submittedRequest.currency}
+                {submittedRequest.amount.toLocaleString()} BDT
+              </span>
+            </div>
+            <div className="px-4 py-3 flex items-center justify-between gap-3">
+              <span className="text-slate-500 dark:text-slate-400">Payment Method</span>
+              <span className="font-bold text-slate-900 dark:text-white">
+                {submittedRequest.paymentMethod}
+              </span>
+            </div>
+            <div className="px-4 py-3 flex items-center justify-between gap-3">
+              <span className="text-slate-500 dark:text-slate-400">Transaction ID</span>
+              <span className="font-bold font-mono text-blue-700 dark:text-blue-400">
+                {submittedRequest.transactionId || submittedRequest.bankReference}
+              </span>
+            </div>
+            <div className="px-4 py-3 flex items-center justify-between gap-3">
+              <span className="text-slate-500 dark:text-slate-400">Sender Phone</span>
+              <span className="font-semibold font-mono text-slate-800 dark:text-slate-200">
+                {submittedRequest.senderNumber || '—'}
+              </span>
+            </div>
+            <div className="px-4 py-3 flex items-center justify-between gap-3">
+              <span className="text-slate-500 dark:text-slate-400">Verification Status</span>
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-amber-100 dark:bg-amber-900/50 text-amber-800 dark:text-amber-300 font-bold">
+                Pending Admin Verification
+              </span>
+            </div>
+          </div>
+
+          <div className="flex justify-end pt-1">
+            <button
+              type="button"
+              onClick={handleClose}
+              className="min-h-[44px] px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs shadow-sm transition-colors inline-flex items-center gap-2 cursor-pointer"
+            >
+              <span>Continue to Website Dashboard</span>
+              <ArrowRight className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      </Modal>
+    );
+  }
 
   return (
     <Modal

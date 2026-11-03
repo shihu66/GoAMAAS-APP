@@ -411,6 +411,8 @@ export interface SubscribedWebsite {
     | 'draft'
     | 'failed';
   sslStatus: 'active' | 'pending';
+  subscribedAt?: string;
+  currentPeriodEnd?: string;
   nextBillingDate: string;
   gracePeriodEndsAt?: string;
   createdAt: string;
@@ -611,3 +613,64 @@ export interface ApproveAndPublishResult {
   code?: string;
   message: string;
 }
+
+export type ClientWebsiteLifecycleStage =
+  | 'draft_awaiting_payment'
+  | 'payment_pending'
+  | 'payment_rejected'
+  | 'live'
+  | 'expired'
+  | 'renewal_pending'
+  | 'approved_unpublished'
+  | 'suspended'
+  | 'cancelled';
+
+export interface ClientWebsiteStatusDescriptor {
+  stage: ClientWebsiteLifecycleStage;
+  label: string;
+  paymentStatusLabel: 'Unpaid' | 'Pending Admin Verification' | 'Paid / Approved' | 'Rejected';
+  publicationStatusLabel:
+    | 'Private — Not Published'
+    | 'Live & Public'
+    | 'Offline — Subscription Expired'
+    | 'Offline — Ready to Publish'
+    | 'Offline — Suspended';
+  description: string;
+  isPubliclyAccessible: boolean;
+  isExpired: boolean;
+  canSubmitInitialPayment: boolean;
+  canSubmitRenewalPayment: boolean;
+  hasPendingRenewalWhileLive: boolean;
+  pendingRequest?: PaymentRequest;
+  latestApprovedRequest?: PaymentRequest;
+  latestRejectedRequest?: PaymentRequest;
+  subscriptionStartIso?: string;
+  subscriptionExpiryIso?: string;
+}
+
+export interface VerifiedPaymentReceipt {
+  receiptNumber: string;
+  requestId: string;
+  platformName: string;
+  companyName: string;
+  clientName: string;
+  businessName: string;
+  clientEmail: string;
+  clientPhone: string;
+  websiteId?: string;
+  websiteName: string;
+  subdomain?: string;
+  websiteUrl?: string;
+  serviceType: PaymentRequest['serviceType'];
+  planName: string;
+  amountBdt: number;
+  currency: string;
+  paymentMethod: PaymentMethodType;
+  transactionId: string;
+  senderNumber?: string;
+  approvedAtIso: string;
+  subscriptionStartIso: string;
+  subscriptionExpiryIso: string;
+  statusLabel: 'PAID / APPROVED';
+}
+

@@ -19,7 +19,14 @@ import {
   WebsiteEditableFields,
   AdminPaymentApprovalRpcResult,
 } from '../types';
-import { normalizeDashboardPlanId } from '../data/pricingConfig';
+import {
+  AI_AUTOMATION_PACKAGES,
+  DASHBOARD_SUBSCRIPTION_PLANS,
+  DEFAULT_WEBSITE_SUBSCRIPTION_PLAN,
+  WEBSITE_DEVELOPMENT_PACKAGES,
+  normalizeDashboardPlanId,
+  resolveAuthoritativeServicePrice,
+} from '../data/pricingConfig';
 import { validateManualPaymentSubmissionInput } from './paymentWorkflow';
 
 export const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -88,13 +95,14 @@ export function sanitizeStoreSlug(raw: string, fallbackSuffix = 'store'): string
 
 // Environment variables (safe for Vite client runtime, dynamic defines, and Node/testing)
 const getEnvVar = (key: string): string => {
+  const isUrlKey = key.endsWith('_URL');
   try {
     // @ts-ignore
     if (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env[key]) {
       // @ts-ignore
       const val = import.meta.env[key];
       if (typeof val === 'string' && val.trim()) {
-        if (key === 'VITE_SUPABASE_URL') {
+        if (isUrlKey) {
           if (val.trim().startsWith('https://')) return val.trim();
         } else {
           return val.trim();
@@ -107,7 +115,7 @@ const getEnvVar = (key: string): string => {
     if (typeof process !== 'undefined' && process.env && process.env[key]) {
       const pVal = process.env[key];
       if (typeof pVal === 'string' && pVal.trim()) {
-        if (key === 'VITE_SUPABASE_URL') {
+        if (isUrlKey) {
           if (pVal.trim().startsWith('https://')) return pVal.trim();
         } else {
           return pVal.trim();
@@ -119,9 +127,17 @@ const getEnvVar = (key: string): string => {
   return '';
 };
 
-const supabaseUrl = getEnvVar('VITE_SUPABASE_URL');
-const supabaseAnonKey = getEnvVar('VITE_SUPABASE_ANON_KEY');
-export const supabaseEnv = getEnvVar('VITE_SUPABASE_ENV');
+const supabaseUrl =
+  getEnvVar('VITE_SUPABASE_URL') ||
+  getEnvVar('NEXT_PUBLIC_SUPABASE_URL') ||
+  getEnvVar('SUPABASE_URL');
+const supabaseAnonKey =
+  getEnvVar('VITE_SUPABASE_ANON_KEY') ||
+  getEnvVar('VITE_SUPABASE_PUBLISHABLE_KEY') ||
+  getEnvVar('NEXT_PUBLIC_SUPABASE_ANON_KEY') ||
+  getEnvVar('SUPABASE_ANON_KEY') ||
+  getEnvVar('SUPABASE_PUBLISHABLE_KEY');
+export const supabaseEnv = getEnvVar('VITE_SUPABASE_ENV') || getEnvVar('SUPABASE_ENV');
 
 function decodeBase64UrlJson(segment: string): Record<string, unknown> | null {
   try {
@@ -1190,14 +1206,14 @@ export async function createPaymentRequestInDb(params: {
     };
   }
   try {
-    const {
-      data: { user: authUser },
-      error: authErr,
-    } = await supabase.auth.getUser();
-    if (authErr || !authUser) {
+    const authState = await ensureActiveSupabaseSession();
+    const authUser = authState.user;
+    if (!authUser) {
       return {
         data: null,
-        error: new Error('Authentication required: please sign in to submit payment.'),
+        error:
+          authState.error ||
+          new Error('Authentication required: please sign in to submit payment.'),
       };
     }
 
@@ -1234,7 +1250,7 @@ export async function createPaymentRequestInDb(params: {
 
       const { data: siteRow, error: siteErr } = await supabase
         .from('subscribed_websites')
-        .select('id, user_id, monthly_fee')
+        .select('id, user_id, monthly_fee, plan_tier')
         .eq('id', cleanServiceId)
         .maybeSingle();
 
@@ -1265,7 +1281,11 @@ export async function createPaymentRequestInDb(params: {
           .eq('service_code', 'website_lite')
           .maybeSingle();
 
-        if (liteErr) {
+        const liteTableMissing = Boolean(
+          liteErr && isMissingServicePricingTableError(liteErr)
+        );
+
+        if (liteErr && !liteTableMissing) {
           return {
             data: null,
             error: new Error(liteErr.message || 'Unable to verify website subscription pricing from database.'),
@@ -1273,77 +1293,142 @@ export async function createPaymentRequestInDb(params: {
         }
 
         const typedLite = liteRow as RawServicePricingCatalogRow | null;
-        if (!typedLite || !typedLite.is_active || !(Number(typedLite.price_bdt) > 0)) {
-          return {
-            data: null,
-            error: new Error('The GoAMAAS Website subscription plan is currently unavailable or inactive.'),
-          };
-        }
 
-        const catalogPrice = Number(typedLite.price_bdt);
-        const expectedMonthlyFee = Number(siteRow.monthly_fee) > 0 ? Number(siteRow.monthly_fee) : catalogPrice;
-        if (submittedAmount !== expectedMonthlyFee) {
-          return {
-            data: null,
-            error: new Error(
-              `Payment amount mismatch: expected ৳${expectedMonthlyFee}, received ৳${submittedAmount}.`
-            ),
-          };
+        if (!liteTableMissing && typedLite) {
+          if (!typedLite.is_active || !(Number(typedLite.price_bdt) > 0)) {
+            return {
+              data: null,
+              error: new Error('The GoAMAAS Website subscription plan is currently unavailable or inactive.'),
+            };
+          }
+          const catalogPrice = Number(typedLite.price_bdt);
+          const expectedMonthlyFee =
+            Number(siteRow.monthly_fee) > 0 ? Number(siteRow.monthly_fee) : catalogPrice;
+          if (submittedAmount !== expectedMonthlyFee) {
+            return {
+              data: null,
+              error: new Error(
+                `Payment amount mismatch: expected ৳${expectedMonthlyFee}, received ৳${submittedAmount}.`
+              ),
+            };
+          }
+          resolvedPlanTier = typedLite.plan_tier_label || resolvedPlanTier || 'GoAMAAS Website';
+        } else {
+          // Table missing in Production DB or unseeded (`!typedLite`): check whether catalog has any rows at all
+          let catalogHasAnyRows = false;
+          if (!liteTableMissing) {
+            const { count } = await supabase
+              .from('service_pricing_catalog')
+              .select('service_code', { count: 'exact', head: true });
+            catalogHasAnyRows = Boolean(count && count > 0);
+          }
+          if (catalogHasAnyRows) {
+            return {
+              data: null,
+              error: new Error('The GoAMAAS Website subscription plan is currently unavailable or inactive.'),
+            };
+          }
+          // Authoritative server fallback using protected subscribed_websites.monthly_fee
+          const expectedMonthlyFee =
+            Number(siteRow.monthly_fee) > 0
+              ? Number(siteRow.monthly_fee)
+              : DEFAULT_WEBSITE_SUBSCRIPTION_PLAN.priceMonthly;
+          if (submittedAmount !== expectedMonthlyFee) {
+            return {
+              data: null,
+              error: new Error(
+                `Payment amount mismatch: expected ৳${expectedMonthlyFee}, received ৳${submittedAmount}.`
+              ),
+            };
+          }
+          resolvedPlanTier =
+            (typeof (siteRow as any).plan_tier === 'string' && (siteRow as any).plan_tier.trim()) ||
+            resolvedPlanTier ||
+            DEFAULT_WEBSITE_SUBSCRIPTION_PLAN.name;
         }
-        resolvedPlanTier = typedLite.plan_tier_label || resolvedPlanTier || 'GoAMAAS Website';
       } else {
         const { data: pkgRows, error: pkgErr } = await supabase
           .from('service_pricing_catalog')
           .select('*')
           .eq('service_type', 'website_package');
 
-        if (pkgErr) {
+        const pkgTableMissing = Boolean(
+          pkgErr && isMissingServicePricingTableError(pkgErr)
+        );
+
+        if (pkgErr && !pkgTableMissing) {
           return {
             data: null,
             error: new Error(pkgErr.message || 'Unable to verify website package pricing from database.'),
           };
         }
 
-        const lowerTier = resolvedPlanTier.toLowerCase();
-        const lowerName = (params.serviceName || '').trim().toLowerCase();
-        const inferredPackageCode = lowerTier.includes('starter') || lowerName.includes('starter')
-          ? 'starter_web'
-          : lowerTier.includes('business') || lowerName.includes('business')
-          ? 'business_web'
-          : lowerTier.includes('advanced') || lowerName.includes('advanced')
-          ? 'advanced_web'
-          : lowerName.includes('custom setup') || lowerTier === 'one-time'
-          ? 'custom_setup'
-          : '';
+        const rawPkgList = (pkgRows as RawServicePricingCatalogRow[]) || [];
+        if (pkgTableMissing || rawPkgList.length === 0) {
+          const fallbackPkgPrice = resolveAuthoritativeServicePrice({
+            serviceType: 'website_package',
+            serviceId: cleanServiceId,
+            serviceName: params.serviceName,
+            planTier: resolvedPlanTier,
+            requireCatalog: false,
+          });
+          if (!fallbackPkgPrice || fallbackPkgPrice <= 0) {
+            return {
+              data: null,
+              error: new Error('The selected website package is currently unavailable or inactive.'),
+            };
+          }
+          if (submittedAmount !== fallbackPkgPrice) {
+            return {
+              data: null,
+              error: new Error(
+                `Payment amount mismatch: expected ৳${fallbackPkgPrice}, received ৳${submittedAmount}.`
+              ),
+            };
+          }
+        } else {
+          const lowerTier = resolvedPlanTier.toLowerCase();
+          const lowerName = (params.serviceName || '').trim().toLowerCase();
+          const inferredPackageCode =
+            lowerTier.includes('starter') || lowerName.includes('starter')
+              ? 'starter_web'
+              : lowerTier.includes('business') || lowerName.includes('business')
+              ? 'business_web'
+              : lowerTier.includes('advanced') || lowerName.includes('advanced')
+              ? 'advanced_web'
+              : lowerName.includes('custom setup') || lowerTier === 'one-time'
+              ? 'custom_setup'
+              : '';
 
-        const matchedPkg = ((pkgRows as RawServicePricingCatalogRow[]) || []).find((row) => {
-          if (!row.is_active || !(Number(row.price_bdt) > 0)) return false;
-          const rowCode = (row.service_code || '').trim().toLowerCase();
-          const rowLabel = (row.plan_tier_label || '').trim().toLowerCase();
-          if (inferredPackageCode) return rowCode === inferredPackageCode;
-          return (
-            rowCode === lowerTier ||
-            rowCode === lowerName ||
-            rowLabel === lowerTier ||
-            rowLabel === lowerName
-          );
-        });
+          const matchedPkg = rawPkgList.find((row) => {
+            if (!row.is_active || !(Number(row.price_bdt) > 0)) return false;
+            const rowCode = (row.service_code || '').trim().toLowerCase();
+            const rowLabel = (row.plan_tier_label || '').trim().toLowerCase();
+            if (inferredPackageCode) return rowCode === inferredPackageCode;
+            return (
+              rowCode === lowerTier ||
+              rowCode === lowerName ||
+              rowLabel === lowerTier ||
+              rowLabel === lowerName
+            );
+          });
 
-        if (!matchedPkg) {
-          return {
-            data: null,
-            error: new Error('The selected website package is currently unavailable or inactive.'),
-          };
-        }
+          if (!matchedPkg) {
+            return {
+              data: null,
+              error: new Error('The selected website package is currently unavailable or inactive.'),
+            };
+          }
 
-        const expectedPkgPrice = Number(matchedPkg.price_bdt);
-        if (submittedAmount !== expectedPkgPrice) {
-          return {
-            data: null,
-            error: new Error(
-              `Payment amount mismatch for ${matchedPkg.plan_tier_label}: expected ৳${expectedPkgPrice}, received ৳${submittedAmount}.`
-            ),
-          };
+          const expectedPkgPrice = Number(matchedPkg.price_bdt);
+          if (submittedAmount !== expectedPkgPrice) {
+            return {
+              data: null,
+              error: new Error(
+                `Payment amount mismatch for ${matchedPkg.plan_tier_label}: expected ৳${expectedPkgPrice}, received ৳${submittedAmount}.`
+              ),
+            };
+          }
         }
       }
     } else if (params.serviceType === 'dashboard_plan') {
@@ -1398,7 +1483,11 @@ export async function createPaymentRequestInDb(params: {
         .eq('service_code', canonicalAutoCode)
         .maybeSingle();
 
-      if (autoErr) {
+      const autoTableMissing = Boolean(
+        autoErr && isMissingServicePricingTableError(autoErr)
+      );
+
+      if (autoErr && !autoTableMissing) {
         return {
           data: null,
           error: new Error(autoErr.message || 'Unable to verify automation package pricing from database.'),
@@ -1406,29 +1495,59 @@ export async function createPaymentRequestInDb(params: {
       }
 
       const typedAutoRow = autoRow as RawServicePricingCatalogRow | null;
-      const expectedAutoPrice = Number(typedAutoRow?.price_bdt);
-      const expectedSetupFee = Number(typedAutoRow?.setup_fee_bdt) || 0;
-      if (!typedAutoRow || !typedAutoRow.is_active || !Number.isFinite(expectedAutoPrice) || expectedAutoPrice <= 0) {
-        return {
-          data: null,
-          error: new Error('The selected automation package is currently unavailable or inactive.'),
-        };
-      }
+      if (autoTableMissing) {
+        const monthlyFallback = resolveAuthoritativeServicePrice({
+          serviceType: 'ai_automation',
+          serviceId: canonicalAutoCode,
+          includeSetupFee: false,
+          requireCatalog: false,
+        });
+        const setupFallback = resolveAuthoritativeServicePrice({
+          serviceType: 'ai_automation',
+          serviceId: canonicalAutoCode,
+          includeSetupFee: true,
+          requireCatalog: false,
+        });
+        if (!monthlyFallback || monthlyFallback <= 0) {
+          return {
+            data: null,
+            error: new Error('The selected automation package is currently unavailable or inactive.'),
+          };
+        }
+        if (submittedAmount !== monthlyFallback && submittedAmount !== setupFallback) {
+          return {
+            data: null,
+            error: new Error(
+              `Payment amount mismatch: expected ৳${monthlyFallback}, received ৳${submittedAmount}.`
+            ),
+          };
+        }
+        resolvedServiceId = canonicalAutoCode;
+      } else {
+        const expectedAutoPrice = Number(typedAutoRow?.price_bdt);
+        const expectedSetupFee = Number(typedAutoRow?.setup_fee_bdt) || 0;
+        if (!typedAutoRow || !typedAutoRow.is_active || !Number.isFinite(expectedAutoPrice) || expectedAutoPrice <= 0) {
+          return {
+            data: null,
+            error: new Error('The selected automation package is currently unavailable or inactive.'),
+          };
+        }
 
-      if (
-        submittedAmount !== expectedAutoPrice &&
-        submittedAmount !== expectedAutoPrice + expectedSetupFee
-      ) {
-        return {
-          data: null,
-          error: new Error(
-            `Payment amount mismatch for ${typedAutoRow.plan_tier_label}: expected ৳${expectedAutoPrice}, received ৳${submittedAmount}.`
-          ),
-        };
-      }
+        if (
+          submittedAmount !== expectedAutoPrice &&
+          submittedAmount !== expectedAutoPrice + expectedSetupFee
+        ) {
+          return {
+            data: null,
+            error: new Error(
+              `Payment amount mismatch for ${typedAutoRow.plan_tier_label}: expected ৳${expectedAutoPrice}, received ৳${submittedAmount}.`
+            ),
+          };
+        }
 
-      resolvedServiceId = canonicalAutoCode;
-      resolvedPlanTier = (resolvedPlanTier || typedAutoRow.plan_tier_label).trim();
+        resolvedServiceId = canonicalAutoCode;
+        resolvedPlanTier = (resolvedPlanTier || typedAutoRow.plan_tier_label).trim();
+      }
     } else {
       return {
         data: null,
@@ -2128,6 +2247,10 @@ export function mapDatabaseRowToSubscribedWebsite(row: any): SubscribedWebsite {
     deploymentStatus:
       (row.deployment_status as SubscribedWebsite['deploymentStatus']) || 'deploying',
     sslStatus: 'active',
+    subscribedAt: row.subscribed_at ? new Date(row.subscribed_at).toISOString() : undefined,
+    currentPeriodEnd: row.current_period_end
+      ? new Date(row.current_period_end).toISOString()
+      : undefined,
     nextBillingDate:
       row.next_billing_date ||
       (row.current_period_end ? new Date(row.current_period_end).toISOString().split('T')[0] : ''),
@@ -2359,9 +2482,37 @@ export async function checkRemoteSubdomainAvailability(
 // ==============================================================================
 // Public Multi-Tenant Subdomain Resolution API
 // ==============================================================================
+function isPublicSitePayloadActiveAndUnexpired(site: Record<string, any> | null | undefined): {
+  allowed: boolean;
+  expired: boolean;
+} {
+  if (!site || typeof site !== 'object') {
+    return { allowed: false, expired: false };
+  }
+  const subStatus = String(site.subscriptionStatus || site.status || '');
+  const payStatus = String(site.paymentStatus || site.payment_status || '');
+  const depStatus = String(site.deploymentStatus || site.deployment_status || '');
+  const periodEndRaw = site.currentPeriodEnd || site.current_period_end || '';
+  const periodEndMs = periodEndRaw ? Date.parse(String(periodEndRaw)) : NaN;
+  const nowMs = Date.now();
+
+  const expired =
+    subStatus === 'grace_period' ||
+    subStatus === 'past_due' ||
+    (Number.isFinite(periodEndMs) && periodEndMs <= nowMs);
+
+  const allowed =
+    !expired &&
+    subStatus === 'active' &&
+    (payStatus === '' || payStatus === 'paid') &&
+    depStatus === 'live';
+
+  return { allowed, expired };
+}
+
 export async function fetchPublishedWebsiteBySubdomain(
   subdomain: string
-): Promise<{ data: any | null; error: Error | null; notFound?: boolean }> {
+): Promise<{ data: any | null; error: Error | null; notFound?: boolean; expired?: boolean }> {
   const subValidation = validateSubdomainFormat(subdomain);
   if (!subValidation.valid) {
     return { data: null, error: null, notFound: true };
@@ -2383,6 +2534,10 @@ export async function fetchPublishedWebsiteBySubdomain(
         if (contentType.includes('application/json')) {
           const json = await res.json();
           if (res.ok && json && json.found === true && json.site) {
+            const check = isPublicSitePayloadActiveAndUnexpired(json.site);
+            if (!check.allowed) {
+              return { data: null, error: null, notFound: true, expired: check.expired };
+            }
             return { data: json.site, error: null };
           }
           if (
@@ -2391,7 +2546,12 @@ export async function fetchPublishedWebsiteBySubdomain(
             json.found === false &&
             (json.subdomain === cleanSubdomain || res.status === 400)
           ) {
-            return { data: null, error: null, notFound: true };
+            return {
+              data: null,
+              error: null,
+              notFound: true,
+              expired: Boolean(json.expired),
+            };
           }
         }
         // If /api/resolve-tenant is not mounted (HTML 404 on static SPA host) or returned 5xx,
@@ -2413,6 +2573,10 @@ export async function fetchPublishedWebsiteBySubdomain(
     if (rpcData) {
       const res = rpcData as { found: boolean; site?: any; message?: string };
       if (res.found && res.site) {
+        const check = isPublicSitePayloadActiveAndUnexpired(res.site);
+        if (!check.allowed) {
+          return { data: null, error: null, notFound: true, expired: check.expired };
+        }
         return { data: res.site, error: null };
       }
     }
@@ -3106,14 +3270,255 @@ export interface RawServicePricingCatalogRow {
   updated_at?: string;
 }
 
+export function buildCanonicalServicePricingCatalog(): ServicePricingCatalogEntry[] {
+  return [
+    {
+      serviceType: 'website_subscription',
+      serviceCode: 'website_lite',
+      planTierLabel: DEFAULT_WEBSITE_SUBSCRIPTION_PLAN.name,
+      priceBdt: DEFAULT_WEBSITE_SUBSCRIPTION_PLAN.priceMonthly,
+      setupFeeBdt: 0,
+      isActive: true,
+    },
+    ...WEBSITE_DEVELOPMENT_PACKAGES.map((pkg) => ({
+      serviceType: 'website_package' as const,
+      serviceCode: pkg.id,
+      planTierLabel: pkg.name,
+      priceBdt: pkg.priceOneTime,
+      setupFeeBdt: 0,
+      isActive: true,
+    })),
+    {
+      serviceType: 'website_package',
+      serviceCode: 'custom_setup',
+      planTierLabel: 'Custom Setup',
+      priceBdt: 3500,
+      setupFeeBdt: 0,
+      isActive: true,
+    },
+    ...DASHBOARD_SUBSCRIPTION_PLANS.map((plan) => ({
+      serviceType: 'dashboard_plan' as const,
+      serviceCode: plan.id,
+      planTierLabel: plan.name,
+      priceBdt: plan.priceMonthly,
+      setupFeeBdt: 0,
+      isActive: true,
+    })),
+    ...AI_AUTOMATION_PACKAGES.map((auto) => ({
+      serviceType: 'ai_automation' as const,
+      serviceCode: auto.id,
+      planTierLabel: auto.name,
+      priceBdt: auto.priceMonthly,
+      setupFeeBdt: typeof auto.setupFee === 'number' ? auto.setupFee : 0,
+      isActive: true,
+    })),
+  ];
+}
+
+export function isMissingServicePricingTableError(err: {
+  code?: string;
+  message?: string;
+  details?: string;
+} | null | undefined): boolean {
+  if (!err) return false;
+  const code = String(err.code || '').toUpperCase();
+  const msg = `${err.message || ''} ${err.details || ''}`;
+  return (
+    code === 'PGRST205' ||
+    code === '42P01' ||
+    /could not find the table.*service_pricing_catalog/i.test(msg) ||
+    /relation.*service_pricing_catalog.*does not exist/i.test(msg) ||
+    /schema cache.*service_pricing_catalog/i.test(msg)
+  );
+}
+
+export async function ensureActiveSupabaseSession(): Promise<{
+  session: Session | null;
+  user: SupabaseUser | null;
+  error: Error | null;
+}> {
+  if (!isSupabaseConfigured || !supabase) {
+    return { session: null, user: null, error: new Error('Supabase client is not configured.') };
+  }
+  try {
+    let {
+      data: { session },
+    } = await supabase.auth.getSession();
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const isExpiringSoon =
+      !session?.access_token ||
+      (typeof session.expires_at === 'number' && session.expires_at <= nowSec + 60);
+
+    if (isExpiringSoon) {
+      const refreshed = await supabase.auth.refreshSession();
+      if (refreshed.data?.session) {
+        session = refreshed.data.session;
+      }
+    }
+
+    const {
+      data: { user },
+      error: userErr,
+    } = await supabase.auth.getUser();
+
+    if (userErr || !user) {
+      // One more refresh attempt if getUser rejected a stale cached token
+      const retryRefresh = await supabase.auth.refreshSession();
+      if (retryRefresh.data?.session?.user) {
+        return {
+          session: retryRefresh.data.session,
+          user: retryRefresh.data.session.user,
+          error: null,
+        };
+      }
+      return {
+        session: null,
+        user: null,
+        error: new Error(
+          'Your login session has expired. Please sign in again to verify pricing and submit payment.'
+        ),
+      };
+    }
+
+    return { session, user, error: null };
+  } catch (err: unknown) {
+    const rawMsg = err instanceof Error ? err.message : '';
+    const isNetwork = /failed to fetch|networkerror|load failed|fetch failed/i.test(rawMsg);
+    return {
+      session: null,
+      user: null,
+      error: new Error(
+        isNetwork
+          ? 'Network error while verifying your login session. Please check your internet connection and retry.'
+          : 'Unable to verify your login session. Please refresh or sign in again.'
+      ),
+    };
+  }
+}
+
+export async function verifyServicePricingViaServer(params?: {
+  serviceType?: string;
+  serviceId?: string;
+  serviceName?: string;
+  planTier?: string;
+  includeSetupFee?: boolean;
+}): Promise<{
+  ok: boolean;
+  status: number;
+  code?: string;
+  error?: string;
+  catalog?: ServicePricingCatalogEntry[];
+  catalogSource?: string;
+  resolvedPrice?: {
+    serviceType: string;
+    serviceId: string;
+    subdomain?: string;
+    businessName?: string;
+    planTierLabel: string;
+    amount: number;
+    monthlyAmount?: number;
+    setupAmount?: number;
+    currency: string;
+  };
+} | null> {
+  if (typeof window === 'undefined' || !isSupabaseConfigured || !supabase) {
+    return null;
+  }
+
+  const authState = await ensureActiveSupabaseSession();
+  if (!authState.session?.access_token) {
+    return {
+      ok: false,
+      status: 401,
+      code: 'AUTH_EXPIRED',
+      error:
+        authState.error?.message ||
+        'Your login session has expired. Please sign in again to submit payment.',
+    };
+  }
+
+  try {
+    const isSpecific = Boolean(params?.serviceType);
+    const res = await fetch('/api/verify-pricing', {
+      method: isSpecific ? 'POST' : 'GET',
+      headers: {
+        Authorization: `Bearer ${authState.session.access_token}`,
+        Accept: 'application/json',
+        ...(isSpecific ? { 'Content-Type': 'application/json' } : {}),
+      },
+      ...(isSpecific ? { body: JSON.stringify(params) } : {}),
+      cache: 'no-store',
+    });
+
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+    if (!contentType.includes('application/json')) {
+      // Static Vite SPA dev server without serverless /api mounted — return null to fall back cleanly
+      return null;
+    }
+
+    const json = (await res.json()) as Record<string, any>;
+    return {
+      ok: Boolean(res.ok && json?.ok),
+      status: res.status,
+      code: typeof json?.code === 'string' ? json.code : undefined,
+      error: typeof json?.error === 'string' ? json.error : undefined,
+      catalog: Array.isArray(json?.catalog) ? json.catalog : undefined,
+      catalogSource: typeof json?.catalogSource === 'string' ? json.catalogSource : undefined,
+      resolvedPrice:
+        json?.resolvedPrice && typeof json.resolvedPrice === 'object'
+          ? json.resolvedPrice
+          : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchServicePricingCatalogFromDb(): Promise<{
   data: ServicePricingCatalogEntry[] | null;
   error: Error | null;
+  code?: string;
+  source?: 'database' | 'server_api' | 'canonical_fallback';
 }> {
   if (!isSupabaseConfigured || !supabase) {
     return { data: null, error: null };
   }
   try {
+    // 1. Ensure authenticated user session token is fresh before querying authenticated-only catalog
+    const authState = await ensureActiveSupabaseSession();
+    if (!authState.user) {
+      return {
+        data: null,
+        code: 'AUTH_EXPIRED',
+        error:
+          authState.error ||
+          new Error('Please sign in again to verify active service pricing.'),
+      };
+    }
+
+    // 2. Try serverless /api/verify-pricing endpoint first when mounted on Vercel
+    const serverCheck = await verifyServicePricingViaServer();
+    if (serverCheck) {
+      if (serverCheck.ok && Array.isArray(serverCheck.catalog) && serverCheck.catalog.length > 0) {
+        return {
+          data: serverCheck.catalog,
+          error: null,
+          source: 'server_api',
+        };
+      }
+      if (serverCheck.code === 'AUTH_EXPIRED' || serverCheck.code === 'AUTH_REQUIRED') {
+        return {
+          data: null,
+          code: 'AUTH_EXPIRED',
+          error: new Error(
+            serverCheck.error || 'Your login session has expired. Please sign in again.'
+          ),
+        };
+      }
+    }
+
+    // 3. Direct PostgREST query with refreshed user JWT
     const { data, error } = await supabase
       .from('service_pricing_catalog')
       .select('*')
@@ -3121,10 +3526,50 @@ export async function fetchServicePricingCatalogFromDb(): Promise<{
       .order('service_code', { ascending: true });
 
     if (error) {
-      return { data: null, error: new Error(error.message || 'Failed to fetch service pricing catalog') };
+      if (isMissingServicePricingTableError(error)) {
+        return {
+          data: buildCanonicalServicePricingCatalog(),
+          error: null,
+          source: 'canonical_fallback',
+        };
+      }
+      const errCode = String(error.code || '');
+      const errMsg = error.message || 'Failed to fetch service pricing catalog';
+      if (
+        errCode === 'PGRST301' ||
+        errCode === '42501' ||
+        /jwt|unauthorized|permission denied/i.test(errMsg)
+      ) {
+        return {
+          data: null,
+          code: 'AUTH_EXPIRED',
+          error: new Error(
+            'Your session lacks permission or has expired. Please sign out and sign in again to submit payment.'
+          ),
+        };
+      }
+      if (/failed to fetch|networkerror|load failed|fetch failed/i.test(errMsg)) {
+        return {
+          data: null,
+          code: 'NETWORK_ERROR',
+          error: new Error(
+            'Network connection error while verifying service pricing. Please check your internet connection and retry.'
+          ),
+        };
+      }
+      return { data: null, code: 'QUERY_ERROR', error: new Error(errMsg) };
     }
 
-    const mapped: ServicePricingCatalogEntry[] = ((data as RawServicePricingCatalogRow[]) || []).map((row) => ({
+    const rawRows = (data as RawServicePricingCatalogRow[]) || [];
+    if (rawRows.length === 0) {
+      return {
+        data: buildCanonicalServicePricingCatalog(),
+        error: null,
+        source: 'canonical_fallback',
+      };
+    }
+
+    const mapped: ServicePricingCatalogEntry[] = rawRows.map((row) => ({
       serviceType: row.service_type,
       serviceCode: row.service_code,
       planTierLabel: row.plan_tier_label,
@@ -3134,11 +3579,18 @@ export async function fetchServicePricingCatalogFromDb(): Promise<{
       updatedAt: row.updated_at,
     }));
 
-    return { data: mapped, error: null };
+    return { data: mapped, error: null, source: 'database' };
   } catch (err: unknown) {
+    const rawMsg = err instanceof Error ? err.message : '';
+    const isNetwork = /failed to fetch|networkerror|load failed|fetch failed/i.test(rawMsg);
     return {
       data: null,
-      error: err instanceof Error ? err : new Error('Failed to load service pricing catalog'),
+      code: isNetwork ? 'NETWORK_ERROR' : 'UNKNOWN_ERROR',
+      error: new Error(
+        isNetwork
+          ? 'Network connection error while verifying service pricing. Please check your internet connection and retry.'
+          : rawMsg || 'Failed to load service pricing catalog'
+      ),
     };
   }
 }

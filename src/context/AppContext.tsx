@@ -63,15 +63,20 @@ import {
   NAGAD_DEFAULT_ADMIN_INSTRUCTIONS,
 } from '../data/paymentGatewaysConfig';
 import {
+  THIRTY_DAYS_MS,
   executeApproveAndPublishWorkflow,
+  getWebsiteSubscriptionExpiryMs,
   hasDuplicateActiveTransactionReference,
   isWebsitePaymentService,
+  isWebsiteSubscriptionExpired,
   isWebsiteTrulyLive,
   validateManualPaymentSubmissionInput,
 } from '../lib/paymentWorkflow';
 import {
   supabase,
   isSupabaseConfigured,
+  ensureActiveSupabaseSession,
+  verifyServicePricingViaServer,
   UUID_REGEX,
   validateSubdomainFormat,
   signInWithGoogle,
@@ -1858,9 +1863,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     } else {
       const today = new Date().toISOString().split('T')[0];
-      const nextMonth = new Date();
-      nextMonth.setDate(nextMonth.getDate() + 30);
-      const nextBillingDate = nextMonth.toISOString().split('T')[0];
 
       newSite = {
         ...data,
@@ -1871,11 +1873,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         fullDomainUrl: `${cleanSub}.amaas.xyz`,
         planName: websiteSubscriptionPlan.name,
         monthlyFee: websiteSubscriptionPlan.priceMonthly,
-        subscriptionStatus: 'active',
+        subscriptionStatus: 'draft',
         paymentStatus: 'pending',
-        deploymentStatus: 'deploying',
+        deploymentStatus: 'draft',
         sslStatus: 'pending',
-        nextBillingDate,
+        subscribedAt: undefined,
+        currentPeriodEnd: undefined,
+        nextBillingDate: '',
         createdAt: today,
         lastUpdatedAt: today,
         resourceUsage: {
@@ -1894,18 +1898,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSubscribedWebsites((prev) => [newSite, ...prev.filter((s) => s.id !== newSite.id)]);
 
     const effectiveMonthlyFee = newSite.monthlyFee || websiteSubscriptionPlan.priceMonthly;
-    const effectivePlanLabel = newSite.planName || websiteSubscriptionPlan.name;
-
-    const todayStr = new Date().toISOString().split('T')[0];
-    const newInvoice: Invoice = {
-      id: `inv-${Date.now()}`,
-      invoiceNumber: `INV-AMAAS-SUB-${Math.floor(1000 + Math.random() * 9000)}`,
-      date: todayStr,
-      planName: `${effectivePlanLabel} (${newSite.fullDomainUrl})`,
-      amount: effectiveMonthlyFee,
-      status: 'Pending',
-    };
-    setInvoices((prev) => [newInvoice, ...prev]);
 
     const notif: AppNotification = {
       id: `notif-${Date.now()}`,
@@ -2023,7 +2015,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [websiteLifecycleAuditLogs, setWebsiteLifecycleAuditLogs] = useState<WebsiteLifecycleAuditLog[]>([]);
 
   const refreshServicePricingCatalog = useCallback(async (): Promise<ServicePricingCatalogEntry[] | null> => {
-    if (!isSupabaseConfigured || !supabase || !user?.id) {
+    if (!isSupabaseConfigured || !supabase) {
       return null;
     }
     setIsPricingCatalogLoading(true);
@@ -2059,7 +2051,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } finally {
       setIsPricingCatalogLoading(false);
     }
-  }, [user?.id]);
+  }, []);
 
   const refreshWebsiteLifecycleAuditLogs = useCallback(async () => {
     if (!isSupabaseConfigured || !supabase || !user?.id || role !== 'admin' || user.role !== 'admin') {
@@ -2627,6 +2619,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           paymentStatus: data.paymentStatus || data.payment_status || 'paid',
           deploymentStatus: data.deploymentStatus || data.deployment_status || 'live',
           sslStatus: 'active',
+          subscribedAt: data.subscribedAt || data.subscribed_at || undefined,
+          currentPeriodEnd: data.currentPeriodEnd || data.current_period_end || undefined,
           nextBillingDate: data.nextBillingDate || data.next_billing_date || '',
           createdAt: data.createdAt || data.created_at || new Date().toISOString(),
           lastUpdatedAt: data.lastUpdatedAt || data.updated_at || new Date().toISOString(),
@@ -2641,6 +2635,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             monthlyUpdatesLimit: 999,
           },
         };
+        if (!isWebsiteTrulyLive(mapped)) {
+          return { site: null, notFound: true };
+        }
         return { site: mapped, notFound: false };
       }
       return { site: null, notFound: true };
@@ -2648,13 +2645,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // 2. Fallback to local state ONLY if Supabase is not configured (offline demo mode)
     const local = subscribedWebsites.find((s) => s.subdomain.toLowerCase() === clean);
-    if (
-      local &&
-      (local.subscriptionStatus === 'active' || local.subscriptionStatus === 'grace_period') &&
-      local.deploymentStatus === 'live' &&
-      local.paymentStatus === 'paid' &&
-      (!local.gracePeriodEndsAt || new Date(local.gracePeriodEndsAt).getTime() >= Date.now())
-    ) {
+    if (local && isWebsiteTrulyLive(local)) {
       const linkedLocalProducts = products.filter((p) => p.websiteId === local.id);
       const resolvedProducts =
         linkedLocalProducts.length > 0
@@ -2879,7 +2870,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: msg };
     }
 
-    if (!user?.id) {
+    // Verify authenticated user & refresh Supabase JWT if needed before any DB/API check
+    let effectiveUserId = user?.id || '';
+    let effectiveUserEmail = user?.email || '';
+    let effectiveUserName = user?.name || 'Merchant';
+
+    if (isSupabaseConfigured) {
+      const authState = await ensureActiveSupabaseSession();
+      if (!authState.user) {
+        const msg =
+          authState.error?.message ||
+          'Your login session has expired. Please sign in again to submit a payment request.';
+        showToast(msg, 'error');
+        return { success: false, message: msg };
+      }
+      effectiveUserId = authState.user.id;
+      effectiveUserEmail = authState.user.email || effectiveUserEmail;
+    } else if (!effectiveUserId) {
       const msg = 'Please sign in to submit a payment request.';
       showToast(msg, 'warning');
       return { success: false, message: msg };
@@ -2923,13 +2930,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return { success: false, message: msg };
       }
       targetWebsite = subscribedWebsites.find((w) => w.id === cleanServiceId);
-      if (!targetWebsite && isSupabaseConfigured) {
+      if (isSupabaseConfigured) {
+        // Always fetch or refresh exact website record from Supabase to prevent stale modal/wizard state
         const { data: fetchedWebsite } = await fetchSubscribedWebsiteByIdFromDb(cleanServiceId);
         if (fetchedWebsite) {
           targetWebsite = fetchedWebsite;
-          setSubscribedWebsites((prev) =>
-            prev.some((w) => w.id === fetchedWebsite.id) ? prev : [fetchedWebsite, ...prev]
-          );
+          setSubscribedWebsites((prev) => [
+            fetchedWebsite,
+            ...prev.filter((w) => w.id !== fetchedWebsite.id),
+          ]);
         }
       }
       if (!targetWebsite) {
@@ -2937,7 +2946,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         showToast(msg, 'error');
         return { success: false, message: msg };
       }
-      if (targetWebsite.userId && targetWebsite.userId !== user.id) {
+      if (targetWebsite.userId && targetWebsite.userId !== effectiveUserId) {
         const msg = 'Unauthorized: You can only submit a payment request for your own website.';
         showToast(msg, 'error');
         return { success: false, message: msg };
@@ -2986,7 +2995,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // Prevent duplicate pending requests for the same service before network submission
     const hasDuplicatePendingService = paymentRequests.some((r) => {
-      if (r.userId !== user.id || r.serviceType !== params.serviceType || r.status !== 'pending') {
+      if (
+        r.userId !== effectiveUserId ||
+        r.serviceType !== params.serviceType ||
+        r.status !== 'pending'
+      ) {
         return false;
       }
       return r.serviceId.trim() === resolvedServiceId;
@@ -3017,97 +3030,162 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     isSubmittingPaymentRef.current = true;
     try {
-      // Refresh authoritative catalog from database when Supabase is configured (never trust stale/static prices)
       let activeCatalog: ServicePricingCatalogEntry[] | undefined = undefined;
+      let serverVerifiedAmount: number | null = null;
+
       if (isSupabaseConfigured) {
-        const freshCatalog = await refreshServicePricingCatalog();
-        if (!freshCatalog) {
-          const msg = 'Unable to verify active service pricing from the server. Please refresh and try again.';
-          showToast(msg, 'error');
-          return { success: false, message: msg };
-        }
-        activeCatalog = freshCatalog;
-      }
-
-      let authoritativeAmount: number | null = null;
-
-      if (params.serviceType === 'ai_automation') {
-        const monthlyExpected = resolveAuthoritativeServicePrice({
-          serviceType: 'ai_automation',
-          serviceId: resolvedServiceId,
-          includeSetupFee: false,
-          catalog: activeCatalog,
-          requireCatalog: isSupabaseConfigured,
-        });
-        const setupExpected = resolveAuthoritativeServicePrice({
-          serviceType: 'ai_automation',
-          serviceId: resolvedServiceId,
-          includeSetupFee: true,
-          catalog: activeCatalog,
-          requireCatalog: isSupabaseConfigured,
-        });
-        if (monthlyExpected === null || monthlyExpected <= 0) {
-          const msg = 'The selected automation package is currently unavailable or inactive.';
-          showToast(msg, 'error');
-          return { success: false, message: msg };
-        }
-        if (submittedAmount !== monthlyExpected && submittedAmount !== setupExpected) {
-          const msg = `Payment amount (৳${submittedAmount}) does not match the active automation package price (৳${monthlyExpected}).`;
-          showToast(msg, 'error');
-          return { success: false, message: msg };
-        }
-        if (isSupabaseConfigured && activeCatalog) {
-          const autoEntry = activeCatalog.find(
-            (entry) =>
-              entry.serviceType === 'ai_automation' &&
-              entry.serviceCode.trim().toLowerCase() === resolvedServiceId &&
-              entry.isActive
-          );
-          if (autoEntry?.planTierLabel) {
-            resolvedPlanTier = resolvedPlanTier || autoEntry.planTierLabel;
-          }
-        }
-        authoritativeAmount = submittedAmount;
-      } else {
-        const expectedWebsiteAmount = resolveAuthoritativeServicePrice({
+        // 1. Verify active pricing & exact target service via serverless /api/verify-pricing first
+        const serverPricing = await verifyServicePricingViaServer({
           serviceType: params.serviceType,
           serviceId: resolvedServiceId,
           serviceName: params.serviceName,
           planTier: resolvedPlanTier,
-          websiteMonthlyFee: targetWebsite?.monthlyFee,
-          catalog: activeCatalog,
-          requireCatalog: isSupabaseConfigured,
         });
-        if (
-          expectedWebsiteAmount === null ||
-          !Number.isFinite(expectedWebsiteAmount) ||
-          expectedWebsiteAmount <= 0
-        ) {
-          const msg = 'The selected website plan or package is currently unavailable or inactive.';
-          showToast(msg, 'error');
-          return { success: false, message: msg };
-        }
-        if (submittedAmount !== expectedWebsiteAmount) {
-          const msg = `Payment amount (৳${submittedAmount}) does not match the authoritative service price (৳${expectedWebsiteAmount}).`;
-          showToast(msg, 'error');
-          return { success: false, message: msg };
-        }
-        if (
-          params.serviceType === 'website_subscription' &&
-          isSupabaseConfigured &&
-          activeCatalog
-        ) {
-          const liteEntry = activeCatalog.find(
-            (entry) =>
-              entry.serviceType === 'website_subscription' &&
-              entry.serviceCode.trim().toLowerCase() === 'website_lite' &&
-              entry.isActive
-          );
-          if (liteEntry?.planTierLabel) {
-            resolvedPlanTier = liteEntry.planTierLabel;
+
+        if (serverPricing) {
+          if (serverPricing.ok && serverPricing.resolvedPrice) {
+            if (Array.isArray(serverPricing.catalog) && serverPricing.catalog.length > 0) {
+              activeCatalog = serverPricing.catalog;
+              setServicePricingCatalog(serverPricing.catalog);
+              setIsPricingCatalogLoaded(true);
+              setPricingCatalogError(null);
+            }
+            if (params.serviceType === 'ai_automation') {
+              const monthlyAmt = Number(serverPricing.resolvedPrice.monthlyAmount || serverPricing.resolvedPrice.amount);
+              const setupAmt = Number(serverPricing.resolvedPrice.setupAmount || monthlyAmt);
+              if (submittedAmount !== monthlyAmt && submittedAmount !== setupAmt) {
+                const msg = `Payment amount (৳${submittedAmount}) does not match the active automation package price (৳${monthlyAmt}).`;
+                showToast(msg, 'error');
+                return { success: false, message: msg };
+              }
+              serverVerifiedAmount = submittedAmount;
+            } else {
+              const verifiedAmt = Number(serverPricing.resolvedPrice.amount);
+              if (submittedAmount !== verifiedAmt) {
+                const msg = `Payment amount (৳${submittedAmount}) does not match the authoritative service price (৳${verifiedAmt}).`;
+                showToast(msg, 'error');
+                return { success: false, message: msg };
+              }
+              serverVerifiedAmount = verifiedAmt;
+            }
+            if (serverPricing.resolvedPrice.planTierLabel) {
+              resolvedPlanTier = serverPricing.resolvedPrice.planTierLabel;
+            }
+          } else if (
+            serverPricing.status === 400 ||
+            serverPricing.status === 401 ||
+            serverPricing.status === 403 ||
+            serverPricing.status === 404 ||
+            serverPricing.status === 422
+          ) {
+            const msg =
+              serverPricing.error ||
+              'Unable to verify payment eligibility for the selected service.';
+            showToast(msg, 'error');
+            return { success: false, message: msg };
           }
         }
-        authoritativeAmount = expectedWebsiteAmount;
+
+        // 2. If serverless /api/verify-pricing is not mounted (e.g. local Vite dev) or returned 5xx,
+        // verify directly against Supabase with refreshed JWT and safe catalog fallback
+        if (serverVerifiedAmount === null) {
+          const catalogRes = await fetchServicePricingCatalogFromDb();
+          if (catalogRes.error || !catalogRes.data) {
+            const msg =
+              catalogRes.error?.message ||
+              'Unable to verify active service pricing. Please check your connection or sign in again.';
+            setPricingCatalogError(msg);
+            showToast(msg, 'error');
+            return { success: false, message: msg };
+          }
+          activeCatalog = catalogRes.data;
+          setServicePricingCatalog(catalogRes.data);
+          setIsPricingCatalogLoaded(true);
+          setPricingCatalogError(null);
+        }
+      }
+
+      let authoritativeAmount: number | null = serverVerifiedAmount;
+
+      if (authoritativeAmount === null) {
+        if (params.serviceType === 'ai_automation') {
+          const monthlyExpected = resolveAuthoritativeServicePrice({
+            serviceType: 'ai_automation',
+            serviceId: resolvedServiceId,
+            includeSetupFee: false,
+            catalog: activeCatalog,
+            requireCatalog: isSupabaseConfigured,
+          });
+          const setupExpected = resolveAuthoritativeServicePrice({
+            serviceType: 'ai_automation',
+            serviceId: resolvedServiceId,
+            includeSetupFee: true,
+            catalog: activeCatalog,
+            requireCatalog: isSupabaseConfigured,
+          });
+          if (monthlyExpected === null || monthlyExpected <= 0) {
+            const msg = 'The selected automation package is currently unavailable or inactive.';
+            showToast(msg, 'error');
+            return { success: false, message: msg };
+          }
+          if (submittedAmount !== monthlyExpected && submittedAmount !== setupExpected) {
+            const msg = `Payment amount (৳${submittedAmount}) does not match the active automation package price (৳${monthlyExpected}).`;
+            showToast(msg, 'error');
+            return { success: false, message: msg };
+          }
+          if (isSupabaseConfigured && activeCatalog) {
+            const autoEntry = activeCatalog.find(
+              (entry) =>
+                entry.serviceType === 'ai_automation' &&
+                entry.serviceCode.trim().toLowerCase() === resolvedServiceId &&
+                entry.isActive
+            );
+            if (autoEntry?.planTierLabel) {
+              resolvedPlanTier = resolvedPlanTier || autoEntry.planTierLabel;
+            }
+          }
+          authoritativeAmount = submittedAmount;
+        } else {
+          const expectedWebsiteAmount = resolveAuthoritativeServicePrice({
+            serviceType: params.serviceType,
+            serviceId: resolvedServiceId,
+            serviceName: params.serviceName,
+            planTier: resolvedPlanTier,
+            websiteMonthlyFee: targetWebsite?.monthlyFee,
+            catalog: activeCatalog,
+            requireCatalog: isSupabaseConfigured,
+          });
+          if (
+            expectedWebsiteAmount === null ||
+            !Number.isFinite(expectedWebsiteAmount) ||
+            expectedWebsiteAmount <= 0
+          ) {
+            const msg = 'The selected website plan or package is currently unavailable or inactive.';
+            showToast(msg, 'error');
+            return { success: false, message: msg };
+          }
+          if (submittedAmount !== expectedWebsiteAmount) {
+            const msg = `Payment amount (৳${submittedAmount}) does not match the authoritative service price (৳${expectedWebsiteAmount}).`;
+            showToast(msg, 'error');
+            return { success: false, message: msg };
+          }
+          if (
+            params.serviceType === 'website_subscription' &&
+            isSupabaseConfigured &&
+            activeCatalog
+          ) {
+            const liteEntry = activeCatalog.find(
+              (entry) =>
+                entry.serviceType === 'website_subscription' &&
+                entry.serviceCode.trim().toLowerCase() === 'website_lite' &&
+                entry.isActive
+            );
+            if (liteEntry?.planTierLabel) {
+              resolvedPlanTier = liteEntry.planTierLabel;
+            }
+          }
+          authoritativeAmount = expectedWebsiteAmount;
+        }
       }
 
       const submitCustomerPhone =
@@ -3119,11 +3197,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       if (isSupabaseConfigured) {
         const { data, error } = await createPaymentRequestInDb({
-          userId: user.id,
+          userId: effectiveUserId,
           storeId: resolvedStoreId,
-          customerName: user.name || 'Merchant',
+          customerName: effectiveUserName,
           customerPhone: submitCustomerPhone,
-          customerEmail: user.email || '',
+          customerEmail: effectiveUserEmail,
           ...params,
           transactionId: canonicalTrx,
           senderNumber: canonicalSender,
@@ -3141,19 +3219,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         const newReq = mapRawPaymentRow(data);
         setPaymentRequests((prev) => [newReq, ...prev.filter((r) => r.id !== newReq.id)]);
-        showToast('Payment submission received! Pending manual admin verification.', 'success');
-        return { success: true, message: 'Payment submitted successfully', request: newReq };
+        showToast('Payment submitted and awaiting manual admin verification.', 'success');
+        return { success: true, message: 'Payment submitted and awaiting admin verification.', request: newReq };
       }
 
       // Local state fallback (only when Supabase credentials are completely unconfigured)
       const now = new Date().toISOString();
       const fallbackReq: PaymentRequest = {
         id: `req-${Date.now()}`,
-        userId: user.id,
+        userId: effectiveUserId,
         storeId: resolvedStoreId || activeStoreId || undefined,
-        customerName: user.name || 'Merchant',
+        customerName: effectiveUserName,
         customerPhone: submitCustomerPhone,
-        customerEmail: user.email || '',
+        customerEmail: effectiveUserEmail,
         ...params,
         transactionId: canonicalTrx,
         senderNumber: canonicalSender,
@@ -3307,13 +3385,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                   error: new Error('Cannot approve payment for a cancelled website subscription.'),
                 };
               }
-              const existingMs =
-                site.paymentStatus === 'paid' && site.nextBillingDate
-                  ? new Date(site.nextBillingDate).getTime()
-                  : 0;
+              const nowMs = Date.now();
+              const nowIso = new Date(nowMs).toISOString();
+              const existingExpiryMs =
+                site.paymentStatus === 'paid' ? getWebsiteSubscriptionExpiryMs(site) : null;
               const baseMs =
-                Number.isFinite(existingMs) && existingMs > Date.now() ? existingMs : Date.now();
-              const nextPeriodMs = baseMs + 30 * 24 * 60 * 60 * 1000;
+                existingExpiryMs !== null && existingExpiryMs > nowMs ? existingExpiryMs : nowMs;
+              const nextPeriodMs = baseMs + THIRTY_DAYS_MS;
               const nextGraceMs = baseMs + 37 * 24 * 60 * 60 * 1000;
               const canAutoPublish =
                 currentReq.serviceType === 'website_subscription' &&
@@ -3338,6 +3416,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                       paymentStatus: 'paid',
                       deploymentStatus: canAutoPublish ? 'live' : w.deploymentStatus,
                       sslStatus: canAutoPublish ? 'active' : w.sslStatus,
+                      subscribedAt: w.subscribedAt || nowIso,
+                      currentPeriodEnd: new Date(nextPeriodMs).toISOString(),
                       nextBillingDate: new Date(nextPeriodMs).toISOString().split('T')[0],
                       gracePeriodEndsAt: new Date(nextGraceMs).toISOString(),
                     }
@@ -3387,13 +3467,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               };
             }
             if (
-              site.subscriptionStatus !== 'active' &&
-              site.subscriptionStatus !== 'grace_period'
+              site.subscriptionStatus !== 'active' ||
+              isWebsiteSubscriptionExpired(site)
             ) {
               return {
                 success: false,
-                message: 'Cannot publish website while subscription is inactive or suspended.',
-                error: new Error('Cannot publish website while subscription is inactive or suspended.'),
+                message: 'Cannot publish website while 30-day subscription is expired, inactive, or suspended.',
+                error: new Error('Cannot publish website while 30-day subscription is expired, inactive, or suspended.'),
               };
             }
             const subValidation = validateSubdomainFormat(site.subdomain);

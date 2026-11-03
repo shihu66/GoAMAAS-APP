@@ -5,12 +5,10 @@ import {
   CreditCard,
   CheckCircle2,
   AlertTriangle,
-  Download,
   Clock,
   Sparkles,
   ArrowRight,
   Shield,
-  X,
   Globe,
   Globe2,
   Bot,
@@ -20,6 +18,7 @@ import {
   XCircle,
   Truck,
   ExternalLink,
+  FileText,
 } from 'lucide-react';
 import {
   FREE_MERCHANT_DASHBOARD_PLAN,
@@ -30,11 +29,20 @@ import {
   resolveCatalogPlanState,
 } from '../../data/pricingConfig';
 import { isSupabaseConfigured } from '../../lib/supabase';
-import { getPublicWebsiteHref, isWebsiteTrulyLive } from '../../lib/paymentWorkflow';
+import {
+  buildVerifiedPaymentReceipt,
+  formatSubscriptionDateDisplay,
+  getPublicWebsiteHref,
+  isWebsitePaymentService,
+  isWebsiteTrulyLive,
+  resolveClientWebsiteLifecycleState,
+} from '../../lib/paymentWorkflow';
+import { PaymentRequest, SubscribedWebsite } from '../../types';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { TrialStatusBadge } from '../../components/ui/TrialStatusBadge';
 import { ManualPaymentModal } from '../../components/payment/ManualPaymentModal';
+import { PaymentReceiptModal } from '../../components/payment/PaymentReceiptModal';
 
 export const BillingPage: React.FC = () => {
   const navigate = useNavigate();
@@ -67,23 +75,14 @@ export const BillingPage: React.FC = () => {
 
   const [activeTab, setActiveTab] = useState<'dashboard' | 'automations' | 'websites' | 'webSubscription'>('dashboard');
 
-  const myWebsite = subscribedWebsites.find((w) => w.storeId === activeStore?.id) || subscribedWebsites[0];
   const myPaymentRequests = paymentRequests
     .filter((r) => !user?.id || r.userId === user.id)
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  const myWebsitePaymentRequests = myWebsite
-    ? myPaymentRequests.filter(
-        (r) =>
-          (r.serviceType === 'website_subscription' || r.serviceType === 'website_package') &&
-          r.serviceId.trim().toLowerCase() === myWebsite.id.trim().toLowerCase()
-      )
-    : [];
-  const hasPendingMyWebsitePayment = myWebsitePaymentRequests.some((r) => r.status === 'pending');
-  const latestMyWebsitePayment = myWebsitePaymentRequests[0];
 
-  // Confirmation dialogs & verified payment modal payload
+  // Confirmation dialogs, receipt viewer & verified payment modal payload
   const [selectedAutoPackage, setSelectedAutoPackage] = useState<AutomationPackageConfig | null>(null);
   const [isCancelDialogOpen, setIsCancelDialogOpen] = useState(false);
+  const [receiptTargetRequest, setReceiptTargetRequest] = useState<PaymentRequest | null>(null);
   const [checkoutPayload, setCheckoutPayload] = useState<{
     serviceType: 'website_subscription' | 'website_package' | 'dashboard_plan' | 'ai_automation';
     serviceId: string;
@@ -91,7 +90,24 @@ export const BillingPage: React.FC = () => {
     planTier: string;
     amount: number;
     allowWebsiteSelection?: boolean;
+    targetWebsite?: SubscribedWebsite | null;
   } | null>(null);
+
+  const findExactUserWebsiteForRequest = (req: PaymentRequest): SubscribedWebsite | null => {
+    if (!isWebsitePaymentService(req.serviceType)) return null;
+    const cleanId = (req.serviceId || '').trim().toLowerCase();
+    if (!cleanId) return null;
+    return subscribedWebsites.find((w) => w.id.trim().toLowerCase() === cleanId) || null;
+  };
+
+  const verifiedReceiptEntries = myPaymentRequests
+    .filter((r) => r.status === 'approved')
+    .map((req) => {
+      const site = findExactUserWebsiteForRequest(req);
+      const receipt = buildVerifiedPaymentReceipt(req, site);
+      return receipt ? { req, site, receipt } : null;
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
 
   const isCatalogPending = isSupabaseConfigured && isPricingCatalogLoading && !isPricingCatalogLoaded;
 
@@ -151,10 +167,6 @@ export const BillingPage: React.FC = () => {
       planTier: autoState.planTierLabel,
       amount: autoState.priceBdt,
     });
-  };
-
-  const handleDownloadInvoice = (invNum: string) => {
-    showToast(`Generating tax invoice document for ${invNum}...`, 'info');
   };
 
   return (
@@ -660,137 +672,203 @@ export const BillingPage: React.FC = () => {
       {/* TAB 4: Website Subscription (AMAAS Website Lite - ৳600/month) */}
       {activeTab === 'webSubscription' && (
         <div className="space-y-6">
-          {/* Active Subscribed Website Status if user has one */}
-          {myWebsite ? (
-            <div className="p-6 rounded-2xl bg-gradient-to-r from-blue-950 via-slate-900 to-slate-900 border-2 border-blue-600 text-white shadow-xl space-y-4">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span
-                      className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                        myWebsite.paymentStatus === 'paid'
-                          ? 'bg-blue-500/20 text-blue-300 border border-blue-400/30'
-                          : latestMyWebsitePayment?.status === 'rejected'
-                          ? 'bg-rose-500/20 text-rose-300 border border-rose-400/30'
-                          : 'bg-amber-500/20 text-amber-300 border border-amber-400/30'
-                      }`}
-                    >
-                      {myWebsite.paymentStatus === 'paid'
-                        ? 'Active Website Subscription'
-                        : hasPendingMyWebsitePayment
-                        ? 'Pending Payment Verification'
-                        : latestMyWebsitePayment?.status === 'rejected'
-                        ? 'Payment Rejected · Resubmit'
-                        : 'Awaiting Subscription Payment'}
-                    </span>
-                    <span
-                      className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                        isWebsiteTrulyLive(myWebsite)
-                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                          : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                      }`}
-                    >
-                      {isWebsiteTrulyLive(myWebsite)
-                        ? 'Live'
-                        : myWebsite.paymentStatus === 'paid'
-                        ? 'Paid · Unpublished'
-                        : hasPendingMyWebsitePayment
-                        ? 'Pending Verification'
-                        : 'Offline Draft'}
-                    </span>
-                  </div>
-                  <h3 className="text-xl font-bold text-white mt-1">
-                    {myWebsite.businessName} Website
-                  </h3>
-                  <div className="flex items-center gap-2 text-xs text-blue-300 font-mono mt-1">
-                    <Globe className="w-3.5 h-3.5" />
-                    <span className="font-semibold">{myWebsite.fullDomainUrl}</span>
-                    <span className="text-slate-400 font-sans text-[11px]">(Subdomain under AMAAS)</span>
-                  </div>
-                </div>
+          {/* Client Websites Subscription Lifecycle Cards */}
+          {subscribedWebsites.length > 0 ? (
+            <div className="space-y-4">
+              {subscribedWebsites.map((site) => {
+                const siteRequests = myPaymentRequests.filter(
+                  (r) =>
+                    isWebsitePaymentService(r.serviceType) &&
+                    r.serviceId.trim().toLowerCase() === site.id.trim().toLowerCase()
+                );
+                const lifecycle = resolveClientWebsiteLifecycleState(site, siteRequests);
+                const latestApprovedSitePayment = siteRequests.find((r) => r.status === 'approved');
+                const siteTrulyLive = isWebsiteTrulyLive(site);
+                const payableFee = site.monthlyFee || websiteSubscriptionPlan.priceMonthly;
 
-                <div className="text-right sm:border-l sm:border-slate-800 sm:pl-6">
-                  <div className="text-2xl font-black font-mono text-white tabular-nums">
-                    ৳{myWebsite.monthlyFee.toLocaleString()}<span className="text-xs text-slate-400 font-sans font-normal"> / month</span>
-                  </div>
-                  <div className="text-[11px] text-slate-300 mt-0.5">
-                    Next Renewal: <strong className="text-white font-mono">{myWebsite.nextBillingDate}</strong>
-                  </div>
-                </div>
-              </div>
-
-              {/* Resource consumption summary */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-3 border-t border-slate-800 text-xs">
-                <div>
-                  <span className="text-slate-400 text-[10px] block">Pages Active</span>
-                  <span className="font-bold text-white font-mono">{myWebsite.resourceUsage.pagesCount} / {myWebsite.resourceUsage.pagesLimit}</span>
-                </div>
-                <div>
-                  <span className="text-slate-400 text-[10px] block">Storage Consumption</span>
-                  <span className="font-bold text-white font-mono">{myWebsite.resourceUsage.storageUsedMb} MB / {myWebsite.resourceUsage.storageLimitMb} MB</span>
-                </div>
-                <div>
-                  <span className="text-slate-400 text-[10px] block">Bandwidth Used</span>
-                  <span className="font-bold text-white font-mono">{myWebsite.resourceUsage.bandwidthUsedGb} GB / {myWebsite.resourceUsage.bandwidthLimitGb} GB</span>
-                </div>
-                <div>
-                  <span className="text-slate-400 text-[10px] block">Updates Used (This Month)</span>
-                  <span className="font-bold text-white font-mono">{myWebsite.resourceUsage.monthlyUpdatesUsed} / {myWebsite.resourceUsage.monthlyUpdatesLimit}</span>
-                </div>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() =>
-                    setCheckoutPayload({
-                      serviceType: 'website_subscription',
-                      serviceId: myWebsite.id,
-                      serviceName: `GoAMAAS Website (${myWebsite.fullDomainUrl})`,
-                      planTier: myWebsite.planName || 'GoAMAAS Website',
-                      amount: myWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly,
-                      allowWebsiteSelection: subscribedWebsites.length > 1,
-                    })
-                  }
-                  className="min-h-[44px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
-                >
-                  <CreditCard className="w-3.5 h-3.5" />
-                  <span>
-                    {myWebsite.paymentStatus === 'paid'
-                      ? `Renew +30 Days (৳${(myWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly).toLocaleString()})`
-                      : hasPendingMyWebsitePayment
-                      ? 'View Pending Verification'
-                      : `Submit Payment (৳${(myWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly).toLocaleString()})`}
-                  </span>
-                </button>
-                {isWebsiteTrulyLive(myWebsite) && (
-                  <a
-                    href={getPublicWebsiteHref(myWebsite)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="min-h-[44px] px-4 py-2 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/40 text-emerald-200 font-bold text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+                return (
+                  <div
+                    key={site.id}
+                    className="p-6 rounded-2xl bg-gradient-to-r from-blue-950 via-slate-900 to-slate-900 border-2 border-blue-600 text-white shadow-xl space-y-4"
                   >
-                    <ExternalLink className="w-3.5 h-3.5" />
-                    <span>Open Live Website</span>
-                  </a>
-                )}
-                <button
-                  type="button"
-                  onClick={() => navigate('/dashboard/subscribed-website')}
-                  className="min-h-[44px] px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
-                >
-                  <Globe className="w-3.5 h-3.5" />
-                  <span>Manage Website &amp; Live Preview</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => navigate('/create-website')}
-                  className="min-h-[44px] px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs flex items-center gap-1.5 transition-colors border border-slate-700 cursor-pointer"
-                >
-                  <Sparkles className="w-3.5 h-3.5 text-amber-300" />
-                  <span>Build Another Website (৳{websiteSubscriptionPlan.priceMonthly.toLocaleString()}/mo)</span>
-                </button>
-              </div>
+                    <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+                      <div className="space-y-1.5">
+                        <div className="flex flex-wrap items-center gap-2 text-[11px] font-bold">
+                          <span
+                            className={`px-2.5 py-0.5 rounded-lg border ${
+                              lifecycle.stage === 'live'
+                                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/40'
+                                : lifecycle.stage === 'payment_rejected' ||
+                                  lifecycle.stage === 'expired'
+                                ? 'bg-rose-500/20 text-rose-300 border-rose-400/40'
+                                : 'bg-amber-500/20 text-amber-300 border-amber-400/40'
+                            }`}
+                          >
+                            {lifecycle.label}
+                          </span>
+                          <span className="text-slate-300 font-semibold">
+                            Payment: {lifecycle.paymentStatusLabel}
+                          </span>
+                          <span className="text-slate-600">&middot;</span>
+                          <span className="text-slate-300 font-semibold">
+                            Publication: {lifecycle.publicationStatusLabel}
+                          </span>
+                        </div>
+
+                        <h3 className="text-xl font-bold text-white">{site.businessName}</h3>
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-blue-300 font-mono">
+                          <Globe className="w-3.5 h-3.5" />
+                          <span className="font-semibold">https://{site.fullDomainUrl}</span>
+                          <span className="text-slate-400 font-sans text-[11px]">
+                            (Website ID: {site.id.slice(0, 8)}...)
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-300 leading-relaxed max-w-2xl">
+                          {lifecycle.description}
+                        </p>
+                      </div>
+
+                      <div className="text-left sm:text-right sm:border-l sm:border-slate-800 sm:pl-6 shrink-0 space-y-1">
+                        <div className="text-2xl font-black font-mono text-white tabular-nums">
+                          ৳{payableFee.toLocaleString()}
+                          <span className="text-xs text-slate-400 font-sans font-normal"> / 30 days</span>
+                        </div>
+                        <div className="text-[11px] text-slate-300">
+                          Start:{' '}
+                          <strong className="text-white font-mono">
+                            {formatSubscriptionDateDisplay(lifecycle.subscriptionStartIso)}
+                          </strong>
+                        </div>
+                        <div className="text-[11px] text-slate-300">
+                          {lifecycle.isExpired ? 'Expired On:' : '30-Day Expiry:'}{' '}
+                          <strong
+                            className={`font-mono ${
+                              lifecycle.isExpired ? 'text-rose-300' : 'text-emerald-300'
+                            }`}
+                          >
+                            {formatSubscriptionDateDisplay(lifecycle.subscriptionExpiryIso)}
+                          </strong>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Resource consumption summary */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-3 border-t border-slate-800 text-xs">
+                      <div>
+                        <span className="text-slate-400 text-[10px] block">Pages Active</span>
+                        <span className="font-bold text-white font-mono">
+                          {site.resourceUsage.pagesCount} / {site.resourceUsage.pagesLimit}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 text-[10px] block">Storage Consumption</span>
+                        <span className="font-bold text-white font-mono">
+                          {site.resourceUsage.storageUsedMb} MB / {site.resourceUsage.storageLimitMb} MB
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 text-[10px] block">Bandwidth Used</span>
+                        <span className="font-bold text-white font-mono">
+                          {site.resourceUsage.bandwidthUsedGb} GB / {site.resourceUsage.bandwidthLimitGb} GB
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 text-[10px] block">Updates Used (This Cycle)</span>
+                        <span className="font-bold text-white font-mono">
+                          {site.resourceUsage.monthlyUpdatesUsed} / {site.resourceUsage.monthlyUpdatesLimit}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 pt-2">
+                      {!lifecycle.pendingRequest ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setCheckoutPayload({
+                              serviceType: 'website_subscription',
+                              serviceId: site.id,
+                              serviceName: `GoAMAAS Website (${site.fullDomainUrl})`,
+                              planTier: site.planName || 'GoAMAAS Website',
+                              amount: payableFee,
+                              allowWebsiteSelection: false,
+                              targetWebsite: site,
+                            })
+                          }
+                          className="min-h-[44px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
+                        >
+                          <CreditCard className="w-3.5 h-3.5" />
+                          <span>
+                            {lifecycle.isExpired
+                              ? `Renew to Publish +30 Days (৳${payableFee.toLocaleString()})`
+                              : site.paymentStatus === 'paid'
+                              ? `Extend +30 Days (৳${payableFee.toLocaleString()})`
+                              : lifecycle.stage === 'payment_rejected'
+                              ? `Resubmit Payment (৳${payableFee.toLocaleString()})`
+                              : `Submit Payment (৳${payableFee.toLocaleString()})`}
+                          </span>
+                        </button>
+                      ) : (
+                        <span className="min-h-[44px] px-4 py-2 rounded-xl bg-amber-500/20 border border-amber-400/40 text-amber-200 font-bold text-xs inline-flex items-center gap-1.5">
+                          <Clock className="w-3.5 h-3.5" />
+                          <span>
+                            {lifecycle.stage === 'renewal_pending'
+                              ? 'Renewal Payment Under Verification'
+                              : 'Payment Under Admin Verification'}
+                          </span>
+                        </span>
+                      )}
+
+                      {latestApprovedSitePayment && (
+                        <button
+                          type="button"
+                          onClick={() => setReceiptTargetRequest(latestApprovedSitePayment)}
+                          className="min-h-[44px] px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+                        >
+                          <FileText className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>View Official Receipt</span>
+                        </button>
+                      )}
+
+                      {siteTrulyLive && (
+                        <a
+                          href={getPublicWebsiteHref(site)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="min-h-[44px] px-4 py-2 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/40 text-emerald-200 font-bold text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                          <span>Open Live Website</span>
+                        </a>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => navigate('/dashboard/subscribed-website')}
+                        className="min-h-[44px] px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
+                      >
+                        <Globe className="w-3.5 h-3.5" />
+                        <span>
+                          {lifecycle.isExpired
+                            ? 'Edit Saved Website & Products'
+                            : 'Manage Website & Live Preview'}
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => navigate('/create-website')}
+                        className="min-h-[44px] px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs flex items-center gap-1.5 transition-colors border border-slate-700 cursor-pointer"
+                      >
+                        <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                        <span>
+                          Build Another Website (৳{websiteSubscriptionPlan.priceMonthly.toLocaleString()}/mo)
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           ) : null}
 
@@ -976,12 +1054,13 @@ export const BillingPage: React.FC = () => {
 
           <div className="divide-y divide-slate-100 dark:divide-slate-800">
             {myPaymentRequests.map((req) => {
+              const matchedSite = findExactUserWebsiteForRequest(req);
               const statusLabel =
                 req.status === 'pending'
-                  ? 'Pending Verification'
+                  ? 'Payment Under Admin Verification'
                   : req.status === 'approved'
-                  ? 'Approved'
-                  : 'Rejected';
+                  ? 'PAID / APPROVED'
+                  : 'Payment Rejected — Resubmit Required';
               const hasActivePendingForSameService = myPaymentRequests.some(
                 (other) =>
                   other.id !== req.id &&
@@ -1000,6 +1079,11 @@ export const BillingPage: React.FC = () => {
                       <span className="font-bold text-slate-900 dark:text-white">
                         {req.serviceName}
                       </span>
+                      {matchedSite && (
+                        <span className="font-mono text-[11px] text-blue-600 dark:text-blue-400">
+                          ({matchedSite.fullDomainUrl})
+                        </span>
+                      )}
                       <span
                         className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold ${
                           req.status === 'approved'
@@ -1042,10 +1126,21 @@ export const BillingPage: React.FC = () => {
                     )}
                   </div>
 
-                  <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0">
+                  <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2.5 shrink-0">
                     <span className="font-mono font-bold text-sm text-slate-900 dark:text-white tabular-nums">
                       ৳{req.amount.toLocaleString()}
                     </span>
+
+                    {req.status === 'approved' && (
+                      <button
+                        type="button"
+                        onClick={() => setReceiptTargetRequest(req)}
+                        className="min-h-[40px] px-3.5 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-900 dark:text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                      >
+                        <FileText className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                        <span>View / Print Receipt</span>
+                      </button>
+                    )}
 
                     {req.status === 'rejected' &&
                       !hasActivePendingForSameService &&
@@ -1059,6 +1154,7 @@ export const BillingPage: React.FC = () => {
                               serviceName: req.serviceName,
                               planTier: req.planTier,
                               amount: req.amount,
+                              targetWebsite: matchedSite,
                             })
                           }
                           className="min-h-[40px] px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs cursor-pointer whitespace-nowrap"
@@ -1074,73 +1170,97 @@ export const BillingPage: React.FC = () => {
         </div>
       )}
 
-      {/* Billing Invoices List */}
+      {/* Official Verified Payment Receipts (strictly approved payments only) */}
       <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
-        <div className="p-4 border-b border-slate-200 dark:border-slate-800">
-          <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-            Billing History &amp; Tax Receipts
-          </h3>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Past monthly subscription statement receipts
-          </p>
+        <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+              Official Payment Receipts
+            </h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Verified GoAMAAS / AMAAS Technologies receipts issued after administrator payment approval
+            </p>
+          </div>
+          <span className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-400">
+            {verifiedReceiptEntries.length} verified receipt{verifiedReceiptEntries.length === 1 ? '' : 's'}
+          </span>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 font-semibold">
-              <tr>
-                <th className="py-3 px-4">Invoice ID</th>
-                <th className="py-3 px-4">Billing Date</th>
-                <th className="py-3 px-4">Plan</th>
-                <th className="py-3 px-4 text-right">Amount (৳)</th>
-                <th className="py-3 px-4">Status</th>
-                <th className="py-3 px-4 text-right">Receipt</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-mono">
-              {invoices.map((inv) => (
-                <tr key={inv.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
-                  <td className="py-3.5 px-4 font-semibold text-blue-600 dark:text-blue-400">
-                    {inv.invoiceNumber}
-                  </td>
-                  <td className="py-3.5 px-4 text-slate-500">{inv.date}</td>
-                  <td className="py-3.5 px-4 font-sans text-slate-900 dark:text-white font-medium">
-                    {inv.planName}
-                  </td>
-                  <td className="py-3.5 px-4 text-right font-bold tabular-nums">
-                    ৳{inv.amount.toLocaleString()}
-                  </td>
-                  <td className="py-3.5 px-4 font-sans">
-                    <span
-                      className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold ${
-                        inv.status === 'Paid'
-                          ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
-                          : inv.status === 'Pending'
-                          ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
-                          : 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300'
-                      }`}
-                    >
-                      {inv.status === 'Paid'
-                        ? 'Approved'
-                        : inv.status === 'Pending'
-                        ? 'Pending Verification'
-                        : 'Rejected'}
-                    </span>
-                  </td>
-                  <td className="py-3.5 px-4 text-right font-sans">
-                    <button
-                      onClick={() => handleDownloadInvoice(inv.invoiceNumber)}
-                      className="p-1 text-slate-500 hover:text-blue-600 transition-colors"
-                      title="Download Invoice PDF"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                    </button>
-                  </td>
+        {verifiedReceiptEntries.length === 0 ? (
+          <div className="p-8 text-center space-y-1.5 text-xs text-slate-500 dark:text-slate-400">
+            <FileText className="w-6 h-6 text-slate-400 mx-auto" />
+            <p className="font-semibold text-slate-900 dark:text-white">
+              No verified payment receipts yet
+            </p>
+            <p>
+              Official printable receipts are generated automatically once an administrator verifies and approves a submitted payment.
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 font-semibold">
+                <tr>
+                  <th className="py-3 px-4">Receipt No.</th>
+                  <th className="py-3 px-4">Approved Date</th>
+                  <th className="py-3 px-4">Service / Subdomain</th>
+                  <th className="py-3 px-4">30-Day Period</th>
+                  <th className="py-3 px-4 text-right">Amount (৳)</th>
+                  <th className="py-3 px-4">Status</th>
+                  <th className="py-3 px-4 text-right">Receipt</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-mono">
+                {verifiedReceiptEntries.map(({ req, receipt }) => (
+                  <tr
+                    key={req.id}
+                    className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors"
+                  >
+                    <td className="py-3.5 px-4 font-semibold text-blue-600 dark:text-blue-400 whitespace-nowrap">
+                      {receipt.receiptNumber}
+                    </td>
+                    <td className="py-3.5 px-4 text-slate-500 whitespace-nowrap">
+                      {formatSubscriptionDateDisplay(receipt.approvedAtIso)}
+                    </td>
+                    <td className="py-3.5 px-4 font-sans">
+                      <span className="text-slate-900 dark:text-white font-semibold block">
+                        {receipt.websiteName || receipt.planName}
+                      </span>
+                      {receipt.websiteUrl && (
+                        <span className="font-mono text-[11px] text-blue-600 dark:text-blue-400">
+                          {receipt.websiteUrl}
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-3.5 px-4 text-[11px] text-slate-500 whitespace-nowrap">
+                      {receipt.subscriptionStartIso && receipt.subscriptionExpiryIso
+                        ? `${formatSubscriptionDateDisplay(receipt.subscriptionStartIso)} → ${formatSubscriptionDateDisplay(receipt.subscriptionExpiryIso)}`
+                        : '—'}
+                    </td>
+                    <td className="py-3.5 px-4 text-right font-bold tabular-nums text-slate-900 dark:text-white">
+                      ৳{receipt.amountBdt.toLocaleString()}
+                    </td>
+                    <td className="py-3.5 px-4 font-sans">
+                      <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                        {receipt.statusLabel}
+                      </span>
+                    </td>
+                    <td className="py-3.5 px-4 text-right font-sans">
+                      <button
+                        type="button"
+                        onClick={() => setReceiptTargetRequest(req)}
+                        className="px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-blue-600 hover:text-white text-slate-800 dark:text-slate-200 font-semibold text-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                      >
+                        <FileText className="w-3.5 h-3.5" />
+                        <span>View / Save PDF</span>
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {/* Confirmation Modal for AI Automation */}
@@ -1217,15 +1337,23 @@ export const BillingPage: React.FC = () => {
           planTier={checkoutPayload.planTier}
           amount={checkoutPayload.amount}
           allowWebsiteSelection={checkoutPayload.allowWebsiteSelection}
+          targetWebsite={checkoutPayload.targetWebsite || null}
           onSuccess={() => {
             showToast(
-              `Payment submitted for ${checkoutPayload.serviceName}! Pending admin verification.`,
+              `Payment submitted for ${checkoutPayload.serviceName}! Awaiting admin verification.`,
               'success'
             );
-            setCheckoutPayload(null);
           }}
         />
       )}
+
+      {/* Official Verified Payment Receipt Modal */}
+      <PaymentReceiptModal
+        isOpen={Boolean(receiptTargetRequest)}
+        onClose={() => setReceiptTargetRequest(null)}
+        request={receiptTargetRequest}
+        website={receiptTargetRequest ? findExactUserWebsiteForRequest(receiptTargetRequest) : null}
+      />
 
       {/* Cancellation Dialog */}
       <ConfirmDialog

@@ -82,9 +82,11 @@ export default async function handler(req: RequestWithQuery, res: ServerResponse
     ).trim();
     const supabaseAnonKey = (
       process.env.VITE_SUPABASE_ANON_KEY ||
+      process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
       process.env.SUPABASE_ANON_KEY ||
       process.env.SUPABASE_PUBLISHABLE_KEY ||
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
       ''
     ).trim();
 
@@ -143,10 +145,54 @@ export default async function handler(req: RequestWithQuery, res: ServerResponse
     if (rpcResp.ok) {
       const rpcJson = (await rpcResp.json()) as any;
       if (rpcJson && rpcJson.found && rpcJson.site) {
+        const site = rpcJson.site;
+        const subStatus = String(site.subscriptionStatus || site.status || '');
+        const payStatus = String(site.paymentStatus || site.payment_status || '');
+        const depStatus = String(site.deploymentStatus || site.deployment_status || '');
+        const periodEndRaw = site.currentPeriodEnd || site.current_period_end || '';
+        const periodEndMs = periodEndRaw ? Date.parse(String(periodEndRaw)) : NaN;
+        const nowMs = Date.now();
+
+        // Enforce strict 30-day active subscription cutoff:
+        // Reject grace_period, past_due, suspended, cancelled, draft, unpaid, non-live, or timestamp-expired sites.
+        const isExpiredOrGrace =
+          subStatus === 'grace_period' ||
+          subStatus === 'past_due' ||
+          (Number.isFinite(periodEndMs) && periodEndMs <= nowMs);
+
+        if (
+          isExpiredOrGrace ||
+          subStatus !== 'active' ||
+          (payStatus !== '' && payStatus !== 'paid') ||
+          depStatus !== 'live'
+        ) {
+          res.statusCode = 404;
+          res.setHeader('Content-Type', 'application/json');
+          res.setHeader('Cache-Control', 'private, no-cache, no-store, max-age=0, must-revalidate');
+          res.end(
+            JSON.stringify({
+              found: false,
+              expired: isExpiredOrGrace,
+              subdomain,
+              message: isExpiredOrGrace
+                ? 'This website is currently unavailable because its 30-day subscription has expired.'
+                : 'Website not found or is currently not published.',
+            })
+          );
+          return;
+        }
+
+        const remainingSeconds = Number.isFinite(periodEndMs)
+          ? Math.max(0, Math.min(5, Math.floor((periodEndMs - nowMs) / 1000)))
+          : 5;
+
         res.statusCode = 200;
         res.setHeader('Content-Type', 'application/json');
-        res.setHeader('Cache-Control', 'public, s-maxage=15, stale-while-revalidate=60');
-        res.end(JSON.stringify({ found: true, subdomain, site: rpcJson.site }));
+        res.setHeader(
+          'Cache-Control',
+          `public, max-age=0, s-maxage=${remainingSeconds}, must-revalidate`
+        );
+        res.end(JSON.stringify({ found: true, subdomain, site }));
         return;
       }
       res.statusCode = 404;

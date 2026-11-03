@@ -1592,6 +1592,7 @@ export const CreateWebsitePage: React.FC = () => {
         serviceName={`${effectivePlanName} (${effectiveFullDomain})`}
         planTier={effectivePlanName}
         amount={effectiveMonthlyFee}
+        targetWebsite={persistedSite || null}
         onSuccess={() => {
           showToast(cw.step5.paymentSubmittedToast, 'success');
           navigate('/dashboard/subscribed-website');

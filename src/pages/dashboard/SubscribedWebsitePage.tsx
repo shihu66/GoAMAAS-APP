@@ -5,6 +5,7 @@ import {
   SubscribedWebsite,
   BusinessNiche,
   Product,
+  PaymentRequest,
   WebsiteSectionConfig,
   WebsiteSectionType,
   WebsiteSectionItem,
@@ -16,6 +17,7 @@ import { WebsitePreviewRenderer } from '../../components/website/WebsitePreviewR
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { ManualPaymentModal } from '../../components/payment/ManualPaymentModal';
+import { PaymentReceiptModal } from '../../components/payment/PaymentReceiptModal';
 import { CATEGORY_SPECS, THEME_PALETTES } from '../../data/websiteBuilderConfig';
 import {
   Globe,
@@ -56,8 +58,15 @@ import {
   CheckCircle2,
   XCircle,
   RefreshCw,
+  Receipt,
 } from 'lucide-react';
-import { getPublicWebsiteHref, isWebsiteTrulyLive } from '../../lib/paymentWorkflow';
+import {
+  formatSubscriptionDateDisplay,
+  getPublicWebsiteHref,
+  isWebsiteSubscriptionExpired,
+  isWebsiteTrulyLive,
+  resolveClientWebsiteLifecycleState,
+} from '../../lib/paymentWorkflow';
 
 function createInitialSections(site: SubscribedWebsite, draft?: SubscribedWebsite['draftConfig']): WebsiteSectionConfig[] {
   const sourceSections = draft?.sections ?? site.sections;
@@ -190,6 +199,7 @@ export const SubscribedWebsitePage: React.FC = () => {
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
   const [isUnpublishDialogOpen, setIsUnpublishDialogOpen] = useState(false);
   const [isCancelSubDialogOpen, setIsCancelSubDialogOpen] = useState(false);
+  const [receiptTargetRequest, setReceiptTargetRequest] = useState<PaymentRequest | null>(null);
 
   // Product Add/Edit & Delete Confirmation State
   const [isProductModalOpen, setIsProductModalOpen] = useState(false);
@@ -1029,12 +1039,14 @@ export const SubscribedWebsitePage: React.FC = () => {
     );
   }
 
-  const isGracePeriod = activeWebsite.subscriptionStatus === 'grace_period';
+  const isExpired = isWebsiteSubscriptionExpired(activeWebsite);
   const isSuspended = activeWebsite.subscriptionStatus === 'suspended';
   const isCancelled = activeWebsite.subscriptionStatus === 'cancelled';
-  const isPaid = activeWebsite.paymentStatus === 'paid';
+  const isPaid = activeWebsite.paymentStatus === 'paid' && !isExpired;
   const isPublishEligible =
-    isPaid && (activeWebsite.subscriptionStatus === 'active' || isGracePeriod);
+    activeWebsite.paymentStatus === 'paid' &&
+    activeWebsite.subscriptionStatus === 'active' &&
+    !isExpired;
   const isLive = isWebsiteTrulyLive(activeWebsite);
 
   const websitePaymentRequests = paymentRequests
@@ -1045,8 +1057,12 @@ export const SubscribedWebsitePage: React.FC = () => {
     )
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
+  const approvedWebsitePayments = websitePaymentRequests.filter((r) => r.status === 'approved');
+  const latestApprovedPayment = approvedWebsitePayments[0];
   const latestWebsitePayment = websitePaymentRequests[0];
   const hasPendingWebsitePayment = websitePaymentRequests.some((r) => r.status === 'pending');
+
+  const lifecycleState = resolveClientWebsiteLifecycleState(activeWebsite, paymentRequests);
 
   // Legacy items not yet migrated to DB products
   const dbIdsSet = new Set(websiteDbProducts.map((p) => p.id));
@@ -1059,6 +1075,8 @@ export const SubscribedWebsitePage: React.FC = () => {
         !dbIdsSet.has(item.id) &&
         !dbNamesSet.has((item.name || '').trim().toLowerCase())
     );
+
+  const effectiveFee = activeWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly;
 
   return (
     <div className="space-y-6">
@@ -1075,11 +1093,14 @@ export const SubscribedWebsitePage: React.FC = () => {
               onChange={(e) => setSelectedWebsiteId(e.target.value)}
               className="px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white font-semibold text-xs"
             >
-              {subscribedWebsites.map((site) => (
-                <option key={site.id} value={site.id}>
-                  {site.businessName} — {site.fullDomainUrl} ({site.deploymentStatus})
-                </option>
-              ))}
+              {subscribedWebsites.map((site) => {
+                const siteLifecycle = resolveClientWebsiteLifecycleState(site, paymentRequests);
+                return (
+                  <option key={site.id} value={site.id}>
+                    {site.businessName} — {site.fullDomainUrl} ({siteLifecycle.label})
+                  </option>
+                );
+              })}
             </select>
           ) : (
             <span className="font-semibold text-slate-700 dark:text-slate-300">
@@ -1098,42 +1119,60 @@ export const SubscribedWebsitePage: React.FC = () => {
         </button>
       </div>
 
-      {/* Top Subscription & Domain Header Card */}
-      <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
-          <div className="space-y-2">
-            {/* Clean Metadata Status Line */}
-            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-              <strong className="text-slate-900 dark:text-white font-semibold">
-                GoAMAAS Website (৳{activeWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly}/mo)
-              </strong>
-              <span aria-hidden="true">·</span>
+      {/* Top Subscription, Lifecycle Status & Domain Header Card */}
+      <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-5">
+        <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-5">
+          <div className="space-y-2.5">
+            {/* Primary Lifecycle Badge + Separate Payment & Publication Statuses */}
+            <div className="flex flex-wrap items-center gap-2 text-xs">
               <span
-                className={
-                  isLive
-                    ? 'text-emerald-600 dark:text-emerald-400 font-semibold'
-                    : latestWebsitePayment?.status === 'rejected' && !isPaid
-                    ? 'text-rose-600 dark:text-rose-400 font-semibold'
-                    : 'text-amber-600 dark:text-amber-400 font-semibold'
-                }
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-bold ${
+                  lifecycleState.stage === 'live'
+                    ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
+                    : lifecycleState.stage === 'expired' ||
+                      lifecycleState.stage === 'payment_rejected' ||
+                      lifecycleState.stage === 'suspended'
+                    ? 'bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800'
+                    : lifecycleState.stage === 'payment_pending' ||
+                      lifecycleState.stage === 'renewal_pending'
+                    ? 'bg-amber-50 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800'
+                    : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
+                }`}
               >
-                {isLive
-                  ? 'Live & Public'
-                  : hasPendingWebsitePayment || activeWebsite.paymentStatus === 'pending_review'
-                  ? 'Payment Under Admin Verification'
-                  : latestWebsitePayment?.status === 'rejected' && !isPaid
-                  ? 'Payment Rejected · Resubmit Required'
-                  : isPaid
-                  ? 'Paid · Unpublished Draft'
-                  : `Draft · Awaiting ৳${activeWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly} Payment`}
+                {lifecycleState.stage === 'live' ? (
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                ) : lifecycleState.stage === 'payment_pending' ||
+                  lifecycleState.stage === 'renewal_pending' ? (
+                  <Clock className="w-3.5 h-3.5 shrink-0" />
+                ) : lifecycleState.stage === 'expired' ||
+                  lifecycleState.stage === 'payment_rejected' ? (
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                ) : (
+                  <Globe className="w-3.5 h-3.5 shrink-0" />
+                )}
+                <span>{lifecycleState.label}</span>
               </span>
-              <span aria-hidden="true">·</span>
-              <span>
-                Subscription: <strong className="capitalize">{activeWebsite.subscriptionStatus.replace('_', ' ')}</strong>
+
+              <span className="text-slate-500 dark:text-slate-400">
+                Payment:{' '}
+                <strong className="text-slate-800 dark:text-slate-200">
+                  {lifecycleState.paymentStatusLabel}
+                </strong>
               </span>
-              <span aria-hidden="true">·</span>
-              <span className="font-mono">
-                Renews: {activeWebsite.nextBillingDate}
+              <span aria-hidden="true" className="text-slate-300 dark:text-slate-700">
+                |
+              </span>
+              <span className="text-slate-500 dark:text-slate-400">
+                Publication:{' '}
+                <strong className="text-slate-800 dark:text-slate-200">
+                  {lifecycleState.publicationStatusLabel}
+                </strong>
+              </span>
+              <span aria-hidden="true" className="text-slate-300 dark:text-slate-700">
+                |
+              </span>
+              <span className="text-slate-500 dark:text-slate-400 font-mono tabular-nums">
+                ৳{effectiveFee}/30 days
               </span>
             </div>
 
@@ -1144,7 +1183,11 @@ export const SubscribedWebsitePage: React.FC = () => {
             {/* Domain & Public Storefront Actions */}
             <div className="flex flex-wrap items-center gap-2 pt-0.5">
               <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs font-mono text-slate-900 dark:text-white font-semibold">
-                <Globe className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                <Globe
+                  className={`w-3.5 h-3.5 shrink-0 ${
+                    isLive ? 'text-emerald-500' : 'text-slate-400'
+                  }`}
+                />
                 <span>https://{activeWebsite.fullDomainUrl}</span>
               </div>
               <button
@@ -1173,22 +1216,35 @@ export const SubscribedWebsitePage: React.FC = () => {
                   <span>Open Live Website</span>
                 </a>
               ) : (
-                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-100 dark:bg-slate-800 text-slate-500">
+                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400">
                   <Ban className="w-3 h-3" />
-                  <span>Offline until published</span>
+                  <span>
+                    {isExpired ? 'Offline — Subscription Expired' : 'Private — Offline until approved'}
+                  </span>
                 </span>
               )}
             </div>
           </div>
 
-          {/* Billing & Lifecycle Actions */}
+          {/* Billing, Receipt & Lifecycle Actions */}
           <div className="flex flex-wrap items-center gap-2">
+            {latestApprovedPayment && (
+              <button
+                type="button"
+                onClick={() => setReceiptTargetRequest(latestApprovedPayment)}
+                className="min-h-[40px] px-3.5 py-2 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-emerald-500 text-slate-800 dark:text-slate-100 font-semibold text-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <Receipt className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                <span>View Receipt</span>
+              </button>
+            )}
+
             {isLive && (
               <button
                 type="button"
                 onClick={() => setIsUnpublishDialogOpen(true)}
                 disabled={isActionLoading}
-                className="px-3.5 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-semibold text-xs transition-colors cursor-pointer"
+                className="min-h-[40px] px-3.5 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-semibold text-xs transition-colors cursor-pointer"
               >
                 Unpublish
               </button>
@@ -1197,69 +1253,112 @@ export const SubscribedWebsitePage: React.FC = () => {
             <button
               type="button"
               onClick={() => setIsRequestModalOpen(true)}
-              className="px-3.5 py-2 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white font-semibold text-xs flex items-center gap-1.5 hover:bg-slate-50 transition-colors cursor-pointer"
+              className="min-h-[40px] px-3.5 py-2 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white font-semibold text-xs flex items-center gap-1.5 hover:bg-slate-50 transition-colors cursor-pointer"
             >
               <FileText className="w-3.5 h-3.5 text-blue-600" />
               <span>Request Team Edit</span>
             </button>
 
-            <button
-              type="button"
-              onClick={() => setIsPaymentModalOpen(true)}
-              className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
-            >
-              <CreditCard className="w-3.5 h-3.5" />
-              <span>
-                {isPaid
-                  ? `Renew +30 Days (৳${activeWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly})`
-                  : hasPendingWebsitePayment
-                  ? 'Payment Pending Verification'
-                  : `Activate Website (৳${activeWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly})`}
-              </span>
-            </button>
+            {!isCancelled && (
+              <button
+                type="button"
+                disabled={hasPendingWebsitePayment}
+                onClick={() => setIsPaymentModalOpen(true)}
+                className={`min-h-[40px] px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed ${
+                  isExpired
+                    ? 'bg-rose-600 hover:bg-rose-500 text-white'
+                    : 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                }`}
+              >
+                <CreditCard className="w-3.5 h-3.5" />
+                <span>
+                  {hasPendingWebsitePayment
+                    ? isExpired
+                      ? 'Renewal Under Verification'
+                      : 'Payment Under Verification'
+                    : isExpired
+                    ? `Renew Website +30 Days (৳${effectiveFee})`
+                    : isPaid
+                    ? `Extend +30 Days (৳${effectiveFee})`
+                    : lifecycleState.stage === 'payment_rejected'
+                    ? `Resubmit Payment (৳${effectiveFee})`
+                    : `Submit Payment to Publish (৳${effectiveFee})`}
+                </span>
+              </button>
+            )}
           </div>
         </div>
 
-        {/* Grace Period orSuspended Banner */}
-        {isGracePeriod && (
-          <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-800 text-amber-950 dark:text-amber-200 text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-            <div className="flex items-start gap-2.5">
-              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-              <div>
-                <strong>Subscription Renewal Due — 7-Day Grace Window Active</strong>
-                <p className="text-[11px] text-amber-800 dark:text-amber-300 mt-0.5">
-                  Your website remains live at <code className="font-mono">{activeWebsite.fullDomainUrl}</code>. Renew for ৳{activeWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly} to add 30 days to your billing period.
-                </p>
-              </div>
+        {/* 30-Day Subscription Period Summary Strip */}
+        {(lifecycleState.subscriptionStartIso || lifecycleState.subscriptionExpiryIso) && (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200/80 dark:border-slate-800 text-xs">
+            <div>
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500 block">
+                Subscription Start Date
+              </span>
+              <span className="font-bold font-mono text-slate-900 dark:text-white mt-0.5 block">
+                {formatSubscriptionDateDisplay(lifecycleState.subscriptionStartIso, true)}
+              </span>
             </div>
-            <button
-              type="button"
-              onClick={() => setIsPaymentModalOpen(true)}
-              className="px-3.5 py-1.5 rounded-lg bg-amber-600 text-white font-bold text-xs shrink-0 hover:bg-amber-500 cursor-pointer"
-            >
-              Renew Now
-            </button>
+            <div>
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500 block">
+                30-Day Expiry Date
+              </span>
+              <span
+                className={`font-bold font-mono mt-0.5 block ${
+                  isExpired
+                    ? 'text-rose-600 dark:text-rose-400'
+                    : 'text-slate-900 dark:text-white'
+                }`}
+              >
+                {formatSubscriptionDateDisplay(lifecycleState.subscriptionExpiryIso, true)}
+              </span>
+            </div>
+            <div>
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500 block">
+                Saved Subdomain & Data
+              </span>
+              <span className="font-semibold text-slate-700 dark:text-slate-300 mt-0.5 block">
+                Preserved under your Google account
+              </span>
+            </div>
           </div>
         )}
 
-        {isSuspended && (
-          <div className="p-4 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-900 dark:text-rose-200 text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+        {/* Expired — Renew to Publish Banner (Issue 7 & 8) */}
+        {isExpired && !isCancelled && (
+          <div className="p-4 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-950 dark:text-rose-100 text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
             <div className="flex items-start gap-2.5">
-              <Clock className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-              <div>
-                <strong>Website Suspended</strong>
-                <p className="text-[11px] mt-0.5">
-                  Public access to <code className="font-mono">{activeWebsite.fullDomainUrl}</code> is paused. Submit your 30-day renewal payment to automatically restore live publishing once verified.
+              <AlertTriangle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <strong className="text-sm block">{lifecycleState.label}</strong>
+                <p className="text-[11px] text-rose-800 dark:text-rose-200/90 leading-relaxed">
+                  {lifecycleState.description}
                 </p>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() => setIsPaymentModalOpen(true)}
-              className="min-h-[44px] px-4 py-2 rounded-lg bg-rose-600 text-white font-bold text-xs shrink-0 hover:bg-rose-500 cursor-pointer"
-            >
-              Submit Renewal Payment
-            </button>
+            {!hasPendingWebsitePayment && (
+              <button
+                type="button"
+                onClick={() => setIsPaymentModalOpen(true)}
+                className="min-h-[42px] px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shrink-0 cursor-pointer whitespace-nowrap"
+              >
+                Renew to Republish (৳{effectiveFee})
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Admin Suspension Banner */}
+        {isSuspended && (
+          <div className="p-4 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-900 dark:text-rose-200 text-xs flex items-start gap-2.5">
+            <Ban className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+            <div>
+              <strong>Website Suspended by Administrator</strong>
+              <p className="text-[11px] mt-0.5">
+                Public access to <code className="font-mono">{activeWebsite.fullDomainUrl}</code> is currently suspended. Your saved website data and products remain intact.
+              </p>
+            </div>
           </div>
         )}
 
@@ -1289,11 +1388,13 @@ export const SubscribedWebsitePage: React.FC = () => {
                 <div className="space-y-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-bold">
-                      Payment Status:{' '}
+                      Latest Payment:{' '}
                       {latestWebsitePayment.status === 'pending'
-                        ? 'Pending Verification'
+                        ? isExpired
+                          ? 'Renewal Pending Admin Verification'
+                          : 'Pending Admin Verification'
                         : latestWebsitePayment.status === 'approved'
-                        ? 'Approved'
+                        ? 'Approved / Paid'
                         : 'Rejected'}
                     </span>
                     <span className="px-2 py-0.5 rounded bg-white/80 dark:bg-slate-900/80 font-mono text-[11px] font-semibold tabular-nums">
@@ -1315,7 +1416,11 @@ export const SubscribedWebsitePage: React.FC = () => {
                       {latestWebsitePayment.senderNumber
                         ? ` from ${latestWebsitePayment.senderNumber}`
                         : ''}
-                      . Your website will become <strong>Active</strong> and <strong>Live</strong> automatically as soon as an administrator verifies this transfer.
+                      . Once an authorized administrator verifies this transfer,{' '}
+                      <code className="font-mono font-semibold">
+                        https://{activeWebsite.fullDomainUrl}
+                      </code>{' '}
+                      will automatically publish live for 30 days.
                     </p>
                   )}
 
@@ -1346,7 +1451,11 @@ export const SubscribedWebsitePage: React.FC = () => {
                         </>
                       ) : isPublishEligible ? (
                         <>
-                          Your payment is verified and subscription is active, but the website is currently unpublished. Click <strong>Publish Website Now</strong> to make it live.
+                          Your payment is verified and 30-day subscription is active, but the website is currently unpublished. Click <strong>Publish Website Now</strong> to make it live.
+                        </>
+                      ) : isExpired ? (
+                        <>
+                          Prior 30-day period completed. Submit a renewal payment above to extend for another 30 days and republish.
                         </>
                       ) : (
                         <>Payment record verified.</>
@@ -1366,7 +1475,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                       void refreshSubscribedWebsites();
                       showToast('Synced latest payment & website status.', 'info');
                     }}
-                    className="min-h-[44px] px-3.5 py-2 rounded-lg bg-white dark:bg-slate-900 border border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-200 font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                    className="min-h-[40px] px-3.5 py-2 rounded-lg bg-white dark:bg-slate-900 border border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-200 font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
                   >
                     <RefreshCw
                       className={`w-3.5 h-3.5 ${
@@ -1381,10 +1490,21 @@ export const SubscribedWebsitePage: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setIsPaymentModalOpen(true)}
-                    className="min-h-[44px] px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                    className="min-h-[40px] px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
                   >
                     <CreditCard className="w-3.5 h-3.5" />
                     <span>Resubmit Payment</span>
+                  </button>
+                )}
+
+                {latestWebsitePayment.status === 'approved' && (
+                  <button
+                    type="button"
+                    onClick={() => setReceiptTargetRequest(latestWebsitePayment)}
+                    className="min-h-[40px] px-3.5 py-2 rounded-lg bg-white dark:bg-slate-900 border border-emerald-300 dark:border-emerald-700 text-emerald-800 dark:text-emerald-200 font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <Receipt className="w-3.5 h-3.5" />
+                    <span>Receipt</span>
                   </button>
                 )}
 
@@ -1403,7 +1523,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                         setIsActionLoading(false);
                       }
                     }}
-                    className="min-h-[44px] px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                    className="min-h-[40px] px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
                   >
                     {isActionLoading ? (
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -1414,6 +1534,90 @@ export const SubscribedWebsitePage: React.FC = () => {
                   </button>
                 )}
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Website Payment & Verified Receipt History (Preserves Initial + All Renewal Receipts) */}
+        {websitePaymentRequests.length > 0 && (
+          <div className="pt-2 border-t border-slate-100 dark:border-slate-800 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                Website Payment &amp; Receipt History ({websitePaymentRequests.length})
+              </span>
+              <Link
+                to="/dashboard/billing"
+                className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline"
+              >
+                Full Billing History
+              </Link>
+            </div>
+            <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 dark:bg-slate-800/60 text-[11px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                  <tr>
+                    <th className="px-3.5 py-2 font-semibold">Submitted</th>
+                    <th className="px-3.5 py-2 font-semibold">Method &amp; TrxID</th>
+                    <th className="px-3.5 py-2 font-semibold">Amount</th>
+                    <th className="px-3.5 py-2 font-semibold">Status</th>
+                    <th className="px-3.5 py-2 font-semibold text-right">Receipt</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {websitePaymentRequests.map((reqItem) => (
+                    <tr key={reqItem.id} className="bg-white dark:bg-slate-900">
+                      <td className="px-3.5 py-2.5 font-mono text-[11px] text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                        {formatSubscriptionDateDisplay(reqItem.createdAt, true)}
+                      </td>
+                      <td className="px-3.5 py-2.5">
+                        <span className="font-semibold text-slate-900 dark:text-white">
+                          {reqItem.paymentMethod}
+                        </span>
+                        <span className="ml-2 font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                          {reqItem.transactionId || reqItem.bankReference || '—'}
+                        </span>
+                      </td>
+                      <td className="px-3.5 py-2.5 font-mono font-bold tabular-nums text-slate-900 dark:text-white whitespace-nowrap">
+                        {reqItem.currency}
+                        {reqItem.amount.toLocaleString()}
+                      </td>
+                      <td className="px-3.5 py-2.5 whitespace-nowrap">
+                        <span
+                          className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold ${
+                            reqItem.status === 'approved'
+                              ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300'
+                              : reqItem.status === 'rejected'
+                              ? 'bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300'
+                              : 'bg-amber-50 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300'
+                          }`}
+                        >
+                          {reqItem.status === 'approved'
+                            ? 'Approved / Paid'
+                            : reqItem.status === 'rejected'
+                            ? 'Rejected'
+                            : 'Pending'}
+                        </span>
+                      </td>
+                      <td className="px-3.5 py-2.5 text-right whitespace-nowrap">
+                        {reqItem.status === 'approved' ? (
+                          <button
+                            type="button"
+                            onClick={() => setReceiptTargetRequest(reqItem)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 font-semibold text-[11px] cursor-pointer"
+                          >
+                            <Receipt className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
+                            <span>View / PDF</span>
+                          </button>
+                        ) : (
+                          <span className="text-[11px] text-slate-400">
+                            {reqItem.status === 'pending' ? 'Awaiting approval' : 'Not issued'}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
         )}
@@ -2981,7 +3185,7 @@ export const SubscribedWebsitePage: React.FC = () => {
               <WebsitePreviewRenderer
                 site={livePreviewSite}
                 viewMode={previewDevice}
-                showGraceBanner={isGracePeriod}
+                showGraceBanner={isExpired}
               />
             </div>
           </div>
@@ -3292,7 +3496,7 @@ export const SubscribedWebsitePage: React.FC = () => {
         </form>
       </Modal>
 
-      {/* Manual Payment Submission Modal */}
+      {/* Manual Payment Submission Modal (Bound to Exact Website ID for Initial or Renewal Payment) */}
       <ManualPaymentModal
         isOpen={isPaymentModalOpen}
         onClose={() => setIsPaymentModalOpen(false)}
@@ -3300,13 +3504,31 @@ export const SubscribedWebsitePage: React.FC = () => {
         serviceId={activeWebsite.id}
         serviceName={`GoAMAAS Website (${activeWebsite.fullDomainUrl})`}
         planTier="GoAMAAS Website"
-        amount={activeWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly}
+        amount={effectiveFee}
+        targetWebsite={activeWebsite}
         onSuccess={() => {
           showToast(
-            'Payment submitted! Your website will automatically publish live for 30 days once verified.',
+            isExpired
+              ? 'Renewal payment submitted! Your website will be republished for 30 days once verified by an administrator.'
+              : 'Payment submitted! Your website will automatically publish live for 30 days once verified.',
             'success'
           );
         }}
+      />
+
+      {/* Official Verified Payment Receipt Modal */}
+      <PaymentReceiptModal
+        isOpen={Boolean(receiptTargetRequest)}
+        onClose={() => setReceiptTargetRequest(null)}
+        request={receiptTargetRequest}
+        website={activeWebsite}
+        isLatestApprovedForWebsite={
+          Boolean(
+            receiptTargetRequest &&
+              latestApprovedPayment &&
+              receiptTargetRequest.id === latestApprovedPayment.id
+          )
+        }
       />
 
       {/* Delete Product Confirmation Dialog */}
