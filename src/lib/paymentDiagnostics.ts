@@ -6,7 +6,13 @@ export type PaymentDiagnosticStage =
   | 'PAYMENT_REQUEST_INSERT_FAILED'
   | 'ADMIN_QUEUE_FETCH_STARTED'
   | 'ADMIN_QUEUE_FETCH_SUCCEEDED'
-  | 'ADMIN_QUEUE_FETCH_FAILED';
+  | 'ADMIN_QUEUE_FETCH_FAILED'
+  | 'ADMIN_APPROVAL_STARTED'
+  | 'ADMIN_APPROVAL_SUCCEEDED'
+  | 'ADMIN_APPROVAL_FAILED'
+  | 'CLIENT_SESSION_MISMATCH_BLOCKED';
+
+export type PaymentDiagnosticOriginLayer = 'frontend_guard' | 'rpc' | 'session_check';
 
 export interface PaymentDiagnosticRecord {
   timestamp: string;
@@ -21,6 +27,8 @@ export interface PaymentDiagnosticRecord {
   hasWebsiteId: boolean;
   source?: string;
   rowCount?: number;
+  callerMatchesRequestOwner?: boolean;
+  originLayer?: PaymentDiagnosticOriginLayer;
 }
 
 const UUID_SIMPLE_REGEX =
@@ -100,9 +108,16 @@ function sanitizeSourceLabel(raw: string | undefined): string | undefined {
   return cleaned || undefined;
 }
 
+function sanitizeOriginLayer(raw: unknown): PaymentDiagnosticOriginLayer | undefined {
+  if (raw === 'frontend_guard' || raw === 'rpc' || raw === 'session_check') {
+    return raw;
+  }
+  return undefined;
+}
+
 /**
- * Emits a structured, sanitized diagnostic event for payment submission and admin queue fetching.
- * Never logs access tokens, refresh tokens, passwords, raw credentials, emails, or phone numbers.
+ * Emits a structured, sanitized diagnostic event for payment submission, admin queue fetching, and approval.
+ * Never logs access tokens, refresh tokens, passwords, raw credentials, emails, transaction IDs, or phone numbers.
  */
 export function emitPaymentDiagnostic(input: {
   stage: PaymentDiagnosticStage;
@@ -116,9 +131,12 @@ export function emitPaymentDiagnostic(input: {
   hasWebsiteId: boolean;
   source?: string;
   rowCount?: number;
+  callerMatchesRequestOwner?: boolean;
+  originLayer?: PaymentDiagnosticOriginLayer;
 }): PaymentDiagnosticRecord {
   const safeOperation = sanitizeSourceLabel(input.operation);
   const safeTable = sanitizeSourceLabel(input.table);
+  const safeOriginLayer = sanitizeOriginLayer(input.originLayer);
   const record: PaymentDiagnosticRecord = {
     timestamp: new Date().toISOString(),
     stage: input.stage,
@@ -137,6 +155,10 @@ export function emitPaymentDiagnostic(input: {
     ...(typeof input.rowCount === 'number' && Number.isFinite(input.rowCount)
       ? { rowCount: Math.max(0, Math.trunc(input.rowCount)) }
       : {}),
+    ...(typeof input.callerMatchesRequestOwner === 'boolean'
+      ? { callerMatchesRequestOwner: input.callerMatchesRequestOwner }
+      : {}),
+    ...(safeOriginLayer ? { originLayer: safeOriginLayer } : {}),
   };
 
   recentDiagnostics.push(record);
@@ -146,7 +168,9 @@ export function emitPaymentDiagnostic(input: {
 
   const isFailure =
     record.stage === 'PAYMENT_REQUEST_INSERT_FAILED' ||
-    record.stage === 'ADMIN_QUEUE_FETCH_FAILED';
+    record.stage === 'ADMIN_QUEUE_FETCH_FAILED' ||
+    record.stage === 'ADMIN_APPROVAL_FAILED' ||
+    record.stage === 'CLIENT_SESSION_MISMATCH_BLOCKED';
 
   if (isFailure) {
     console.error('[GoAMAAS][PaymentDiag]', record);

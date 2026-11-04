@@ -10,6 +10,7 @@ import {
 import { WebsitePreviewRenderer } from '../../components/website/WebsitePreviewRenderer';
 import { ManualPaymentModal } from '../../components/payment/ManualPaymentModal';
 import { CATEGORY_SPECS, THEME_PALETTES, CategorySpec } from '../../data/websiteBuilderConfig';
+import { isPlatformAdminAccountEmail } from '../../lib/paymentWorkflow';
 import {
   ArrowRight,
   ArrowLeft,
@@ -135,8 +136,27 @@ export const CreateWebsitePage: React.FC = () => {
     }
   }, [activeStore?.id, activeStore?.name, activeStore?.phone, activeStore?.address]);
 
+  const initialClientUserIdRef = useRef<string | null>(
+    user?.id && !isPlatformAdminAccountEmail(user?.email) ? user.id : null
+  );
+
   useEffect(() => {
-    if (user?.email && !email) {
+    if (user?.id && !isPlatformAdminAccountEmail(user?.email) && !initialClientUserIdRef.current) {
+      initialClientUserIdRef.current = user.id;
+    }
+  }, [user?.id, user?.email]);
+
+  const isAdminSessionActiveOnWizard = Boolean(
+    isAuthenticated && isPlatformAdminAccountEmail(user?.email)
+  );
+  const hasClientSessionSwitched = Boolean(
+    initialClientUserIdRef.current &&
+      user?.id &&
+      initialClientUserIdRef.current.trim().toLowerCase() !== user.id.trim().toLowerCase()
+  );
+
+  useEffect(() => {
+    if (user?.email && !email && !isPlatformAdminAccountEmail(user.email)) {
       setEmail(user.email);
     }
   }, [user?.email]);
@@ -522,6 +542,7 @@ export const CreateWebsitePage: React.FC = () => {
       }
 
       const savedSite = await createSubscribedWebsite({
+        expectedUserId: initialClientUserIdRef.current || user?.id,
         storeId: activeStore?.id || undefined,
         businessName: businessName.trim(),
         ownerName: user?.name || businessName.trim(),
@@ -613,6 +634,22 @@ export const CreateWebsitePage: React.FC = () => {
             </Link>
           )}
         </div>
+
+        {(isAdminSessionActiveOnWizard || hasClientSessionSwitched) && (
+          <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800/80 text-amber-950 dark:text-amber-200 text-xs flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="font-bold text-sm">
+                {hasClientSessionSwitched
+                  ? 'Active Google Session Changed in Another Tab'
+                  : 'Platform Administrator Session Detected'}
+              </p>
+              <p className="leading-relaxed text-amber-900 dark:text-amber-200/90">
+                Signing into the Admin Console shares the active session across tabs in the same browser, and administrators cannot approve their own payment requests. Please open an Incognito/Private window or a separate browser profile signed into the client&apos;s Google account to create the client website and submit payment.
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Wizard Progress Stepper */}
         <div className="p-3 sm:p-4 rounded-2xl bg-slate-50/80 dark:bg-slate-900/80 border border-slate-200/90 dark:border-slate-800">

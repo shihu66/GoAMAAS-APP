@@ -4,6 +4,7 @@ import { useLanguage } from '../../context/LanguageContext';
 import { PaymentMethodType, PaymentRequest, SubscribedWebsite } from '../../types';
 import {
   hasDuplicateActiveTransactionReference,
+  isPlatformAdminAccountEmail,
   isWebsitePaymentService,
   normalizeTransactionReference,
   validateManualPaymentSubmissionInput,
@@ -75,9 +76,12 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
   const [submittedRequest, setSubmittedRequest] = useState<PaymentRequest | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const submittingRef = useRef(false);
+  const modalSessionUserIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (isOpen) {
+      modalSessionUserIdRef.current =
+        user?.id && !isPlatformAdminAccountEmail(user?.email) ? user.id : null;
       setSelectedWebsiteId(serviceId);
       setSubmitError(null);
       setSubmittedRequest(null);
@@ -133,6 +137,18 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
     serviceType === 'website_subscription' && boundWebsite
       ? boundWebsite.monthlyFee || websiteSubscriptionPlan.priceMonthly || amount
       : amount;
+
+  const expectedOwnerUserId =
+    (isWebsiteService && boundWebsite?.userId ? boundWebsite.userId : null) ||
+    modalSessionUserIdRef.current ||
+    user?.id ||
+    undefined;
+  const isAdminSessionActiveInModal = Boolean(isPlatformAdminAccountEmail(user?.email));
+  const hasModalSessionSwitched = Boolean(
+    expectedOwnerUserId &&
+      user?.id &&
+      expectedOwnerUserId.trim().toLowerCase() !== user.id.trim().toLowerCase()
+  );
 
   useEffect(() => {
     if (isOpen && Number.isFinite(effectiveAmount) && effectiveAmount > 0) {
@@ -317,6 +333,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
     try {
       const isBank = paymentMethod === 'Bank Transfer';
       const res = await submitPaymentRequest({
+        expectedUserId: expectedOwnerUserId,
         serviceType,
         serviceId: effectiveServiceId,
         serviceName: effectiveServiceName,
@@ -443,6 +460,21 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
       maxWidth="xl"
     >
       <div className="space-y-5 text-slate-800 dark:text-slate-200 text-xs">
+        {(isAdminSessionActiveInModal || hasModalSessionSwitched) && (
+          <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800/80 text-amber-950 dark:text-amber-200 flex items-start gap-2.5">
+            <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <span className="font-bold block">
+                {hasModalSessionSwitched
+                  ? 'Active Browser Session Switched to Another Account'
+                  : 'Platform Administrator Session Detected'}
+              </span>
+              <p className="text-[11px] leading-relaxed">
+                Signing into the Admin Console in another tab shares this browser session, and administrators cannot approve their own payment requests. Please sign in with the client&apos;s Google account in an Incognito/Private window or a separate browser profile before submitting payment.
+              </p>
+            </div>
+          </div>
+        )}
         {/* Related Website Subscription / Service Plan Selector & Exact Payable Summary */}
         <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700/70 space-y-3">
           {allowWebsiteSelection && serviceType === 'website_subscription' && userWebsites.length > 1 && (

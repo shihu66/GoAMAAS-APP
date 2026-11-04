@@ -27,7 +27,10 @@ import {
   normalizeDashboardPlanId,
   resolveAuthoritativeServicePrice,
 } from '../data/pricingConfig';
-import { validateManualPaymentSubmissionInput } from './paymentWorkflow';
+import {
+  validateClientWriteSessionOwnership,
+  validateManualPaymentSubmissionInput,
+} from './paymentWorkflow';
 import { emitPaymentDiagnostic } from './paymentDiagnostics';
 
 export const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -1398,6 +1401,7 @@ export async function fetchAdminPaymentRequestsFromDb(): Promise<{
 
 export async function createPaymentRequestInDb(params: {
   userId: string;
+  expectedUserId?: string;
   storeId?: string | null;
   customerName: string;
   customerPhone: string;
@@ -1429,6 +1433,31 @@ export async function createPaymentRequestInDb(params: {
         error:
           authState.error ||
           new Error('Authentication required: please sign in to submit payment.'),
+      };
+    }
+
+    const ownershipCheck = validateClientWriteSessionOwnership({
+      authUserId: authUser.id,
+      authUserEmail: authUser.email,
+      expectedUserId: params.expectedUserId || params.userId,
+      actionLabel: 'payment submission',
+    });
+    if (!ownershipCheck.allowed) {
+      emitPaymentDiagnostic({
+        stage: 'CLIENT_SESSION_MISMATCH_BLOCKED',
+        httpStatus: 403,
+        errorCode: ownershipCheck.code || 'SESSION_MISMATCH',
+        operation: 'INSERT_PRECHECK',
+        table: 'payment_requests',
+        requestId: null,
+        projectRef: supabaseProjectRef,
+        hasUserId: Boolean(authUser.id),
+        hasWebsiteId: Boolean(params.serviceId),
+        originLayer: 'session_check',
+      });
+      return {
+        data: null,
+        error: new Error(ownershipCheck.message || 'Active session account mismatch.'),
       };
     }
 
@@ -2625,6 +2654,7 @@ export function mapDatabaseRowToSubscribedWebsite(row: any): SubscribedWebsite {
 }
 
 export async function createSubscribedWebsiteInDb(params: {
+  expectedUserId?: string;
   businessName: string;
   niche: string;
   subdomain: string;
@@ -2665,6 +2695,31 @@ export async function createSubscribedWebsiteInDb(params: {
           error: new Error('Your login session changed. Please sign in again and retry.'),
         };
       }
+    }
+
+    const ownershipCheck = validateClientWriteSessionOwnership({
+      authUserId: user.id,
+      authUserEmail: user.email,
+      expectedUserId: params.expectedUserId,
+      actionLabel: 'website creation',
+    });
+    if (!ownershipCheck.allowed) {
+      emitPaymentDiagnostic({
+        stage: 'CLIENT_SESSION_MISMATCH_BLOCKED',
+        httpStatus: 403,
+        errorCode: ownershipCheck.code || 'SESSION_MISMATCH',
+        operation: 'INSERT_PRECHECK',
+        table: 'subscribed_websites',
+        requestId: null,
+        projectRef: supabaseProjectRef,
+        hasUserId: Boolean(user.id),
+        hasWebsiteId: false,
+        originLayer: 'session_check',
+      });
+      return {
+        data: null,
+        error: new Error(ownershipCheck.message || 'Active session account mismatch.'),
+      };
     }
 
     const { payload, cleanSubdomain, error: buildErr } = buildMerchantWebsiteInsertPayload({

@@ -506,6 +506,13 @@ export const AdminDashboardPage: React.FC = () => {
     showToast('Synchronized live admin queues.', 'info');
   };
 
+  const isRequestSelfOwnedByAdmin = (req: PaymentRequest): boolean =>
+    Boolean(
+      req.userId &&
+        verifiedAdmin.id &&
+        req.userId.trim().toLowerCase() === verifiedAdmin.id.trim().toLowerCase()
+    );
+
   // Sensitive Action 1: Approve & Publish / Retry Publish (with server revalidation)
   const handleConfirmApproveOrRetry = async () => {
     if (!approvalModalTarget) return;
@@ -3099,6 +3106,20 @@ export const AdminDashboardPage: React.FC = () => {
                 </div>
               )}
 
+              {!isRetry && isRequestSelfOwnedByAdmin(req) && (
+                <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-200 text-[11px] flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <span className="font-bold block">
+                      Self-Owned Payment Record Detected (Same-Browser Admin Session)
+                    </span>
+                    <span className="block leading-relaxed">
+                      This payment request&apos;s database owner (<span className="font-mono">user_id</span>) matches your administrator account even if client contact details were typed into the form (caused by submitting while the Admin Console was signed in on the same browser). Self-approval is strictly blocked—have the client create their website and submit payment from an Incognito/Private window or a separate browser profile signed into their own Google account.
+                    </span>
+                  </div>
+                </div>
+              )}
+
               {!isRetry && (
                 <div>
                   <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
@@ -3584,6 +3605,19 @@ export const AdminDashboardPage: React.FC = () => {
             maxWidth="lg"
           >
             <div className="space-y-4 text-xs text-slate-800 dark:text-slate-200">
+              {isRequestSelfOwnedByAdmin(req) && (
+                <div className="p-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-200 text-[11px] flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <span className="font-bold block">
+                      Database Owner Matches Administrator Account
+                    </span>
+                    <span className="block leading-relaxed">
+                      The authenticated <span className="font-mono">user_id</span> recorded on this payment request matches the platform administrator account (resulting from shared browser session storage when both Client and Admin tabs were used in the same browser). Platform security prohibits self-approval; ask the client to submit from an Incognito/Private window or separate browser profile using their own Google account.
+                    </span>
+                  </div>
+                </div>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4 rounded-xl bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700">
                 <div>
                   <span className="text-[11px] text-slate-500 dark:text-slate-400 block">

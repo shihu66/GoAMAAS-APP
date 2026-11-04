@@ -7,8 +7,10 @@ import { transform } from 'esbuild';
 import resolveTenantHandler from '../api/resolve-tenant';
 import {
   executeApproveAndPublishWorkflow,
+  isPlatformAdminAccountEmail,
   isWebsiteTrulyLive,
   resolveClientWebsiteLifecycleState,
+  validateClientWriteSessionOwnership,
   validateManualPaymentSubmissionInput,
 } from '../src/lib/paymentWorkflow';
 import {
@@ -940,6 +942,206 @@ async function runProductionBaselineWorkflowSuite() {
   }
 
   console.log('  ✓ Confirmed SQLSTATE 42501 ACL behavior, least-privilege column compatibility, and 0-row atomic abort');
+
+  console.log('\n[6/6] Verifying cross-tab session overwrite guard, self-approval enforcement, and approval diagnostics...');
+
+  // 6a. Legitimate separate client Google account passes session ownership validation
+  const validClientWrite = validateClientWriteSessionOwnership({
+    authUserId: clientUserId,
+    authUserEmail: clientEmail,
+    expectedUserId: clientUserId,
+    actionLabel: 'payment submission',
+  });
+  assert(validClientWrite.allowed === true, 'Separate client Google account must be allowed');
+  assert(!isPlatformAdminAccountEmail(clientEmail), 'Client email is not platform admin');
+  assert(isPlatformAdminAccountEmail('official.amaas.dev@gmail.com'), 'Admin email recognized');
+  assert(isPlatformAdminAccountEmail('  OFFICIAL.AMAAS.DEV@GMAIL.COM '), 'Case-insensitive admin email recognized');
+
+  // 6b. Cross-tab overwrite: client opened wizard as clientUserId, then another tab signed into official.amaas.dev@gmail.com
+  const crossTabSwitchedCheck = validateClientWriteSessionOwnership({
+    authUserId: adminUserId,
+    authUserEmail: adminEmail,
+    expectedUserId: clientUserId,
+    actionLabel: 'payment submission',
+  });
+  assert(crossTabSwitchedCheck.allowed === false, 'Cross-tab session overwrite to admin must be blocked');
+  assert(
+    crossTabSwitchedCheck.code === 'SESSION_ACCOUNT_CHANGED',
+    `Expected SESSION_ACCOUNT_CHANGED, got ${crossTabSwitchedCheck.code}`
+  );
+
+  // 6c. Direct merchant submission while browser is signed into official.amaas.dev@gmail.com must be blocked
+  const directAdminMerchantCheck = validateClientWriteSessionOwnership({
+    authUserId: adminUserId,
+    authUserEmail: adminEmail,
+    expectedUserId: adminUserId,
+    actionLabel: 'website creation',
+  });
+  assert(directAdminMerchantCheck.allowed === false, 'Platform admin account must not create self-owned merchant payment/website');
+  assert(
+    directAdminMerchantCheck.code === 'ADMIN_MERCHANT_SUBMISSION_BLOCKED',
+    `Expected ADMIN_MERCHANT_SUBMISSION_BLOCKED, got ${directAdminMerchantCheck.code}`
+  );
+
+  // 6d. Self-approval restriction remains strictly enforced on BOTH frontend guard (case-insensitive) and PostgreSQL RPC
+  const selfApprovalFrontend = await executeApproveAndPublishWorkflow({
+    mode: 'approve_and_publish',
+    request: {
+      ...adminVisibleReq,
+      id: '99999999-9999-4999-8999-999999999999',
+      status: 'pending',
+      userId: adminUserId.toUpperCase(),
+    },
+    callerRole: 'admin',
+    callerUserId: adminUserId.toLowerCase(),
+    adapters: {
+      requireUuidServiceId: true,
+      approvePaymentRpc: async () => {
+        throw new Error('RPC must NOT be called when frontend self-approval guard triggers');
+      },
+      fetchPaymentRequestById: async () => null,
+      fetchWebsiteById: async () => null,
+      publishWebsiteRpc: async () => ({ success: false, message: 'unreachable', error: null }),
+    },
+  });
+  assert(selfApprovalFrontend.success === false, 'Frontend guard must reject self-approval');
+  assert(selfApprovalFrontend.code === 'SELF_APPROVAL_FORBIDDEN', 'Expected SELF_APPROVAL_FORBIDDEN');
+  assert(
+    selfApprovalFrontend.message === 'Access denied: Administrators cannot approve their own payment requests.',
+    `Unexpected self-approval message: ${selfApprovalFrontend.message}`
+  );
+
+  // Restore standard authenticated SELECT/INSERT grants and verify end-to-end Production baseline behavior
+  // when a row was contaminated with user_id = adminUserId despite client-typed contact fields:
+  await asRole(null, null, 'service_role');
+  await db.exec(`GRANT SELECT, INSERT ON TABLE public.payment_requests TO authenticated;`);
+  const adminSelfReqRes = await db.query<RawPaymentRequestRow>(
+    `
+    INSERT INTO public.payment_requests (
+      user_id, customer_name, customer_phone, customer_email,
+      service_type, service_id, service_name, plan_tier, amount,
+      payment_method, transaction_id, sender_number, status
+    ) VALUES (
+      $1, 'Client Typed Name', '01799999999', 'client.typed@example.com',
+      'ai_automation', 'starter', 'AI Starter', 'Starter', 2500,
+      'bKash', 'TRXSELFADM01', '01799999999', 'pending'
+    ) RETURNING *;
+    `,
+    [adminUserId]
+  );
+  const adminSelfReqRow = adminSelfReqRes.rows[0];
+  const adminSelfReqId = adminSelfReqRow.id;
+
+  await asRole(adminUserId, adminEmail, 'authenticated');
+  let rpcWasCalledOnSelfOwnedRow = false;
+  const prodSelfWorkflowOutcome = await executeApproveAndPublishWorkflow({
+    mode: 'approve_and_publish',
+    request: mapRow(adminSelfReqRow),
+    callerRole: 'admin',
+    callerUserId: adminUserId,
+    adapters: {
+      requireUuidServiceId: true,
+      approvePaymentRpc: async (reqId, notes) => {
+        rpcWasCalledOnSelfOwnedRow = true;
+        const rpcRes = await db.query<{ res: any }>(
+          `SELECT public.admin_approve_payment_request($1::uuid, $2::text) AS res;`,
+          [reqId, notes || null]
+        );
+        const body = rpcRes.rows[0]?.res;
+        return {
+          success: Boolean(body?.success),
+          code: body?.code || 'APPROVED',
+          message: body?.message || 'Approved',
+          requestId: reqId,
+          error: body?.success ? null : new Error(body?.message || 'Approve failed'),
+        };
+      },
+      fetchPaymentRequestById: async () => null,
+      fetchWebsiteById: async () => null,
+      publishWebsiteRpc: async () => ({ success: false, message: 'unreachable', error: null }),
+    },
+  });
+  assert(prodSelfWorkflowOutcome.success === false, 'Self-owned row must be rejected');
+  assert(
+    prodSelfWorkflowOutcome.code === 'SELF_APPROVAL_FORBIDDEN',
+    `Expected SELF_APPROVAL_FORBIDDEN, got ${prodSelfWorkflowOutcome.code}`
+  );
+  assert(
+    prodSelfWorkflowOutcome.message === 'Access denied: Administrators cannot approve their own payment requests.',
+    `Unexpected message: ${prodSelfWorkflowOutcome.message}`
+  );
+  assert(rpcWasCalledOnSelfOwnedRow === false, 'Frontend guard must halt before calling RPC');
+
+  const checkStillPending = await db.query<{ status: string }>(
+    `SELECT status FROM public.payment_requests WHERE id = $1::uuid;`,
+    [adminSelfReqId]
+  );
+  assert(checkStillPending.rows[0].status === 'pending', 'Self-owned row must remain pending in DB');
+
+  // 6e. Verify new approval & session mismatch diagnostic stages scrub all tokens/PII
+  clearPaymentDiagnosticsForTest();
+  emitPaymentDiagnostic({
+    stage: 'CLIENT_SESSION_MISMATCH_BLOCKED',
+    httpStatus: 403,
+    errorCode: 'SESSION_ACCOUNT_CHANGED',
+    operation: 'SUBMIT_PAYMENT_PRECHECK',
+    table: 'payment_requests',
+    requestId: null,
+    projectRef: 'rqmgnewipgqgmvzpbrfn',
+    hasUserId: true,
+    hasWebsiteId: true,
+    originLayer: 'session_check',
+  });
+  emitPaymentDiagnostic({
+    stage: 'ADMIN_APPROVAL_STARTED',
+    httpStatus: null,
+    errorCode: null,
+    operation: 'approve_and_publish',
+    table: 'payment_requests',
+    requestId: insertedPayment.id,
+    projectRef: 'rqmgnewipgqgmvzpbrfn',
+    hasUserId: true,
+    hasWebsiteId: true,
+    callerMatchesRequestOwner: false,
+  });
+  emitPaymentDiagnostic({
+    stage: 'ADMIN_APPROVAL_FAILED',
+    httpStatus: 403,
+    errorCode: 'SELF_APPROVAL_FORBIDDEN',
+    operation: 'approve_and_publish',
+    table: 'payment_requests',
+    requestId: adminSelfReqId,
+    projectRef: 'rqmgnewipgqgmvzpbrfn',
+    hasUserId: true,
+    hasWebsiteId: false,
+    callerMatchesRequestOwner: true,
+    originLayer: 'frontend_guard',
+  });
+  emitPaymentDiagnostic({
+    stage: 'ADMIN_APPROVAL_SUCCEEDED',
+    httpStatus: 200,
+    errorCode: null,
+    operation: 'approve_and_publish',
+    table: 'payment_requests',
+    requestId: insertedPayment.id,
+    projectRef: 'rqmgnewipgqgmvzpbrfn',
+    hasUserId: true,
+    hasWebsiteId: true,
+    callerMatchesRequestOwner: false,
+    originLayer: 'rpc',
+  });
+
+  const approvalDiagLogs = getRecentPaymentDiagnostics();
+  assert(approvalDiagLogs.length === 4, `Expected 4 approval/session diagnostic logs, got ${approvalDiagLogs.length}`);
+  assert(approvalDiagLogs[2].callerMatchesRequestOwner === true, 'Expected callerMatchesRequestOwner=true on self-approval failure');
+  assert(approvalDiagLogs[2].originLayer === 'frontend_guard', 'Expected originLayer=frontend_guard');
+  assert(approvalDiagLogs[3].callerMatchesRequestOwner === false, 'Expected callerMatchesRequestOwner=false on valid approval');
+  const approvalDiagJson = JSON.stringify(approvalDiagLogs);
+  assert(!approvalDiagJson.includes('@'), 'No email addresses in approval diagnostics');
+  assert(!approvalDiagJson.includes('TRX'), 'No transaction IDs in approval diagnostics');
+  assert(!approvalDiagJson.includes('017'), 'No phone numbers in approval diagnostics');
+
+  console.log('  ✓ Cross-tab session overwrite guard, self-approval enforcement, and diagnostics verified');
   console.log('\nALL PRODUCTION BASELINE & NODE ESM TESTS PASSED!');
 }
 

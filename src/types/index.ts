@@ -422,6 +422,7 @@ export interface SubscribedWebsite {
 }
 
 export interface CreateSubscribedWebsiteInput {
+  expectedUserId?: string;
   storeId?: string;
   businessName: string;
   ownerName: string;

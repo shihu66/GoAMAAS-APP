@@ -11,6 +11,60 @@ import {
 
 const UUID_FORMAT_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+export const PLATFORM_ADMIN_EMAIL = 'official.amaas.dev@gmail.com';
+
+export function isPlatformAdminAccountEmail(email?: string | null): boolean {
+  return (email || '').trim().toLowerCase() === PLATFORM_ADMIN_EMAIL;
+}
+
+export interface ClientSessionOwnershipCheckResult {
+  allowed: boolean;
+  code?: 'AUTH_REQUIRED' | 'SESSION_ACCOUNT_CHANGED' | 'ADMIN_MERCHANT_SUBMISSION_BLOCKED';
+  message?: string;
+}
+
+/**
+ * Verifies that a client website creation or payment submission write is executing under
+ * the intended client Google session and has NOT been overwritten in shared browser storage
+ * by signing into the Platform Admin Console (`official.amaas.dev@gmail.com`) in another tab.
+ */
+export function validateClientWriteSessionOwnership(input: {
+  authUserId?: string | null;
+  authUserEmail?: string | null;
+  expectedUserId?: string | null;
+  actionLabel: 'website creation' | 'payment submission';
+}): ClientSessionOwnershipCheckResult {
+  const cleanAuthId = (input.authUserId || '').trim().toLowerCase();
+  const cleanExpectedId = (input.expectedUserId || '').trim().toLowerCase();
+
+  if (!cleanAuthId) {
+    return {
+      allowed: false,
+      code: 'AUTH_REQUIRED',
+      message: `Authentication required: please sign in with your client Google account before ${input.actionLabel}.`,
+    };
+  }
+
+  if (cleanExpectedId && cleanExpectedId !== cleanAuthId) {
+    return {
+      allowed: false,
+      code: 'SESSION_ACCOUNT_CHANGED',
+      message:
+        'Your active Google session changed in another browser tab (signing into the Admin Console shares this browser session). Please sign in with your client Google account in an Incognito/Private window or a separate browser profile and try again.',
+    };
+  }
+
+  if (isPlatformAdminAccountEmail(input.authUserEmail)) {
+    return {
+      allowed: false,
+      code: 'ADMIN_MERCHANT_SUBMISSION_BLOCKED',
+      message:
+        'This browser is currently signed into the platform administrator account, and administrators cannot approve their own payment requests. Please sign in with the client Google account in an Incognito/Private window or a separate browser profile to create the client website and submit payment.',
+    };
+  }
+
+  return { allowed: true };
+}
 
 export function normalizeTransactionReference(raw?: string | null): string {
   return (raw || '').trim().replace(/\s+/g, ' ').toUpperCase();
@@ -658,7 +712,15 @@ export async function executeApproveAndPublishWorkflow(params: {
     };
   }
 
-  if (mode === 'approve_and_publish' && request.userId && request.userId === callerUserId) {
+  const normalizedRequestOwnerId = (request.userId || '').trim().toLowerCase();
+  const normalizedCallerUserId = (callerUserId || '').trim().toLowerCase();
+
+  if (
+    mode === 'approve_and_publish' &&
+    normalizedRequestOwnerId &&
+    normalizedCallerUserId &&
+    normalizedRequestOwnerId === normalizedCallerUserId
+  ) {
     return {
       success: false,
       paymentApproved: false,
@@ -697,7 +759,10 @@ export async function executeApproveAndPublishWorkflow(params: {
       };
     }
 
-    if (!precheckSite.userId || precheckSite.userId !== request.userId) {
+    if (
+      !precheckSite.userId ||
+      precheckSite.userId.trim().toLowerCase() !== normalizedRequestOwnerId
+    ) {
       return {
         success: false,
         paymentApproved: request.status === 'approved',

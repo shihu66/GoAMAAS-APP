@@ -70,6 +70,7 @@ import {
   isWebsitePaymentService,
   isWebsiteSubscriptionExpired,
   isWebsiteTrulyLive,
+  validateClientWriteSessionOwnership,
   validateManualPaymentSubmissionInput,
 } from '../lib/paymentWorkflow';
 import {
@@ -287,6 +288,7 @@ interface AppContextType {
   isGatewaysLoading: boolean;
   refreshPaymentGatewayConfigs: () => Promise<PaymentGatewayConfig[] | null>;
   submitPaymentRequest: (params: {
+    expectedUserId?: string;
     serviceType: 'website_subscription' | 'website_package' | 'dashboard_plan' | 'ai_automation';
     serviceId: string;
     serviceName: string;
@@ -1753,8 +1755,38 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     const cleanSub = subCheck.clean;
 
+    const expectedCreatorId = data.expectedUserId || user?.id;
     let resolvedStoreId: string | undefined;
     if (isSupabaseConfigured && supabase) {
+      const authState = await ensureActiveSupabaseSession();
+      const ownershipCheck = validateClientWriteSessionOwnership({
+        authUserId: authState.user?.id,
+        authUserEmail: authState.user?.email,
+        expectedUserId: expectedCreatorId,
+        actionLabel: 'website creation',
+      });
+      if (!ownershipCheck.allowed) {
+        const msg =
+          ownershipCheck.message ||
+          'Active session account changed. Please sign in with your client Google account and try again.';
+        emitPaymentDiagnostic({
+          stage: 'CLIENT_SESSION_MISMATCH_BLOCKED',
+          httpStatus: 403,
+          errorCode: ownershipCheck.code || 'SESSION_MISMATCH',
+          operation: 'CREATE_WEBSITE_PRECHECK',
+          table: 'subscribed_websites',
+          requestId: null,
+          projectRef: supabaseProjectRef,
+          hasUserId: Boolean(authState.user?.id),
+          hasWebsiteId: false,
+          originLayer: 'session_check',
+        });
+        showToast(msg, 'error');
+        const mismatchErr = new Error(msg) as Error & { toastShown?: boolean };
+        mismatchErr.toastShown = true;
+        throw mismatchErr;
+      }
+
       const requestedStoreId = data.storeId?.trim();
       if (
         requestedStoreId &&
@@ -1762,7 +1794,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         stores.some((s) => s.id === requestedStoreId)
       ) {
         resolvedStoreId = requestedStoreId;
-      } else if (user?.id) {
+      } else if (authState.user?.id) {
         resolvedStoreId = await ensureMerchantStore(data.businessName);
       }
     } else {
@@ -1805,6 +1837,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (isSupabaseConfigured && supabase) {
       const { data: dbSite, error: dbErr } = await createSubscribedWebsiteInDb({
+        expectedUserId: expectedCreatorId,
         businessName: data.businessName,
         niche: data.niche,
         subdomain: cleanSub,
@@ -2900,6 +2933,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [user?.id, hasActiveVerificationSyncNeed, refreshPaymentRequests, refreshSubscribedWebsites]);
 
   const submitPaymentRequest = async (params: {
+    expectedUserId?: string;
     serviceType: 'website_subscription' | 'website_package' | 'dashboard_plan' | 'ai_automation';
     serviceId: string;
     serviceName: string;
@@ -2918,6 +2952,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // Verify authenticated user & refresh Supabase JWT if needed before any DB/API check
+    const expectedSubmitterId = params.expectedUserId || user?.id || '';
     let effectiveUserId = user?.id || '';
     let effectiveUserEmail = user?.email || '';
     let effectiveUserName = user?.name || 'Merchant';
@@ -2928,6 +2963,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const msg =
           authState.error?.message ||
           'Your login session has expired. Please sign in again to submit a payment request.';
+        showToast(msg, 'error');
+        return { success: false, message: msg };
+      }
+      const ownershipCheck = validateClientWriteSessionOwnership({
+        authUserId: authState.user.id,
+        authUserEmail: authState.user.email,
+        expectedUserId: expectedSubmitterId,
+        actionLabel: 'payment submission',
+      });
+      if (!ownershipCheck.allowed) {
+        const msg =
+          ownershipCheck.message ||
+          'Active session account changed. Please sign in with your client Google account and try again.';
+        emitPaymentDiagnostic({
+          stage: 'CLIENT_SESSION_MISMATCH_BLOCKED',
+          httpStatus: 403,
+          errorCode: ownershipCheck.code || 'SESSION_MISMATCH',
+          operation: 'SUBMIT_PAYMENT_PRECHECK',
+          table: 'payment_requests',
+          requestId: null,
+          projectRef: supabaseProjectRef,
+          hasUserId: Boolean(authState.user.id),
+          hasWebsiteId: Boolean(params.serviceId),
+          originLayer: 'session_check',
+        });
         showToast(msg, 'error');
         return { success: false, message: msg };
       }
@@ -3283,14 +3343,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? canonicalTrx
           : (params.bankReference || '').trim().toUpperCase() || undefined;
 
+      const { expectedUserId: _ignoredExpectedUserId, ...submitRest } = params;
+
       if (isSupabaseConfigured) {
         const { data, error } = await createPaymentRequestInDb({
           userId: effectiveUserId,
+          expectedUserId: expectedSubmitterId || effectiveUserId,
           storeId: resolvedStoreId,
           customerName: effectiveUserName,
           customerPhone: submitCustomerPhone,
           customerEmail: effectiveUserEmail,
-          ...params,
+          ...submitRest,
           transactionId: canonicalTrx,
           senderNumber: canonicalSender,
           bankReference: canonicalBankRef,
@@ -3322,7 +3385,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         customerName: effectiveUserName,
         customerPhone: submitCustomerPhone,
         customerEmail: effectiveUserEmail,
-        ...params,
+        ...submitRest,
         transactionId: canonicalTrx,
         senderNumber: canonicalSender,
         bankReference: canonicalBankRef,
@@ -3349,9 +3412,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   ): Promise<ApproveAndPublishResult> => {
     const cleanId = (requestId || '').trim();
     let effectiveAdminUserId = user?.id;
-    let isCallerVerifiedAdmin = role === 'admin' && (!isSupabaseConfigured || user?.role === 'admin');
+    let isCallerVerifiedAdmin = false;
 
-    if (!isCallerVerifiedAdmin && isSupabaseConfigured) {
+    if (isSupabaseConfigured) {
       const serverCheck = await verifyServerAdminSession();
       if (
         serverCheck.status === 'authorized' &&
@@ -3360,14 +3423,44 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ) {
         isCallerVerifiedAdmin = true;
         effectiveAdminUserId = serverCheck.admin.id;
-        setAuthenticatedUser({
-          id: serverCheck.admin.id,
-          name: serverCheck.admin.name,
-          email: AUTHORIZED_ADMIN_EMAIL,
-          role: 'admin',
-          storeId: '',
+        if (user?.id !== serverCheck.admin.id || user?.role !== 'admin') {
+          setAuthenticatedUser({
+            id: serverCheck.admin.id,
+            name: serverCheck.admin.name,
+            email: AUTHORIZED_ADMIN_EMAIL,
+            role: 'admin',
+            storeId: '',
+          });
+        }
+      } else {
+        const failCode = serverCheck.status === 'mfa_required' ? 'MFA_REQUIRED' : 'FORBIDDEN';
+        const failMsg =
+          serverCheck.message ||
+          'Unauthorized: Verified platform administrator role with TOTP MFA is required.';
+        emitPaymentDiagnostic({
+          stage: 'ADMIN_APPROVAL_FAILED',
+          httpStatus: 403,
+          errorCode: failCode,
+          operation: mode,
+          table: 'payment_requests',
+          requestId: cleanId || null,
+          projectRef: supabaseProjectRef,
+          hasUserId: Boolean(serverCheck.admin?.id),
+          hasWebsiteId: false,
+          originLayer: 'session_check',
         });
+        showToast(failMsg, 'error');
+        return {
+          success: false,
+          paymentApproved: false,
+          websitePublished: false,
+          isWebsiteService: false,
+          code: failCode,
+          message: failMsg,
+        };
       }
+    } else {
+      isCallerVerifiedAdmin = role === 'admin';
     }
 
     if (!isCallerVerifiedAdmin) {
@@ -3406,7 +3499,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     processingPaymentIdsRef.current.add(cleanId);
     try {
       let targetRequest = paymentRequests.find((r) => r.id === cleanId) || null;
-      if (!targetRequest && isSupabaseConfigured) {
+      if (isSupabaseConfigured) {
         const { data } = await fetchPaymentRequestByIdFromDb(cleanId);
         if (data) {
           targetRequest = mapRawPaymentRow(data);
@@ -3414,6 +3507,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
 
       if (isSupabaseConfigured) {
+        const callerMatchesOwner = Boolean(
+          targetRequest?.userId &&
+            effectiveAdminUserId &&
+            targetRequest.userId.trim().toLowerCase() === effectiveAdminUserId.trim().toLowerCase()
+        );
+
+        emitPaymentDiagnostic({
+          stage: 'ADMIN_APPROVAL_STARTED',
+          httpStatus: null,
+          errorCode: null,
+          operation: mode,
+          table: 'payment_requests',
+          requestId: cleanId,
+          projectRef: supabaseProjectRef,
+          hasUserId: Boolean(effectiveAdminUserId),
+          hasWebsiteId: Boolean(
+            targetRequest &&
+              isWebsitePaymentService(targetRequest.serviceType) &&
+              targetRequest.serviceId
+          ),
+          callerMatchesRequestOwner: callerMatchesOwner,
+        });
+
         const result = await executeApproveAndPublishWorkflow({
           mode,
           request: targetRequest,
@@ -3433,6 +3549,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             },
             publishWebsiteRpc: (websiteId) => publishClientWebsiteInDb(websiteId),
           },
+        });
+
+        emitPaymentDiagnostic({
+          stage: result.success ? 'ADMIN_APPROVAL_SUCCEEDED' : 'ADMIN_APPROVAL_FAILED',
+          httpStatus: result.success ? 200 : 403,
+          errorCode: result.success ? null : result.code || 'APPROVAL_FAILED',
+          operation: mode,
+          table: 'payment_requests',
+          requestId: cleanId,
+          projectRef: supabaseProjectRef,
+          hasUserId: Boolean(effectiveAdminUserId),
+          hasWebsiteId: Boolean(result.websiteId || (targetRequest && targetRequest.serviceId)),
+          callerMatchesRequestOwner: callerMatchesOwner,
+          originLayer: result.code === 'SELF_APPROVAL_FORBIDDEN' ? 'frontend_guard' : 'rpc',
         });
 
         await Promise.all([
