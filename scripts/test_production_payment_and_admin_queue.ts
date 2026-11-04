@@ -12,8 +12,11 @@ import {
   validateManualPaymentSubmissionInput,
 } from '../src/lib/paymentWorkflow';
 import {
+  PAYMENT_REQUESTS_RESTRICTED_INSERT_COLUMNS,
+  PAYMENT_REQUEST_CLIENT_CONFIRM_SELECT,
   RawPaymentRequestRow,
   UUID_REGEX,
+  buildClientPaymentRequestInsertPayload,
   buildMerchantWebsiteInsertPayload,
   mapDatabaseRowToSubscribedWebsite,
 } from '../src/lib/supabase';
@@ -803,6 +806,140 @@ async function runProductionBaselineWorkflowSuite() {
   assert(!serializedLogs.includes('01712345678'), 'Phone number must never appear in diagnostics');
 
   console.log('  ✓ All 8 diagnostic stages verified & sensitive token/email/phone scrubbing confirmed');
+
+  console.log('\n[5/5] Verifying PostgreSQL 42501 ACL behavior (column-level grants vs missing table grants & 0-row atomicity)...');
+
+  const leastPrivPayload = buildClientPaymentRequestInsertPayload({
+    userId: clientUserId,
+    storeId: safeStoreId,
+    customerName: 'Tanvir Hasan',
+    customerPhone: '01712345678',
+    customerEmail: clientEmail,
+    serviceType: 'website_subscription',
+    serviceId: siblingWebsiteId,
+    serviceName: 'GoAMAAS Website (dhaka-loom-second.amaas.xyz)',
+    planTier: 'GoAMAAS Website',
+    amount: 600,
+    paymentMethod: 'bKash',
+    transactionId: 'TRX55443322B',
+    senderNumber: '01712345678',
+  });
+
+  for (const restrictedCol of PAYMENT_REQUESTS_RESTRICTED_INSERT_COLUMNS) {
+    assert(
+      !(restrictedCol in leastPrivPayload),
+      `Restricted column "${restrictedCol}" must NOT appear in client INSERT payload`
+    );
+  }
+  assert(!('bank_name' in leastPrivPayload), 'Unused bank_name omitted for bKash');
+  assert(!('bank_account_name' in leastPrivPayload), 'Unused bank_account_name omitted for bKash');
+  assert(!('bank_reference' in leastPrivPayload), 'Unused bank_reference omitted for bKash');
+
+  // 5a. Column-level INSERT + SELECT grants (excluding server-defaulted status/currency & admin review columns):
+  //     Old 18-column INSERT ... RETURNING * fails with 42501, whereas least-privilege payload + explicit SELECT succeeds!
+  await asRole(null, null, 'service_role');
+  await db.exec(`
+    REVOKE ALL ON TABLE public.payment_requests FROM PUBLIC, anon, authenticated;
+    GRANT SELECT (${PAYMENT_REQUEST_CLIENT_CONFIRM_SELECT}) ON TABLE public.payment_requests TO authenticated;
+    GRANT INSERT (
+      user_id, store_id, customer_name, customer_phone, customer_email,
+      service_type, service_id, service_name, plan_tier, amount,
+      payment_method, transaction_id, sender_number,
+      bank_name, bank_account_name, bank_reference
+    ) ON TABLE public.payment_requests TO authenticated;
+  `);
+
+  await asRole(clientUserId, clientEmail, 'authenticated');
+  let oldQuery42501Code = '';
+  let oldQuery42501Msg = '';
+  try {
+    await db.query(
+      `INSERT INTO public.payment_requests (
+        user_id, store_id, customer_name, customer_phone, customer_email,
+        service_type, service_id, service_name, plan_tier, amount, currency,
+        payment_method, transaction_id, sender_number, status
+      ) VALUES ($1,$2,'Tanvir Hasan','01712345678',$3,'website_subscription',$4,'GoAMAAS Website','GoAMAAS Website',600,'৳','bKash','TRXOLD42501','01712345678','pending')
+      RETURNING *;`,
+      [clientUserId, safeStoreId, clientEmail, siblingWebsiteId]
+    );
+  } catch (err: any) {
+    oldQuery42501Code = String(err?.code || '');
+    oldQuery42501Msg = String(err?.message || '');
+  }
+  assert(oldQuery42501Code === '42501', `Expected SQLSTATE 42501 on over-privileged INSERT ... RETURNING *, got "${oldQuery42501Code}"`);
+  assert(
+    oldQuery42501Msg === 'permission denied for table payment_requests',
+    `Expected exact message "permission denied for table payment_requests", got "${oldQuery42501Msg}"`
+  );
+
+  // Verify least-privilege payload + PAYMENT_REQUEST_CLIENT_CONFIRM_SELECT succeeds under column-level grants!
+  const lpKeys = Object.keys(leastPrivPayload);
+  const lpPlaceholders = lpKeys.map((_, idx) => `$${idx + 1}`).join(', ');
+  const lpValues = lpKeys.map((k) => (leastPrivPayload as Record<string, unknown>)[k]);
+  const colScopedRes = await db.query<RawPaymentRequestRow>(
+    `INSERT INTO public.payment_requests (${lpKeys.join(', ')}) VALUES (${lpPlaceholders}) RETURNING ${PAYMENT_REQUEST_CLIENT_CONFIRM_SELECT};`,
+    lpValues
+  );
+  assert(colScopedRes.rows.length === 1, 'Least-privilege INSERT ... RETURNING succeeded under column-level grants');
+  assert(UUID_REGEX.test(colScopedRes.rows[0].id), 'Real UUID confirmed');
+  assert(colScopedRes.rows[0].status === 'pending', 'Default status = pending populated by PostgreSQL');
+  assert(colScopedRes.rows[0].currency === '৳', 'Default currency = ৳ populated by PostgreSQL');
+
+  // 5b. Missing table-level INSERT or SELECT grants on Production (even when RLS INSERT policy exists):
+  //     Verify all 3 missing-grant combinations fail with SQLSTATE 42501 and persist ZERO rows!
+  await asRole(null, null, 'service_role');
+  const countBeforeRevoke = Number(
+    (await db.query<{ cnt: string }>(`SELECT count(*)::text AS cnt FROM public.payment_requests;`)).rows[0].cnt
+  );
+
+  const missingGrantModes: Array<{ label: string; setupSql: string }> = [
+    {
+      label: 'no SELECT and no INSERT granted to authenticated',
+      setupSql: `REVOKE ALL ON TABLE public.payment_requests FROM PUBLIC, anon, authenticated;`,
+    },
+    {
+      label: 'SELECT granted without INSERT to authenticated',
+      setupSql: `REVOKE ALL ON TABLE public.payment_requests FROM PUBLIC, anon, authenticated; GRANT SELECT ON TABLE public.payment_requests TO authenticated;`,
+    },
+    {
+      label: 'INSERT granted without SELECT to authenticated (INSERT ... RETURNING)',
+      setupSql: `REVOKE ALL ON TABLE public.payment_requests FROM PUBLIC, anon, authenticated; GRANT INSERT ON TABLE public.payment_requests TO authenticated;`,
+    },
+  ];
+
+  for (const mode of missingGrantModes) {
+    await asRole(null, null, 'service_role');
+    await db.exec(mode.setupSql);
+
+    await asRole(clientUserId, clientEmail, 'authenticated');
+    let errCode = '';
+    let errMsg = '';
+    try {
+      await db.query(
+        `INSERT INTO public.payment_requests (${lpKeys.join(', ')}) VALUES (${lpPlaceholders}) RETURNING ${PAYMENT_REQUEST_CLIENT_CONFIRM_SELECT};`,
+        lpValues.map((v, i) => (lpKeys[i] === 'transaction_id' ? 'TRXATOMIC001' : v))
+      );
+    } catch (err: any) {
+      errCode = String(err?.code || '');
+      errMsg = String(err?.message || '');
+    }
+    assert(errCode === '42501', `Expected 42501 when ${mode.label}, got "${errCode}"`);
+    assert(
+      errMsg === 'permission denied for table payment_requests',
+      `Expected "permission denied for table payment_requests" when ${mode.label}, got "${errMsg}"`
+    );
+
+    await asRole(null, null, 'service_role');
+    const countAfter = Number(
+      (await db.query<{ cnt: string }>(`SELECT count(*)::text AS cnt FROM public.payment_requests;`)).rows[0].cnt
+    );
+    assert(
+      countAfter === countBeforeRevoke,
+      `INSERT must NOT persist any row when 42501 occurs (${mode.label}): expected ${countBeforeRevoke}, got ${countAfter}`
+    );
+  }
+
+  console.log('  ✓ Confirmed SQLSTATE 42501 ACL behavior, least-privilege column compatibility, and 0-row atomic abort');
   console.log('\nALL PRODUCTION BASELINE & NODE ESM TESTS PASSED!');
 }
 

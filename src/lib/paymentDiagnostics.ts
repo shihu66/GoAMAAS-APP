@@ -13,6 +13,8 @@ export interface PaymentDiagnosticRecord {
   stage: PaymentDiagnosticStage;
   httpStatus: number | null;
   errorCode: string | null;
+  operation?: string;
+  table?: string;
   requestId: string | null;
   supabaseProjectRef: string;
   hasUserId: boolean;
@@ -106,6 +108,8 @@ export function emitPaymentDiagnostic(input: {
   stage: PaymentDiagnosticStage;
   httpStatus?: number | null;
   errorCode?: string | null;
+  operation?: string;
+  table?: string;
   requestId?: string | null;
   projectRef?: string | null;
   hasUserId: boolean;
@@ -113,6 +117,8 @@ export function emitPaymentDiagnostic(input: {
   source?: string;
   rowCount?: number;
 }): PaymentDiagnosticRecord {
+  const safeOperation = sanitizeSourceLabel(input.operation);
+  const safeTable = sanitizeSourceLabel(input.table);
   const record: PaymentDiagnosticRecord = {
     timestamp: new Date().toISOString(),
     stage: input.stage,
@@ -121,6 +127,8 @@ export function emitPaymentDiagnostic(input: {
         ? Math.trunc(input.httpStatus)
         : null,
     errorCode: sanitizeErrorCode(input.errorCode),
+    ...(safeOperation ? { operation: safeOperation } : {}),
+    ...(safeTable ? { table: safeTable } : {}),
     requestId: sanitizeRequestId(input.requestId),
     supabaseProjectRef: sanitizeProjectRef(input.projectRef),
     hasUserId: Boolean(input.hasUserId),

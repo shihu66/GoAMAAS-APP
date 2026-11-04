@@ -1160,6 +1160,139 @@ export interface RawPaymentRequestRow {
   updated_at: string;
 }
 
+export const PAYMENT_REQUESTS_RESTRICTED_INSERT_COLUMNS = [
+  'id',
+  'currency',
+  'status',
+  'admin_notes',
+  'reviewed_by',
+  'reviewed_at',
+  'created_at',
+  'updated_at',
+] as const;
+
+export const PAYMENT_REQUESTS_CLIENT_INSERT_COLUMNS = [
+  'user_id',
+  'store_id',
+  'customer_name',
+  'customer_phone',
+  'customer_email',
+  'service_type',
+  'service_id',
+  'service_name',
+  'plan_tier',
+  'amount',
+  'payment_method',
+  'transaction_id',
+  'sender_number',
+  'bank_name',
+  'bank_account_name',
+  'bank_reference',
+] as const;
+
+export const PAYMENT_REQUEST_CLIENT_CONFIRM_SELECT =
+  'id, user_id, store_id, customer_name, customer_phone, customer_email, service_type, service_id, service_name, plan_tier, amount, currency, payment_method, transaction_id, sender_number, bank_name, bank_account_name, bank_reference, status, created_at, updated_at';
+
+export type ClientPaymentRequestInsertPayload = {
+  user_id: string;
+  store_id?: string;
+  customer_name: string;
+  customer_phone: string;
+  customer_email: string;
+  service_type: 'website_subscription' | 'website_package' | 'dashboard_plan' | 'ai_automation';
+  service_id: string;
+  service_name: string;
+  plan_tier: string;
+  amount: number;
+  payment_method: 'bKash' | 'Nagad' | 'Bank Transfer';
+  transaction_id?: string;
+  sender_number?: string;
+  bank_name?: string;
+  bank_account_name?: string;
+  bank_reference?: string;
+};
+
+/**
+ * Builds a strict least-privilege client INSERT payload for public.payment_requests.
+ * Server-defaulted lifecycle columns (`id`, `currency`, `status`, `created_at`, `updated_at`),
+ * admin review columns (`admin_notes`, `reviewed_by`, `reviewed_at`), and unused optional null
+ * columns are intentionally omitted so PostgreSQL column defaults populate them without
+ * requesting extra column-level INSERT privileges.
+ */
+export function buildClientPaymentRequestInsertPayload(input: {
+  userId: string;
+  storeId?: string | null;
+  customerName: string;
+  customerPhone: string;
+  customerEmail: string;
+  serviceType: 'website_subscription' | 'website_package' | 'dashboard_plan' | 'ai_automation';
+  serviceId: string;
+  serviceName: string;
+  planTier: string;
+  amount: number;
+  paymentMethod: 'bKash' | 'Nagad' | 'Bank Transfer';
+  transactionId?: string | null;
+  senderNumber?: string | null;
+  bankName?: string | null;
+  bankAccountName?: string | null;
+  bankReference?: string | null;
+}): ClientPaymentRequestInsertPayload {
+  const payload: ClientPaymentRequestInsertPayload = {
+    user_id: input.userId.trim(),
+    customer_name: input.customerName.trim(),
+    customer_phone: input.customerPhone.trim(),
+    customer_email: input.customerEmail.trim(),
+    service_type: input.serviceType,
+    service_id: input.serviceId.trim(),
+    service_name: input.serviceName.trim(),
+    plan_tier: input.planTier.trim(),
+    amount: Number(input.amount),
+    payment_method: input.paymentMethod,
+  };
+
+  if (input.storeId && UUID_REGEX.test(input.storeId.trim())) {
+    payload.store_id = input.storeId.trim();
+  }
+
+  const cleanSender = (input.senderNumber || '').trim();
+  if (cleanSender) {
+    payload.sender_number = cleanSender;
+  }
+
+  if (input.paymentMethod === 'Bank Transfer') {
+    const cleanBankRef = (input.bankReference || input.transactionId || '').trim().toUpperCase();
+    if (cleanBankRef) {
+      payload.bank_reference = cleanBankRef;
+    }
+    const cleanTrx = (input.transactionId || '').trim().toUpperCase();
+    if (cleanTrx) {
+      payload.transaction_id = cleanTrx;
+    }
+    const cleanBankName = (input.bankName || '').trim();
+    if (cleanBankName) {
+      payload.bank_name = cleanBankName;
+    }
+    const cleanBankAccount = (input.bankAccountName || '').trim();
+    if (cleanBankAccount) {
+      payload.bank_account_name = cleanBankAccount;
+    }
+  } else {
+    const cleanTrx = (input.transactionId || '').trim().toUpperCase();
+    if (cleanTrx) {
+      payload.transaction_id = cleanTrx;
+    }
+  }
+
+  const allowedSet = new Set<string>(PAYMENT_REQUESTS_CLIENT_INSERT_COLUMNS);
+  for (const key of Object.keys(payload)) {
+    if (!allowedSet.has(key)) {
+      delete (payload as Record<string, unknown>)[key];
+    }
+  }
+
+  return payload;
+}
+
 export async function fetchUserPaymentRequests(
   userId?: string,
   options?: { isAdminQueue?: boolean }
@@ -1178,6 +1311,8 @@ export async function fetchUserPaymentRequests(
       stage: 'ADMIN_QUEUE_FETCH_STARTED',
       httpStatus: null,
       errorCode: null,
+      operation: 'SELECT_QUEUE',
+      table: 'payment_requests',
       requestId: null,
       projectRef: supabaseProjectRef,
       hasUserId: Boolean(userId),
@@ -1199,6 +1334,8 @@ export async function fetchUserPaymentRequests(
           stage: 'ADMIN_QUEUE_FETCH_FAILED',
           httpStatus: typeof status === 'number' ? status : null,
           errorCode: error.code || 'QUERY_ERROR',
+          operation: 'SELECT_QUEUE',
+          table: 'payment_requests',
           requestId: null,
           projectRef: supabaseProjectRef,
           hasUserId: Boolean(userId),
@@ -1709,35 +1846,37 @@ export async function createPaymentRequestInDb(params: {
       stage: 'PAYMENT_REQUEST_INSERT_STARTED',
       httpStatus: null,
       errorCode: null,
+      operation: 'INSERT_RETURNING',
+      table: 'payment_requests',
       requestId: null,
       projectRef: supabaseProjectRef,
       hasUserId: Boolean(authUser.id),
       hasWebsiteId: isWebsiteTarget && UUID_REGEX.test(resolvedServiceId),
     });
 
+    const insertPayload = buildClientPaymentRequestInsertPayload({
+      userId: authUser.id,
+      storeId: validStoreId,
+      customerName: safeCustomerName,
+      customerPhone: safeCustomerPhone,
+      customerEmail: safeCustomerEmail,
+      serviceType: params.serviceType,
+      serviceId: resolvedServiceId,
+      serviceName: safeServiceName,
+      planTier: safePlanTier,
+      amount: submittedAmount,
+      paymentMethod: params.paymentMethod,
+      transactionId: canonicalTrxId,
+      senderNumber: validation.normalizedSender,
+      bankName: params.bankName,
+      bankAccountName: params.bankAccountName,
+      bankReference: canonicalBankRef,
+    });
+
     const { data, error, status } = await supabase
       .from('payment_requests')
-      .insert({
-        user_id: authUser.id,
-        store_id: validStoreId,
-        customer_name: safeCustomerName,
-        customer_phone: safeCustomerPhone,
-        customer_email: safeCustomerEmail,
-        service_type: params.serviceType,
-        service_id: resolvedServiceId,
-        service_name: safeServiceName,
-        plan_tier: safePlanTier,
-        amount: submittedAmount,
-        currency: '৳',
-        payment_method: params.paymentMethod,
-        transaction_id: canonicalTrxId,
-        sender_number: validation.normalizedSender,
-        bank_name: (params.bankName || '').trim() || null,
-        bank_account_name: (params.bankAccountName || '').trim() || null,
-        bank_reference: canonicalBankRef,
-        status: 'pending',
-      })
-      .select('*')
+      .insert(insertPayload)
+      .select(PAYMENT_REQUEST_CLIENT_CONFIRM_SELECT)
       .single();
 
     if (error) {
@@ -1745,6 +1884,8 @@ export async function createPaymentRequestInDb(params: {
         stage: 'PAYMENT_REQUEST_INSERT_FAILED',
         httpStatus: typeof status === 'number' ? status : null,
         errorCode: error.code || 'INSERT_ERROR',
+        operation: 'INSERT_RETURNING',
+        table: 'payment_requests',
         requestId: null,
         projectRef: supabaseProjectRef,
         hasUserId: Boolean(authUser.id),
@@ -1788,6 +1929,8 @@ export async function createPaymentRequestInDb(params: {
         stage: 'PAYMENT_REQUEST_INSERT_FAILED',
         httpStatus: typeof status === 'number' ? status : null,
         errorCode: 'UNCONFIRMED_ROW',
+        operation: 'INSERT_RETURNING',
+        table: 'payment_requests',
         requestId: null,
         projectRef: supabaseProjectRef,
         hasUserId: Boolean(authUser.id),
@@ -1803,6 +1946,8 @@ export async function createPaymentRequestInDb(params: {
       stage: 'PAYMENT_REQUEST_INSERT_SUCCEEDED',
       httpStatus: typeof status === 'number' ? status : 201,
       errorCode: null,
+      operation: 'INSERT_RETURNING',
+      table: 'payment_requests',
       requestId: insertedRow.id,
       projectRef: supabaseProjectRef,
       hasUserId: Boolean(authUser.id),
@@ -1815,6 +1960,8 @@ export async function createPaymentRequestInDb(params: {
       stage: 'PAYMENT_REQUEST_INSERT_FAILED',
       httpStatus: null,
       errorCode: 'INSERT_EXCEPTION',
+      operation: 'INSERT_RETURNING',
+      table: 'payment_requests',
       requestId: null,
       projectRef: supabaseProjectRef,
       hasUserId: Boolean(params.userId),
