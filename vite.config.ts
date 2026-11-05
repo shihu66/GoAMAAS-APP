@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import { defineConfig, loadEnv } from 'vite';
 import resolveTenantHandler from './api/resolve-tenant.ts';
 import verifyPricingHandler from './api/verify-pricing.ts';
+import publicOrderHandler from './api/public-order.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,6 +17,7 @@ export default defineConfig(({ mode }) => {
   let localUrl = '';
   let localKey = '';
   let localEnv = '';
+  let localServiceRoleKey = '';
   for (const f of ['.env.local', '.env']) {
     if (fs.existsSync(f)) {
       const content = fs.readFileSync(f, 'utf8');
@@ -33,9 +35,18 @@ export default defineConfig(({ mode }) => {
           const val = trimmed.substring('VITE_SUPABASE_ENV='.length).trim().replace(/^["']|["']$/g, '');
           if (val) localEnv = val;
         }
+        if (trimmed.startsWith('SUPABASE_SERVICE_ROLE_KEY=')) {
+          const val = trimmed.substring('SUPABASE_SERVICE_ROLE_KEY='.length).trim().replace(/^["']|["']$/g, '');
+          if (val) localServiceRoleKey = val;
+        }
       }
     }
     if (localUrl && localKey) break;
+  }
+
+  // Server-only environment hydration for /api/* handlers (NEVER injected into Vite define / client bundle)
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY && (env.SUPABASE_SERVICE_ROLE_KEY || localServiceRoleKey)) {
+    process.env.SUPABASE_SERVICE_ROLE_KEY = (env.SUPABASE_SERVICE_ROLE_KEY || localServiceRoleKey).trim();
   }
 
   // Strictly resolve configured public client credentials (process.env > Vite mode env > local .env fallback)
@@ -79,6 +90,22 @@ export default defineConfig(({ mode }) => {
                 ok: false,
                 code: 'INTERNAL_PRICING_VERIFICATION_ERROR',
                 error: 'Server error verifying active service pricing.',
+              })
+            );
+          }
+          return;
+        }
+        if (pathname === '/api/public-order') {
+          try {
+            await publicOrderHandler(req, res);
+          } catch {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(
+              JSON.stringify({
+                ok: false,
+                code: 'INTERNAL_ORDER_ERROR',
+                error: 'Server error processing public storefront order.',
               })
             );
           }

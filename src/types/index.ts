@@ -27,6 +27,7 @@ export interface Product {
   sku: string;
   category: string;
   price: number;
+  discountPrice?: number;
   costPrice: number;
   stock: number;
   lowStockThreshold: number;
@@ -40,12 +41,27 @@ export interface Product {
   sortOrder?: number;
 }
 
+export interface OrderItemMetadata {
+  orderSource?: 'public_website' | 'manual_dashboard';
+  websiteId?: string;
+  subdomain?: string;
+  websiteSubdomain?: string;
+  deliveryArea?: string;
+  deliveryMethod?: string;
+  deliveryInstructions?: string;
+  orderNotes?: string;
+}
+
 export interface OrderItem {
   productId: string;
   name: string;
   price: number;
+  originalPrice?: number;
   quantity: number;
   sku: string;
+  imageUrl?: string;
+  category?: string;
+  orderMeta?: OrderItemMetadata;
 }
 
 export type OrderStatus = 'pending' | 'confirmed' | 'processing' | 'shipped' | 'delivered' | 'cancelled';
@@ -58,6 +74,7 @@ export interface Order {
   customerEmail: string;
   customerPhone: string;
   items: OrderItem[];
+  subtotal?: number;
   total: number;
   deliveryFee: number;
   discount: number;
@@ -66,10 +83,15 @@ export interface Order {
   paymentMethod: 'Cash on Delivery (COD)' | 'bKash' | 'Nagad' | 'Card' | 'Bank Transfer';
   shippingAddress: string;
   city: string;
+  deliveryArea?: string;
+  deliveryMethod?: string;
+  deliveryInstructions?: string;
   notes?: string;
   courierName?: string;
   trackingCode?: string;
   source?: string;
+  websiteId?: string;
+  websiteSubdomain?: string;
   createdAt: string;
 }
 
@@ -303,16 +325,32 @@ export interface WebsiteCustomLink {
   url: string;
 }
 
+export interface ProductCatalogMetaEntry {
+  imageUrl?: string;
+  discountPrice?: number;
+  websiteId?: string;
+  isVisible?: boolean;
+  sortOrder?: number;
+  updatedAt?: string;
+}
+
 export interface WebsiteProductItem {
   id: string;
   productId?: string;
+  sku?: string;
   name: string;
   price?: string;
   priceNumeric?: number;
+  discountPrice?: number;
+  originalPrice?: string;
   description: string;
   imageUrl?: string;
   category?: string;
+  stock?: number;
+  inStock?: boolean;
   isVisible?: boolean;
+  sortOrder?: number;
+  publishedAt?: string;
 }
 
 export interface WebsiteEditableFields {
@@ -339,6 +377,7 @@ export interface WebsiteEditableFields {
   templateId?: string;
   templateName?: string;
   servicesOrProducts?: WebsiteProductItem[];
+  productCatalogMeta?: Record<string, ProductCatalogMetaEntry>;
   socialLinks?: {
     facebook?: string;
     instagram?: string;
@@ -384,6 +423,7 @@ export interface SubscribedWebsite {
   subheadline: string;
   aboutText: string;
   servicesOrProducts: WebsiteProductItem[];
+  productCatalogMeta?: Record<string, ProductCatalogMetaEntry>;
   whatsappNumber: string;
   socialLinks: {
     facebook?: string;

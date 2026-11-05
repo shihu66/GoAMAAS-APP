@@ -19,6 +19,7 @@ import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { ManualPaymentModal } from '../../components/payment/ManualPaymentModal';
 import { PaymentReceiptModal } from '../../components/payment/PaymentReceiptModal';
 import { CATEGORY_SPECS, THEME_PALETTES } from '../../data/websiteBuilderConfig';
+import { buildWebsiteProductItemFromProduct } from '../../lib/storefrontSync';
 import {
   Globe,
   CreditCard,
@@ -163,6 +164,7 @@ export const SubscribedWebsitePage: React.FC = () => {
     saveWebsiteDraft,
     publishWebsiteUpdates,
     uploadWebsiteAsset,
+    removeWebsiteAsset,
     requestWebsiteContentUpdate,
     showToast,
     publishWebsite,
@@ -349,71 +351,64 @@ export const SubscribedWebsitePage: React.FC = () => {
     activeWebsite?.deploymentStatus,
   ]);
 
-  // Database products linked to this website
+  // Database products linked to this website (by websiteId, productCatalogMeta, or servicesOrProducts)
   const websiteDbProducts = useMemo(() => {
     if (!activeWebsite) return [];
+    const catalogProdIds = new Set(
+      (activeWebsite.servicesOrProducts || [])
+        .map((it) => it.productId || it.id)
+        .filter(Boolean)
+    );
     return products
-      .filter((p) => p.websiteId === activeWebsite.id && p.status !== 'archived')
+      .filter(
+        (p) =>
+          p.status !== 'archived' &&
+          (p.websiteId === activeWebsite.id ||
+            Boolean(activeWebsite.productCatalogMeta?.[p.id]) ||
+            catalogProdIds.has(p.id))
+      )
       .slice()
       .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
-  }, [products, activeWebsite?.id]);
+  }, [products, activeWebsite]);
 
-  // Unified product items for preview and syncing
+  // Unified product items for preview and syncing (preserving SKU, discountPrice, stock, and inStock)
   const unifiedWebsiteProducts = useMemo<WebsiteProductItem[]>(() => {
-    const dbMapped: WebsiteProductItem[] = websiteDbProducts.map((p) => ({
-      id: p.id,
-      productId: p.id,
-      name: p.name,
-      price: `৳${p.price.toLocaleString()}`,
-      priceNumeric: p.price,
-      description: p.description,
-      imageUrl: p.image,
-      category: p.category,
-      isVisible: p.isVisible !== false && p.status === 'active',
-    }));
+    const visibleDbMapped: WebsiteProductItem[] = websiteDbProducts
+      .filter((p) => p.isVisible !== false && p.status === 'active')
+      .map((p, idx) => buildWebsiteProductItemFromProduct(p, idx));
 
     const dbIds = new Set(websiteDbProducts.map((p) => p.id));
     const dbNames = new Set(websiteDbProducts.map((p) => p.name.trim().toLowerCase()));
 
     const remainingLegacy = editLegacyItems.filter(
       (item) =>
+        item.isVisible !== false &&
         (!item.productId || !dbIds.has(item.productId)) &&
         !dbIds.has(item.id) &&
         !dbNames.has((item.name || '').trim().toLowerCase())
     );
 
-    return [...dbMapped, ...remainingLegacy];
+    return [...visibleDbMapped, ...remainingLegacy];
   }, [websiteDbProducts, editLegacyItems]);
 
   const markDirty = () => setIsDirty(true);
+  const [heroUploadError, setHeroUploadError] = useState<string | null>(null);
+  const [heroUploadSuccess, setHeroUploadSuccess] = useState<string | null>(null);
 
-  const handleUploadImage = async (
-    file: File | undefined,
-    folder: 'logos' | 'heroes' | 'banners' | 'products' | 'sections',
-    key: string,
-    onDone: (publicUrl: string) => void
-  ) => {
-    if (!file || !activeWebsite) return;
-    setUploadingKey(key);
-    try {
-      const { publicUrl, error } = await uploadWebsiteAsset({
-        file,
-        folder,
-        websiteId: activeWebsite.id,
-      });
-      if (error || !publicUrl) {
-        showToast(error?.message || 'Image upload failed.', 'error');
-        return;
-      }
-      onDone(publicUrl);
-      markDirty();
-      showToast('Image uploaded to cloud storage.', 'success');
-    } finally {
-      setUploadingKey(null);
-    }
-  };
+  const buildEditablePayload = (overrides?: {
+    heroImageUrl?: string;
+    logoUrl?: string;
+    bannerImageUrl?: string;
+  }): Partial<SubscribedWebsite> => {
+    const resolvedHeroUrl =
+      overrides?.heroImageUrl !== undefined ? overrides.heroImageUrl.trim() : editHeroImageUrl.trim();
+    const resolvedLogoUrl =
+      overrides?.logoUrl !== undefined ? overrides.logoUrl.trim() : editLogoUrl.trim();
+    const resolvedBannerUrl =
+      overrides?.bannerImageUrl !== undefined
+        ? overrides.bannerImageUrl.trim()
+        : editBannerImageUrl.trim();
 
-  const buildEditablePayload = (): Partial<SubscribedWebsite> => {
     const cleanSocials: SubscribedWebsite['socialLinks'] = {};
     if (editSocialFacebook.trim()) cleanSocials.facebook = editSocialFacebook.trim();
     if (editSocialInstagram.trim()) cleanSocials.instagram = editSocialInstagram.trim();
@@ -429,12 +424,13 @@ export const SubscribedWebsitePage: React.FC = () => {
       if (sec.type === 'hero') {
         updated.title = editHeadline.trim() || sec.title;
         updated.subtitle = editSubheadline.trim();
+        updated.imageUrl = resolvedHeroUrl || undefined;
       } else if (sec.type === 'about') {
         updated.content = editAbout.trim();
       } else if (sec.type === 'banner') {
         updated.title = editBannerTitle.trim() || sec.title;
         updated.subtitle = editBannerSubtitle.trim();
-        updated.imageUrl = editBannerImageUrl.trim() || sec.imageUrl;
+        updated.imageUrl = resolvedBannerUrl || undefined;
         updated.ctaText = editBannerCtaText.trim() || sec.ctaText;
         updated.ctaLink = editBannerCtaLink.trim() || sec.ctaLink;
       }
@@ -453,15 +449,15 @@ export const SubscribedWebsitePage: React.FC = () => {
       niche: editNiche,
       nicheLabel: foundCat?.label || activeWebsite?.nicheLabel || editNiche,
       brandColor: editBrandColor,
-      logoUrl: editLogoUrl.trim() || '',
-      heroImageUrl: editHeroImageUrl.trim() || '',
+      logoUrl: resolvedLogoUrl || '',
+      heroImageUrl: resolvedHeroUrl || '',
       headline: editHeadline.trim(),
       subheadline: editSubheadline.trim(),
       heroCtaText: editHeroCtaText.trim(),
       heroCtaLink: editHeroCtaLink.trim(),
       secondaryCtaText: editSecondaryCtaText.trim(),
       secondaryCtaLink: editSecondaryCtaLink.trim(),
-      bannerImageUrl: editBannerImageUrl.trim() || '',
+      bannerImageUrl: resolvedBannerUrl || '',
       bannerTitle: editBannerTitle.trim(),
       bannerSubtitle: editBannerSubtitle.trim(),
       bannerCtaText: editBannerCtaText.trim(),
@@ -481,6 +477,100 @@ export const SubscribedWebsitePage: React.FC = () => {
       },
       servicesOrProducts: unifiedWebsiteProducts,
     };
+  };
+
+  const handleUploadImage = async (
+    file: File | undefined,
+    folder: 'logos' | 'heroes' | 'banners' | 'products' | 'sections',
+    key: string,
+    onDone: (publicUrl: string) => void
+  ) => {
+    if (!file || !activeWebsite) return;
+    if (folder === 'heroes') {
+      setHeroUploadError(null);
+      setHeroUploadSuccess(null);
+    }
+    setUploadingKey(key);
+    try {
+      const { publicUrl, error } = await uploadWebsiteAsset({
+        file,
+        folder,
+        websiteId: activeWebsite.id,
+      });
+      if (error || !publicUrl) {
+        const msg = error?.message || 'Image upload failed.';
+        if (folder === 'heroes') setHeroUploadError(msg);
+        showToast(msg, 'error');
+        return;
+      }
+      onDone(publicUrl);
+
+      // Immediately persist hero/logo/banner asset references to the database so refreshing or
+      // re-signing in never loses an uploaded image!
+      if (folder === 'heroes' || folder === 'logos' || folder === 'banners') {
+        const overridePatch =
+          folder === 'heroes'
+            ? { heroImageUrl: publicUrl }
+            : folder === 'logos'
+            ? { logoUrl: publicUrl }
+            : { bannerImageUrl: publicUrl };
+        const nextPayload = buildEditablePayload(overridePatch);
+        const isSiteLive = activeWebsite.deploymentStatus === 'live';
+        const saveRes = isSiteLive
+          ? await saveWebsiteDraft(activeWebsite.id, nextPayload)
+          : await updateSubscribedWebsite(activeWebsite.id, nextPayload, {
+              saveAsDraftOnly: false,
+              silentToast: true,
+            });
+        if (saveRes.success) {
+          setIsDirty(false);
+          if (folder === 'heroes') {
+            setHeroUploadSuccess(
+              isSiteLive
+                ? 'Hero image uploaded and saved to draft. Click "Publish Hero to Live Website" below to update your live site.'
+                : 'Hero image uploaded and saved to your website.'
+            );
+          }
+        } else if (folder === 'heroes' && saveRes.error) {
+          setHeroUploadError(saveRes.error.message);
+          markDirty();
+        }
+      } else {
+        markDirty();
+      }
+      showToast('Image uploaded and saved.', 'success');
+    } finally {
+      setUploadingKey(null);
+    }
+  };
+
+  const handleRemoveHeroImage = async () => {
+    if (!activeWebsite) return;
+    const prevUrl = editHeroImageUrl;
+    setEditHeroImageUrl('');
+    setHeroUploadError(null);
+    setHeroUploadSuccess(null);
+    if (prevUrl && prevUrl.startsWith('http') && prevUrl !== activeWebsite.heroImageUrl) {
+      void removeWebsiteAsset(prevUrl);
+    }
+    const nextPayload = buildEditablePayload({ heroImageUrl: '' });
+    const isSiteLive = activeWebsite.deploymentStatus === 'live';
+    const saveRes = isSiteLive
+      ? await saveWebsiteDraft(activeWebsite.id, nextPayload)
+      : await updateSubscribedWebsite(activeWebsite.id, nextPayload, {
+          saveAsDraftOnly: false,
+          silentToast: true,
+        });
+    if (saveRes.success) {
+      setIsDirty(false);
+      setHeroUploadSuccess(
+        isSiteLive
+          ? 'Hero image removed in draft. Click "Publish Updates" to apply to your live website.'
+          : 'Hero image removed and saved.'
+      );
+    } else {
+      markDirty();
+    }
   };
 
   // Live Real-Time Preview Object
@@ -1732,49 +1822,84 @@ export const SubscribedWebsitePage: React.FC = () => {
 
                   {/* Hero Image Upload */}
                   <div className="space-y-2">
-                    <label className="block font-semibold text-slate-700 dark:text-slate-300">
-                      Hero Image (Supabase Cloud Storage)
-                    </label>
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="block font-semibold text-slate-700 dark:text-slate-300">
+                        Hero Image (Cloud Storage)
+                      </label>
+                      <span className="text-[11px] text-slate-500">
+                        PNG, JPG, WEBP · Max 5 MB
+                      </span>
+                    </div>
                     {editHeroImageUrl ? (
-                      <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 space-y-2">
+                      <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 space-y-2.5">
                         <img
                           src={editHeroImageUrl}
                           alt="Hero banner"
+                          referrerPolicy="no-referrer"
                           className="w-full h-36 rounded-lg object-cover border border-slate-200 dark:border-slate-700"
                         />
-                        <div className="flex items-center justify-between">
+                        <div className="flex items-center justify-between gap-2">
                           <label className="text-blue-600 dark:text-blue-400 font-semibold hover:underline cursor-pointer inline-flex items-center gap-1">
                             {uploadingKey === 'hero' ? (
                               <Loader2 className="w-3.5 h-3.5 animate-spin" />
                             ) : (
                               <Upload className="w-3.5 h-3.5" />
                             )}
-                            <span>Replace Hero Image</span>
+                            <span>
+                              {uploadingKey === 'hero' ? 'Uploading...' : 'Replace Hero Image'}
+                            </span>
                             <input
                               type="file"
-                              accept="image/*"
+                              accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
                               className="hidden"
-                              onChange={(e) =>
+                              onChange={(e) => {
+                                const f = e.target.files?.[0];
+                                e.target.value = '';
                                 void handleUploadImage(
-                                  e.target.files?.[0],
+                                  f,
                                   'heroes',
                                   'hero',
                                   setEditHeroImageUrl
-                                )
-                              }
+                                );
+                              }}
                             />
                           </label>
                           <button
                             type="button"
-                            onClick={() => {
-                              setEditHeroImageUrl('');
-                              markDirty();
-                            }}
+                            onClick={() => void handleRemoveHeroImage()}
                             className="text-rose-600 font-semibold hover:underline cursor-pointer"
                           >
-                            Remove
+                            Remove Hero Image
                           </button>
                         </div>
+
+                        {isLive && editHeroImageUrl !== (activeWebsite.heroImageUrl || '') && (
+                          <div className="pt-2 border-t border-slate-200 dark:border-slate-700 flex flex-wrap items-center justify-between gap-2">
+                            <span className="text-[11px] text-amber-700 dark:text-amber-400 font-medium">
+                              Saved to draft — publish to show on live website
+                            </span>
+                            <button
+                              type="button"
+                              disabled={isPublishing}
+                              onClick={() => void handlePublishUpdatesClick()}
+                              className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-[11px] inline-flex items-center gap-1 cursor-pointer disabled:opacity-60"
+                            >
+                              {isPublishing ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <Send className="w-3 h-3" />
+                              )}
+                              <span>Publish Hero to Live Website</span>
+                            </button>
+                          </div>
+                        )}
+
+                        {isLive && editHeroImageUrl === (activeWebsite.heroImageUrl || '') && (
+                          <p className="text-[11px] text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1">
+                            <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                            <span>Live on https://{activeWebsite.fullDomainUrl}</span>
+                          </p>
+                        )}
                       </div>
                     ) : (
                       <label className="flex items-center justify-center gap-2 p-4 rounded-xl border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-blue-500 cursor-pointer text-slate-600 dark:text-slate-300 font-semibold">
@@ -1790,18 +1915,33 @@ export const SubscribedWebsitePage: React.FC = () => {
                         </span>
                         <input
                           type="file"
-                          accept="image/*"
+                          accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
                           className="hidden"
-                          onChange={(e) =>
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            e.target.value = '';
                             void handleUploadImage(
-                              e.target.files?.[0],
+                              f,
                               'heroes',
                               'hero',
                               setEditHeroImageUrl
-                            )
-                          }
+                            );
+                          }}
                         />
                       </label>
+                    )}
+
+                    {heroUploadError && (
+                      <p className="text-[11px] text-rose-600 dark:text-rose-400 font-medium flex items-center gap-1">
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                        <span>{heroUploadError}</span>
+                      </p>
+                    )}
+                    {heroUploadSuccess && !heroUploadError && (
+                      <p className="text-[11px] text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1">
+                        <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                        <span>{heroUploadSuccess}</span>
+                      </p>
                     )}
                   </div>
 

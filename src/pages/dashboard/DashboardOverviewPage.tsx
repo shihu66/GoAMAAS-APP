@@ -1,10 +1,12 @@
 import React, { useState, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
+import { useLanguage } from '../../context/LanguageContext';
+import { isWebsiteTrulyLive } from '../../lib/paymentWorkflow';
+import { extractOrderMetadataFromItems } from '../../lib/storefrontSync';
 import {
   TrendingUp,
   ShoppingCart,
-  Users,
   Package,
   AlertTriangle,
   ArrowRight,
@@ -12,11 +14,11 @@ import {
   Bot,
   Layers,
   Calendar,
-  Filter,
   CheckCircle2,
   Clock,
   Truck,
   ExternalLink,
+  Globe,
 } from 'lucide-react';
 import {
   AreaChart,
@@ -39,10 +41,23 @@ export const DashboardOverviewPage: React.FC = () => {
     products,
     orders,
     customers,
+    subscribedWebsites,
   } = useApp();
+  const { lang } = useLanguage();
   const navigate = useNavigate();
 
   const [dateRange, setDateRange] = useState<'7d' | '30d' | '90d'>('30d');
+
+  const connectedWebsite = useMemo(() => {
+    if (!subscribedWebsites || subscribedWebsites.length === 0) return null;
+    if (activeStore) {
+      const match = subscribedWebsites.find((w) => w.storeId === activeStore.id);
+      if (match) return match;
+    }
+    return subscribedWebsites[0];
+  }, [subscribedWebsites, activeStore]);
+
+  const isWebsiteLive = connectedWebsite ? isWebsiteTrulyLive(connectedWebsite) : false;
 
   // Computed metrics strictly calculated from actual database/context records
   const totalSales = useMemo(
@@ -50,7 +65,16 @@ export const DashboardOverviewPage: React.FC = () => {
     [orders]
   );
   const totalOrders = orders.length;
-  const totalCustomers = customers.length;
+  const pendingOrdersCount = useMemo(
+    () =>
+      orders.filter((o) => o.status === 'pending' || o.status === 'confirmed' || o.status === 'processing')
+        .length,
+    [orders]
+  );
+  const completedOrdersCount = useMemo(
+    () => orders.filter((o) => o.status === 'delivered').length,
+    [orders]
+  );
   const lowStockCount = products.filter((p) => p.stock <= p.lowStockThreshold).length;
 
   // Real chart data computed from authenticated user's actual orders
@@ -246,15 +270,19 @@ export const DashboardOverviewPage: React.FC = () => {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
-            Store Overview — {activeStore?.name || 'Workspace'}
+            {lang === 'bn'
+              ? `স্টোর ওভারভিউ — ${activeStore?.name || 'ওয়ার্কস্পেস'}`
+              : `Store Overview — ${activeStore?.name || 'Workspace'}`}
           </h1>
           <p className="text-xs text-slate-500 mt-1">
-            Real-time performance summary and active fulfillment pipeline.
+            {lang === 'bn'
+              ? 'আপনার পাবলিক ওয়েবসাইট, পণ্য ক্যাটালগ এবং গ্রাহক অর্ডারের রিয়েল-টাইম সারাংশ।'
+              : 'Real-time storefront connection, inventory status, and customer order pipeline.'}
           </p>
         </div>
 
         {/* Date Filter & Quick Actions */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <div className="flex items-center p-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs font-medium">
             <button
               onClick={() => setDateRange('7d')}
@@ -289,12 +317,103 @@ export const DashboardOverviewPage: React.FC = () => {
           </div>
 
           <Link
-            to="/dashboard/products"
-            className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-xs transition-colors"
+            to="/dashboard/products?action=add"
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-xs transition-colors whitespace-nowrap shrink-0"
           >
             <Plus className="w-3.5 h-3.5" />
-            <span>Add Product</span>
+            <span>{lang === 'bn' ? 'নতুন পণ্য যোগ করুন' : 'Add Product'}</span>
           </Link>
+        </div>
+      </div>
+
+      {/* Connected Public Website & Storefront Quick Actions */}
+      <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 text-xs text-slate-500">
+              <Globe className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+              <span className="font-semibold text-slate-900 dark:text-white">
+                {connectedWebsite
+                  ? connectedWebsite.businessName
+                  : lang === 'bn'
+                  ? 'আপনার পাবলিক ওয়েবসাইট সংযুক্ত করুন'
+                  : 'Connect Your Public Storefront'}
+              </span>
+              <span aria-hidden="true">·</span>
+              {connectedWebsite ? (
+                <span
+                  className={
+                    isWebsiteLive
+                      ? 'font-semibold text-emerald-600 dark:text-emerald-400'
+                      : 'font-semibold text-amber-600 dark:text-amber-400'
+                  }
+                >
+                  {isWebsiteLive ? 'Live Public Website' : 'Draft / Pending Activation'}
+                </span>
+              ) : (
+                <span>No website created yet</span>
+              )}
+            </div>
+
+            {connectedWebsite ? (
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                <span className="font-mono text-blue-600 dark:text-blue-400">
+                  https://{connectedWebsite.fullDomainUrl}
+                </span>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono tabular-nums">
+                  {(connectedWebsite.servicesOrProducts || []).filter((i) => i.isVisible !== false).length}{' '}
+                  published product(s)
+                </span>
+              </div>
+            ) : (
+              <p className="text-xs text-slate-500">
+                Launch your GoAMAAS Website so customers can browse your catalog and place orders online.
+              </p>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Link
+              to="/dashboard/products?action=add"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Add Product</span>
+            </Link>
+            <Link
+              to="/dashboard/products"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+            >
+              <Package className="w-3.5 h-3.5 text-slate-500" />
+              <span>Manage Products</span>
+            </Link>
+            <Link
+              to="/dashboard/orders"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+            >
+              <ShoppingCart className="w-3.5 h-3.5 text-slate-500" />
+              <span>Manage Orders</span>
+            </Link>
+            <Link
+              to={connectedWebsite ? '/dashboard/subscribed-website' : '/create-website'}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+            >
+              <Globe className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+              <span>{connectedWebsite ? (isWebsiteLive ? 'Edit & Publish Website' : 'Publish Website') : 'Create Website'}</span>
+            </Link>
+            {connectedWebsite && (
+              <a
+                href={`/s/${connectedWebsite.subdomain}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:opacity-90 text-xs font-semibold transition-opacity whitespace-nowrap shrink-0"
+              >
+                <span>Visit Website</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            )}
+          </div>
         </div>
       </div>
 
@@ -327,14 +446,14 @@ export const DashboardOverviewPage: React.FC = () => {
         {/* Total Sales */}
         <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
           <div className="flex items-center justify-between text-slate-500 text-xs font-medium">
-            <span>Gross Sales</span>
+            <span>Total Sales</span>
             <TrendingUp className="w-4 h-4 text-emerald-500" />
           </div>
           <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white font-mono tabular-nums">
             ৳{totalSales.toLocaleString()}
           </p>
           <div className="mt-2 flex items-center gap-1.5 text-[11px] text-slate-500 font-medium">
-            <span>{totalOrders} order{totalOrders !== 1 ? 's' : ''} total</span>
+            <span>Non-cancelled revenue · {products.length} catalog item(s)</span>
           </div>
         </div>
 
@@ -347,42 +466,49 @@ export const DashboardOverviewPage: React.FC = () => {
           <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white font-mono tabular-nums">
             {totalOrders}
           </p>
-          <div className="mt-2 flex items-center gap-1.5 text-[11px] text-blue-600 dark:text-blue-400 font-medium">
-            <span>{orders.filter((o) => o.status === 'delivered').length} delivered parcels</span>
+          <div className="mt-2 flex items-center gap-1.5 text-[11px] text-slate-500 font-medium">
+            <span>{customers.length} unique customer(s)</span>
           </div>
         </div>
 
-        {/* Total Customers */}
+        {/* Pending / Active Fulfillment Orders */}
         <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
           <div className="flex items-center justify-between text-slate-500 text-xs font-medium">
-            <span>Customers Directory</span>
-            <Users className="w-4 h-4 text-purple-500" />
+            <span>Pending Orders</span>
+            <Clock className="w-4 h-4 text-amber-500" />
           </div>
           <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white font-mono tabular-nums">
-            {totalCustomers}
+            {pendingOrdersCount}
           </p>
-          <div className="mt-2 flex items-center gap-1.5 text-[11px] text-slate-500">
-            <span>{customers.filter((c) => c.status === 'vip').length} VIP buyers</span>
+          <div className="mt-2 flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400 font-medium">
+            <Link to="/dashboard/orders" className="hover:underline">
+              Awaiting confirmation or dispatch →
+            </Link>
           </div>
         </div>
 
-        {/* Products in Stock / Low Stock Alert */}
+        {/* Completed / Delivered Orders + Stock Health */}
         <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
           <div className="flex items-center justify-between text-slate-500 text-xs font-medium">
-            <span>Products Catalog</span>
-            <Package className="w-4 h-4 text-amber-500" />
+            <span>Completed / Delivered</span>
+            <CheckCircle2 className="w-4 h-4 text-emerald-500" />
           </div>
           <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white font-mono tabular-nums">
-            {products.length}
+            {completedOrdersCount}
           </p>
           <div className="mt-2 flex items-center gap-1.5 text-[11px]">
             {lowStockCount > 0 ? (
-              <span className="text-amber-600 dark:text-amber-400 font-semibold flex items-center gap-1">
+              <Link
+                to="/dashboard/inventory"
+                className="text-amber-600 dark:text-amber-400 font-semibold flex items-center gap-1 hover:underline"
+              >
                 <AlertTriangle className="w-3 h-3" />
-                {lowStockCount} items low in stock
-              </span>
+                {lowStockCount} item(s) low in stock
+              </Link>
             ) : (
-              <span className="text-emerald-600 font-medium">All stock levels healthy</span>
+              <span className="text-emerald-600 dark:text-emerald-400 font-medium">
+                All stock levels healthy
+              </span>
             )}
           </div>
         </div>
@@ -690,52 +816,59 @@ export const DashboardOverviewPage: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {recentOrders.map((ord) => (
-                    <tr key={ord.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
-                      <td className="py-2.5 font-mono font-medium text-blue-600 dark:text-blue-400">
-                        <Link to="/dashboard/orders">{ord.orderNumber}</Link>
-                      </td>
-                      <td className="py-2.5">
-                        <span className="font-medium text-slate-900 dark:text-white block truncate max-w-[120px]">
-                          {ord.customerName}
-                        </span>
-                        <span className="text-[10px] text-slate-400">{ord.city}</span>
-                      </td>
-                      <td className="py-2.5 font-mono font-bold tabular-nums">
-                        ৳{ord.total.toLocaleString()}
-                      </td>
-                      <td className="py-2.5">
-                        <span
-                          className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
-                            ord.status === 'delivered'
-                              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400'
-                              : ord.status === 'shipped'
-                              ? 'bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-400'
-                              : ord.status === 'processing'
-                              ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-400'
-                              : ord.status === 'confirmed'
-                              ? 'bg-purple-100 text-purple-800 dark:bg-purple-950/60 dark:text-purple-400'
-                              : 'bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-slate-300'
-                          }`}
-                        >
-                          {ord.status}
-                        </span>
-                      </td>
-                      <td className="py-2.5">
-                        <span
-                          className={`text-[11px] font-medium ${
-                            ord.paymentStatus === 'paid'
-                              ? 'text-emerald-600'
-                              : ord.paymentStatus === 'pending'
-                              ? 'text-amber-600'
-                              : 'text-rose-600'
-                          }`}
-                        >
-                          {ord.paymentStatus.toUpperCase()}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
+                  {recentOrders.map((ord) => {
+                    const meta = extractOrderMetadataFromItems(ord.items);
+                    const sub = ord.websiteSubdomain || meta.websiteSubdomain;
+                    return (
+                      <tr key={ord.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
+                        <td className="py-2.5 font-mono font-medium text-blue-600 dark:text-blue-400">
+                          <Link to="/dashboard/orders" className="hover:underline">{ord.orderNumber}</Link>
+                          <span className="block text-[10px] font-sans text-slate-400">
+                            {sub ? `${sub}.amaas.xyz` : 'Dashboard'}
+                          </span>
+                        </td>
+                        <td className="py-2.5">
+                          <span className="font-medium text-slate-900 dark:text-white block truncate max-w-[130px]">
+                            {ord.customerName}
+                          </span>
+                          <span className="text-[10px] text-slate-400">{ord.city}</span>
+                        </td>
+                        <td className="py-2.5 font-mono font-bold tabular-nums">
+                          ৳{ord.total.toLocaleString()}
+                        </td>
+                        <td className="py-2.5">
+                          <span
+                            className={`text-[11px] font-semibold uppercase ${
+                              ord.status === 'delivered'
+                                ? 'text-emerald-600 dark:text-emerald-400'
+                                : ord.status === 'shipped'
+                                ? 'text-blue-600 dark:text-blue-400'
+                                : ord.status === 'processing' || ord.status === 'pending'
+                                ? 'text-amber-600 dark:text-amber-400'
+                                : ord.status === 'cancelled'
+                                ? 'text-rose-600 dark:text-rose-400'
+                                : 'text-slate-700 dark:text-slate-300'
+                            }`}
+                          >
+                            {ord.status}
+                          </span>
+                        </td>
+                        <td className="py-2.5">
+                          <span
+                            className={`text-[11px] font-medium ${
+                              ord.paymentStatus === 'paid'
+                                ? 'text-emerald-600'
+                                : ord.paymentStatus === 'pending'
+                                ? 'text-amber-600'
+                                : 'text-rose-600'
+                            }`}
+                          >
+                            {ord.paymentStatus.toUpperCase()}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

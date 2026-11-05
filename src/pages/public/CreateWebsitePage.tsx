@@ -12,6 +12,11 @@ import { ManualPaymentModal } from '../../components/payment/ManualPaymentModal'
 import { CATEGORY_SPECS, THEME_PALETTES, CategorySpec } from '../../data/websiteBuilderConfig';
 import { isPlatformAdminAccountEmail } from '../../lib/paymentWorkflow';
 import {
+  ALLOWED_WEBSITE_ASSET_MIMES,
+  MAX_WEBSITE_ASSET_BYTES,
+  compressImageFileToCompactDataUrl,
+} from '../../lib/supabase';
+import {
   ArrowRight,
   ArrowLeft,
   CheckCircle2,
@@ -56,6 +61,7 @@ export const CreateWebsitePage: React.FC = () => {
     createSubscribedWebsite,
     updateSubscribedWebsite,
     uploadWebsiteAsset,
+    removeWebsiteAsset,
     checkSubdomainAvailability,
     checkSubdomainAvailabilityAsync,
     paymentGatewayConfigs,
@@ -305,6 +311,9 @@ export const CreateWebsitePage: React.FC = () => {
     }
   };
 
+  const [assetUploadError, setAssetUploadError] = useState<string | null>(null);
+  const [heroUploadSuccessMsg, setHeroUploadSuccessMsg] = useState<string | null>(null);
+
   const handleAssetFileUpload = async (
     file: File | undefined,
     folder: 'logos' | 'heroes' | 'products',
@@ -312,26 +321,101 @@ export const CreateWebsitePage: React.FC = () => {
     onUploaded: (url: string) => void
   ) => {
     if (!file) return;
-    if (!isAuthenticated) {
-      showToast(cw.toasts.signInUpload, 'warning');
-      navigate('/login?redirect=/create-website');
+    setAssetUploadError(null);
+    if (folder === 'heroes') setHeroUploadSuccessMsg(null);
+
+    if (file.size <= 0) {
+      const msg = 'Please choose a non-empty image file.';
+      setAssetUploadError(msg);
+      showToast(msg, 'error');
       return;
     }
+    if (file.size > MAX_WEBSITE_ASSET_BYTES) {
+      const msg = 'Image exceeds the 5 MB maximum upload size. Please choose a smaller image.';
+      setAssetUploadError(msg);
+      showToast(msg, 'error');
+      return;
+    }
+    const mime = (file.type || '').toLowerCase().trim();
+    if (!ALLOWED_WEBSITE_ASSET_MIMES.has(mime)) {
+      const msg = 'Unsupported file type. Please upload PNG, JPG, WEBP, GIF, or AVIF images.';
+      setAssetUploadError(msg);
+      showToast(msg, 'error');
+      return;
+    }
+
     setUploadingAssetKey(key);
     try {
+      if (!isAuthenticated) {
+        // Pre-login wizard preview: resize/compress via canvas so state remains fast and compact
+        const compactPreviewUrl = await compressImageFileToCompactDataUrl(file);
+        onUploaded(compactPreviewUrl);
+        if (folder === 'heroes') {
+          setHeroUploadSuccessMsg('Hero image ready in live preview. Sign in at final step to save.');
+        }
+        showToast(cw.toasts.uploadSuccess, 'success');
+        return;
+      }
+
       const { publicUrl, error } = await uploadWebsiteAsset({
         file,
         folder,
         websiteId: createdSiteId || undefined,
       });
       if (error || !publicUrl) {
-        showToast(error?.message || cw.toasts.uploadFailed, 'error');
+        const msg = error?.message || cw.toasts.uploadFailed;
+        setAssetUploadError(msg);
+        showToast(msg, 'error');
         return;
       }
       onUploaded(publicUrl);
+
+      // Immediately persist to database if website record was already created in this session
+      if (createdSiteId && (folder === 'heroes' || folder === 'logos')) {
+        await updateSubscribedWebsite(
+          createdSiteId,
+          folder === 'heroes' ? { heroImageUrl: publicUrl } : { logoUrl: publicUrl },
+          { silentToast: true }
+        );
+      }
+
+      if (folder === 'heroes') {
+        setHeroUploadSuccessMsg(
+          createdSiteId ? 'Hero image uploaded and saved to your website.' : 'Hero image uploaded to cloud storage.'
+        );
+      }
       showToast(cw.toasts.uploadSuccess, 'success');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : cw.toasts.uploadFailed;
+      setAssetUploadError(msg);
+      showToast(msg, 'error');
     } finally {
       setUploadingAssetKey(null);
+    }
+  };
+
+  const handleClearHeroImage = async () => {
+    const previousUrl = heroImageUrl;
+    setHeroImageUrl('');
+    setHeroUploadSuccessMsg(null);
+    setAssetUploadError(null);
+    if (previousUrl && previousUrl.startsWith('http')) {
+      void removeWebsiteAsset(previousUrl);
+    }
+    if (createdSiteId && isAuthenticated) {
+      await updateSubscribedWebsite(createdSiteId, { heroImageUrl: '' }, { silentToast: true });
+    }
+  };
+
+  const handleClearLogoImage = async () => {
+    const previousUrl = logoUrl;
+    setLogoUrl('');
+    setAssetUploadError(null);
+    if (previousUrl && previousUrl.startsWith('http')) {
+      void removeWebsiteAsset(previousUrl);
+    }
+    if (createdSiteId && isAuthenticated) {
+      await updateSubscribedWebsite(createdSiteId, { logoUrl: '' }, { silentToast: true });
     }
   };
 
@@ -462,8 +546,8 @@ export const CreateWebsitePage: React.FC = () => {
           templateId: 'tpl-modern-business',
           templateName: `${selectedCategory.label}`,
           brandColor,
-          logoUrl: logoUrl || undefined,
-          heroImageUrl: heroImageUrl || undefined,
+          logoUrl: logoUrl || '',
+          heroImageUrl: heroImageUrl || '',
           heroCtaText: heroCtaText.trim(),
           heroCtaLink: heroCtaLink.trim(),
           headline: headline.trim(),
@@ -1153,16 +1237,18 @@ export const CreateWebsitePage: React.FC = () => {
                         </span>
                         <input
                           type="file"
-                          accept="image/*"
+                          accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
                           className="hidden"
-                          onChange={(e) =>
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            e.target.value = '';
                             void handleAssetFileUpload(
-                              e.target.files?.[0],
+                              f,
                               'products',
                               `prod-${item.id}`,
                               (url) => handleUpdateItem(item.id, 'imageUrl', url)
-                            )
-                          }
+                            );
+                          }}
                         />
                       </label>
                     )}
@@ -1224,20 +1310,38 @@ export const CreateWebsitePage: React.FC = () => {
                   {cw.step4.logoLabel}
                 </label>
                 {logoUrl ? (
-                  <div className="flex items-center gap-3 p-2.5 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                  <div className="flex items-center justify-between gap-2.5 p-2.5 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
                     <img
                       src={logoUrl}
                       alt="Business Logo"
                       referrerPolicy="no-referrer"
-                      className="w-10 h-10 rounded-lg object-contain bg-white p-0.5 border border-slate-200"
+                      className="w-10 h-10 rounded-lg object-contain bg-white p-0.5 border border-slate-200 shrink-0"
                     />
-                    <button
-                      type="button"
-                      onClick={() => setLogoUrl('')}
-                      className="text-rose-600 font-semibold hover:underline cursor-pointer"
-                    >
-                      {cw.step4.removeLogo}
-                    </button>
+                    <div className="flex items-center gap-3">
+                      <label className="text-blue-600 dark:text-blue-400 font-semibold hover:underline cursor-pointer inline-flex items-center gap-1">
+                        {uploadingAssetKey === 'logo' && (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        )}
+                        <span>Replace</span>
+                        <input
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
+                          className="hidden"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            e.target.value = '';
+                            void handleAssetFileUpload(f, 'logos', 'logo', setLogoUrl);
+                          }}
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => void handleClearLogoImage()}
+                        className="text-rose-600 font-semibold hover:underline cursor-pointer"
+                      >
+                        {cw.step4.removeLogo}
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <label className="min-h-[44px] flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl border border-dashed border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800/70 hover:border-blue-500 cursor-pointer text-slate-700 dark:text-slate-300 font-semibold">
@@ -1251,11 +1355,13 @@ export const CreateWebsitePage: React.FC = () => {
                     </span>
                     <input
                       type="file"
-                      accept="image/*"
+                      accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
                       className="hidden"
-                      onChange={(e) =>
-                        void handleAssetFileUpload(e.target.files?.[0], 'logos', 'logo', setLogoUrl)
-                      }
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        e.target.value = '';
+                        void handleAssetFileUpload(f, 'logos', 'logo', setLogoUrl);
+                      }}
                     />
                   </label>
                 )}
@@ -1267,45 +1373,89 @@ export const CreateWebsitePage: React.FC = () => {
                   {cw.step4.heroImageLabel}
                 </label>
                 {heroImageUrl ? (
-                  <div className="flex items-center gap-3 p-2.5 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
-                    <img
-                      src={heroImageUrl}
-                      alt="Hero Banner"
-                      referrerPolicy="no-referrer"
-                      className="w-14 h-10 rounded-lg object-cover border border-slate-200"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setHeroImageUrl('')}
-                      className="text-rose-600 font-semibold hover:underline cursor-pointer"
-                    >
-                      {cw.step4.removeHero}
-                    </button>
+                  <div className="p-2.5 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 space-y-2">
+                    <div className="flex items-center justify-between gap-2.5">
+                      <img
+                        src={heroImageUrl}
+                        alt="Hero Banner"
+                        referrerPolicy="no-referrer"
+                        className="w-16 h-11 rounded-lg object-cover border border-slate-200 shrink-0"
+                      />
+                      <div className="flex items-center gap-3">
+                        <label className="text-blue-600 dark:text-blue-400 font-semibold hover:underline cursor-pointer inline-flex items-center gap-1">
+                          {uploadingAssetKey === 'hero' && (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          )}
+                          <span>Replace</span>
+                          <input
+                            type="file"
+                            accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
+                            className="hidden"
+                            onChange={(e) => {
+                              const f = e.target.files?.[0];
+                              e.target.value = '';
+                              void handleAssetFileUpload(
+                                f,
+                                'heroes',
+                                'hero',
+                                setHeroImageUrl
+                              );
+                            }}
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => void handleClearHeroImage()}
+                          className="text-rose-600 font-semibold hover:underline cursor-pointer"
+                        >
+                          {cw.step4.removeHero}
+                        </button>
+                      </div>
+                    </div>
+                    {heroUploadSuccessMsg && (
+                      <p className="text-[11px] text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1">
+                        <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                        <span>{heroUploadSuccessMsg}</span>
+                      </p>
+                    )}
                   </div>
                 ) : (
-                  <label className="min-h-[44px] flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl border border-dashed border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800/70 hover:border-blue-500 cursor-pointer text-slate-700 dark:text-slate-300 font-semibold">
-                    {uploadingAssetKey === 'hero' ? (
-                      <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
-                    ) : (
-                      <ImageIcon className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                    )}
-                    <span>
-                      {uploadingAssetKey === 'hero' ? cw.step3.uploading : cw.step4.uploadHero}
-                    </span>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      className="hidden"
-                      onChange={(e) =>
-                        void handleAssetFileUpload(
-                          e.target.files?.[0],
-                          'heroes',
-                          'hero',
-                          setHeroImageUrl
-                        )
-                      }
-                    />
-                  </label>
+                  <div className="space-y-1.5">
+                    <label className="min-h-[44px] flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl border border-dashed border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800/70 hover:border-blue-500 cursor-pointer text-slate-700 dark:text-slate-300 font-semibold">
+                      {uploadingAssetKey === 'hero' ? (
+                        <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
+                      ) : (
+                        <ImageIcon className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                      )}
+                      <span>
+                        {uploadingAssetKey === 'hero' ? cw.step3.uploading : cw.step4.uploadHero}
+                      </span>
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
+                        className="hidden"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          e.target.value = '';
+                          void handleAssetFileUpload(
+                            f,
+                            'heroes',
+                            'hero',
+                            setHeroImageUrl
+                          );
+                        }}
+                      />
+                    </label>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                      PNG, JPG, WEBP · Max 5 MB
+                    </p>
+                  </div>
+                )}
+                {assetUploadError && (
+                  <p className="text-[11px] text-rose-600 dark:text-rose-400 font-medium flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    <span>{assetUploadError}</span>
+                  </p>
                 )}
               </div>
 

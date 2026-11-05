@@ -140,7 +140,19 @@ import {
   updateSupportTicketInDb,
   uploadWebsiteAssetToStorage,
   deleteWebsiteAssetFromStorage,
+  submitPublicWebsiteOrderInDb,
 } from '../lib/supabase';
+import {
+  PublicCustomerOrderInput,
+  buildWebsiteProductItemFromProduct,
+  extractPublicStorefrontMeta,
+  getEffectiveProductUnitPrice,
+  mergeStoreProductsWithWebsites,
+  normalizeCustomerPhone,
+  removeProductFromWebsiteCatalog,
+  upsertProductIntoWebsiteCatalog,
+  validatePublicCustomerOrderInput,
+} from '../lib/storefrontSync';
 import {
   AUTHORIZED_ADMIN_EMAIL,
   isAuthorizedAdminEmail,
@@ -193,11 +205,25 @@ interface AppContextType {
   updateProduct: (id: string, product: Partial<Product>) => Promise<Product | null>;
   deleteProduct: (id: string) => Promise<boolean>;
   adjustProductStock: (id: string, delta: number, reason: string) => void;
+  publishProductToWebsite: (
+    productId: string,
+    websiteId?: string
+  ) => Promise<{ success: boolean; message: string }>;
+  unpublishProductFromWebsite: (
+    productId: string,
+    websiteId?: string
+  ) => Promise<{ success: boolean; message: string }>;
   ensureMerchantStore: (preferredName?: string) => Promise<string | undefined>;
 
   // Orders
   orders: Order[];
+  isOrdersLoading: boolean;
+  ordersLoadError: string | null;
+  refreshStoreOrders: () => Promise<void>;
   addOrder: (order: Omit<Order, 'id' | 'orderNumber' | 'createdAt'>) => void;
+  submitPublicCustomerOrder: (
+    input: PublicCustomerOrderInput
+  ) => Promise<{ success: boolean; message: string; order?: Order; code?: string }>;
   updateOrderStatus: (id: string, status: OrderStatus) => void;
   updateOrderPaymentStatus: (id: string, paymentStatus: PaymentStatus) => void;
   updateOrderTracking: (id: string, courierName: string, trackingCode: string) => void;
@@ -240,7 +266,7 @@ interface AppContextType {
   updateSubscribedWebsite: (
     id: string,
     updates: Partial<SubscribedWebsite>,
-    options?: { saveAsDraftOnly?: boolean; silentToast?: boolean }
+    options?: { saveAsDraftOnly?: boolean; silentToast?: boolean; clearDraft?: boolean }
   ) => Promise<{ success: boolean; error?: Error }>;
   saveWebsiteDraft: (id: string, updates: Partial<SubscribedWebsite>) => Promise<{ success: boolean; error?: Error }>;
   publishWebsiteUpdates: (id: string, updates?: Partial<SubscribedWebsite>) => Promise<{ success: boolean; message: string }>;
@@ -1074,12 +1100,149 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     [activeStore?.id, activeStoreId, stores, user?.id, user?.name, user?.storeId]
   );
 
+  const [subscribedWebsites, setSubscribedWebsites] = useState<SubscribedWebsite[]>(() =>
+    isSupabaseConfigured ? [] : getStored('subscribedWebsites', INITIAL_SUBSCRIBED_WEBSITES)
+  );
+
+  useEffect(() => {
+    if (isSupabaseConfigured) {
+      localStorage.removeItem('goamaas_subscribedWebsites');
+    } else {
+      setStored('subscribedWebsites', subscribedWebsites);
+    }
+  }, [subscribedWebsites]);
+
+  const resolveTargetWebsiteForProduct = useCallback(
+    (prod: Partial<Product> & { id?: string }, explicitWebsiteId?: string): SubscribedWebsite | undefined => {
+      if (explicitWebsiteId) {
+        const direct = subscribedWebsites.find((w) => w.id === explicitWebsiteId);
+        if (direct) return direct;
+      }
+      if (prod.websiteId) {
+        const byField = subscribedWebsites.find((w) => w.id === prod.websiteId);
+        if (byField) return byField;
+      }
+      if (prod.id) {
+        const byCatalog = subscribedWebsites.find(
+          (w) =>
+            Boolean(w.productCatalogMeta?.[prod.id!]) ||
+            (w.servicesOrProducts || []).some((item) => item.productId === prod.id || item.id === prod.id)
+        );
+        if (byCatalog) return byCatalog;
+      }
+      const storeWebsites = subscribedWebsites.filter((w) => w.storeId && w.storeId === activeStore.id);
+      if (storeWebsites.length === 1) return storeWebsites[0];
+      if (subscribedWebsites.length === 1) return subscribedWebsites[0];
+      return undefined;
+    },
+    [subscribedWebsites, activeStore.id]
+  );
+
+  const syncProductCatalogStateToWebsite = async (
+    prod: Product,
+    opts?: {
+      targetWebsiteId?: string;
+      forcePublish?: boolean;
+      removeFromCatalog?: boolean;
+      deleteMetaEntry?: boolean;
+    }
+  ): Promise<{ success: boolean; website?: SubscribedWebsite; error?: Error }> => {
+    const site = resolveTargetWebsiteForProduct(prod, opts?.targetWebsiteId);
+    if (!site) {
+      return { success: true };
+    }
+
+    const existingMeta = { ...(site.productCatalogMeta || {}) };
+    if (opts?.deleteMetaEntry) {
+      delete existingMeta[prod.id];
+    } else {
+      existingMeta[prod.id] = {
+        imageUrl: prod.image || undefined,
+        discountPrice:
+          typeof prod.discountPrice === 'number' && prod.discountPrice >= 0 && prod.discountPrice < prod.price
+            ? prod.discountPrice
+            : undefined,
+        websiteId: prod.websiteId ?? site.id,
+        isVisible: opts?.removeFromCatalog ? false : prod.isVisible !== false,
+        sortOrder: prod.sortOrder,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+
+    const currentlyInCatalog = (site.servicesOrProducts || []).some(
+      (item) => item.productId === prod.id || item.id === prod.id
+    );
+    const shouldAppearInCatalog =
+      !opts?.removeFromCatalog &&
+      !opts?.deleteMetaEntry &&
+      prod.status === 'active' &&
+      prod.isVisible !== false &&
+      (Boolean(opts?.forcePublish) || prod.websiteId === site.id || currentlyInCatalog);
+
+    const nextCatalog = shouldAppearInCatalog
+      ? upsertProductIntoWebsiteCatalog(site.servicesOrProducts || [], prod)
+      : removeProductFromWebsiteCatalog(site.servicesOrProducts || [], prod.id);
+
+    if (isSupabaseConfigured && supabase && UUID_REGEX.test(site.id)) {
+      const { success, error } = await updateClientWebsiteInDb(
+        site.id,
+        {
+          servicesOrProducts: nextCatalog,
+          productCatalogMeta: existingMeta,
+        },
+        {
+          saveAsDraftOnly: false,
+          clearDraft: false,
+        }
+      );
+      if (!success || error) {
+        return {
+          success: false,
+          website: site,
+          error: error || new Error('Failed to synchronize product catalog with website.'),
+        };
+      }
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+    setSubscribedWebsites((prev) =>
+      prev.map((w) =>
+        w.id === site.id
+          ? {
+              ...w,
+              servicesOrProducts: nextCatalog,
+              productCatalogMeta: existingMeta,
+              lastUpdatedAt: today,
+            }
+          : w
+      )
+    );
+
+    return { success: true, website: site };
+  };
+
   const addProduct = async (
     prodData: Omit<Product, 'id' | 'salesCount' | 'rating'>
   ): Promise<Product | null> => {
+    const normalizedInput: Omit<Product, 'id' | 'salesCount' | 'rating'> = {
+      ...prodData,
+      price: Math.max(0, Number(prodData.price) || 0),
+      discountPrice:
+        typeof prodData.discountPrice === 'number' &&
+        Number.isFinite(prodData.discountPrice) &&
+        prodData.discountPrice >= 0 &&
+        prodData.discountPrice < (Number(prodData.price) || 0)
+          ? prodData.discountPrice
+          : undefined,
+      costPrice: Math.max(0, Number(prodData.costPrice) || 0),
+      stock: Math.max(0, Math.trunc(Number(prodData.stock) || 0)),
+      lowStockThreshold: Math.max(0, Math.trunc(Number(prodData.lowStockThreshold) || 10)),
+      isVisible: prodData.isVisible ?? Boolean(prodData.websiteId),
+    };
+
     if (isSupabaseConfigured && user?.id) {
-      const linkedWebsiteStoreId = prodData.websiteId
-        ? subscribedWebsites.find((w) => w.id === prodData.websiteId)?.storeId
+      const linkedWebsiteStoreId = normalizedInput.websiteId
+        ? subscribedWebsites.find((w) => w.id === normalizedInput.websiteId)?.storeId
         : undefined;
       const resolvedStoreId =
         linkedWebsiteStoreId && UUID_REGEX.test(linkedWebsiteStoreId)
@@ -1089,53 +1252,152 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         showToast('Store workspace is still initializing. Please try again in a moment.', 'warning');
         return null;
       }
-      const { data, error } = await createProductInDb(resolvedStoreId, prodData);
+      const { data, error } = await createProductInDb(resolvedStoreId, normalizedInput);
       if (error || !data) {
         showToast(error?.message || 'Failed to add product to database', 'error');
         return null;
       }
-      setProducts((prev) => [data, ...prev.filter((p) => p.id !== data.id)]);
-      showToast(`Added product "${data.name}"`, 'success');
-      return data;
+
+      const enrichedProduct: Product = {
+        ...data,
+        image: normalizedInput.image ?? data.image,
+        discountPrice: normalizedInput.discountPrice ?? data.discountPrice,
+        websiteId: normalizedInput.websiteId ?? data.websiteId,
+        isVisible: normalizedInput.isVisible ?? data.isVisible,
+        sortOrder: normalizedInput.sortOrder ?? data.sortOrder,
+      };
+
+      // Persist extended product metadata & website catalog entry when linked or when merchant owns a website
+      if (
+        enrichedProduct.websiteId ||
+        enrichedProduct.image ||
+        enrichedProduct.discountPrice !== undefined
+      ) {
+        const syncRes = await syncProductCatalogStateToWebsite(enrichedProduct, {
+          targetWebsiteId: enrichedProduct.websiteId,
+          forcePublish: Boolean(
+            enrichedProduct.websiteId &&
+              enrichedProduct.status === 'active' &&
+              enrichedProduct.isVisible !== false
+          ),
+        });
+        if (!syncRes.success) {
+          showToast(
+            syncRes.error?.message ||
+              'Product saved to inventory, but website storefront catalog sync failed. Click Publish to Website to retry.',
+            'warning'
+          );
+        }
+      }
+
+      setProducts((prev) => [enrichedProduct, ...prev.filter((p) => p.id !== enrichedProduct.id)]);
+      showToast(`Added product "${enrichedProduct.name}"`, 'success');
+      return enrichedProduct;
     }
 
     const newProduct: Product = {
-      ...prodData,
+      ...normalizedInput,
       id: `prod-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      isVisible: prodData.isVisible ?? true,
+      isVisible: normalizedInput.isVisible ?? true,
       salesCount: 0,
       rating: 5.0,
     };
     setProducts((prev) => [newProduct, ...prev]);
+    if (newProduct.websiteId) {
+      await syncProductCatalogStateToWebsite(newProduct, {
+        targetWebsiteId: newProduct.websiteId,
+        forcePublish: newProduct.status === 'active' && newProduct.isVisible !== false,
+      });
+    }
     showToast(`Added product "${prodData.name}"`, 'success');
     return newProduct;
   };
 
   const updateProduct = async (id: string, updated: Partial<Product>): Promise<Product | null> => {
+    const existing = products.find((p) => p.id === id);
+    if (!existing) {
+      showToast('Product not found.', 'error');
+      return null;
+    }
+
+    const sanitizedPatch: Partial<Product> = {
+      ...updated,
+      ...(updated.stock !== undefined && {
+        stock: Math.max(0, Math.trunc(Number(updated.stock) || 0)),
+      }),
+      ...(updated.price !== undefined && {
+        price: Math.max(0, Number(updated.price) || 0),
+      }),
+    };
+    const effectivePrice = sanitizedPatch.price !== undefined ? sanitizedPatch.price : existing.price;
+    if (sanitizedPatch.discountPrice !== undefined) {
+      sanitizedPatch.discountPrice =
+        typeof sanitizedPatch.discountPrice === 'number' &&
+        Number.isFinite(sanitizedPatch.discountPrice) &&
+        sanitizedPatch.discountPrice >= 0 &&
+        sanitizedPatch.discountPrice < effectivePrice
+          ? sanitizedPatch.discountPrice
+          : undefined;
+    }
+
     const prevSnapshot = products;
-    let optimisticItem: Product | null = null;
-    setProducts((prev) =>
-      prev.map((p) => {
-        if (p.id === id) {
-          optimisticItem = { ...p, ...updated };
-          return optimisticItem;
-        }
-        return p;
-      })
-    );
+    const optimisticItem: Product = { ...existing, ...sanitizedPatch };
+    setProducts((prev) => prev.map((p) => (p.id === id ? optimisticItem : p)));
 
     if (isSupabaseConfigured && user?.id && UUID_REGEX.test(id)) {
-      const { data, error } = await updateProductInDb(id, updated);
+      const { data, error } = await updateProductInDb(id, sanitizedPatch);
       if (error || !data) {
         setProducts(prevSnapshot);
         showToast(error?.message || 'Failed to update product in database', 'error');
         return null;
       }
-      setProducts((prev) => prev.map((p) => (p.id === id ? data : p)));
+
+      const mergedConfirmed: Product = {
+        ...existing,
+        ...data,
+        image: sanitizedPatch.image !== undefined ? sanitizedPatch.image : data.image || existing.image,
+        discountPrice:
+          'discountPrice' in sanitizedPatch ? sanitizedPatch.discountPrice : existing.discountPrice,
+        websiteId:
+          sanitizedPatch.websiteId !== undefined
+            ? sanitizedPatch.websiteId
+            : data.websiteId ?? existing.websiteId,
+        isVisible:
+          sanitizedPatch.isVisible !== undefined
+            ? sanitizedPatch.isVisible
+            : data.isVisible ?? existing.isVisible,
+        sortOrder:
+          sanitizedPatch.sortOrder !== undefined
+            ? sanitizedPatch.sortOrder
+            : data.sortOrder ?? existing.sortOrder,
+      };
+
+      setProducts((prev) => prev.map((p) => (p.id === id ? mergedConfirmed : p)));
+
+      // Keep website catalog & productCatalogMeta synchronized whenever linked or previously published
+      const syncRes = await syncProductCatalogStateToWebsite(mergedConfirmed, {
+        targetWebsiteId: mergedConfirmed.websiteId || existing.websiteId,
+        removeFromCatalog:
+          mergedConfirmed.status !== 'active' ||
+          mergedConfirmed.isVisible === false ||
+          sanitizedPatch.websiteId === '',
+      });
+      if (!syncRes.success) {
+        showToast(
+          syncRes.error?.message ||
+            'Product saved, but website catalog could not be refreshed automatically.',
+          'warning'
+        );
+      }
+
       showToast('Product details updated', 'success');
-      return data;
+      return mergedConfirmed;
     }
 
+    await syncProductCatalogStateToWebsite(optimisticItem, {
+      targetWebsiteId: optimisticItem.websiteId || existing.websiteId,
+      removeFromCatalog: optimisticItem.status !== 'active' || optimisticItem.isVisible === false,
+    });
     showToast('Product details updated', 'success');
     return optimisticItem;
   };
@@ -1152,24 +1414,167 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         showToast(error.message || 'Failed to delete product', 'error');
         return false;
       }
+      if (prod) {
+        await syncProductCatalogStateToWebsite(prod, {
+          removeFromCatalog: true,
+          deleteMetaEntry: true,
+        });
+      }
       showToast(`Deleted product "${prod?.name || id}"`, 'info');
       return true;
     }
 
+    if (prod) {
+      await syncProductCatalogStateToWebsite(prod, {
+        removeFromCatalog: true,
+        deleteMetaEntry: true,
+      });
+    }
     showToast(`Deleted product "${prod?.name || id}"`, 'info');
     return true;
+  };
+
+  const publishProductToWebsite = async (
+    productId: string,
+    websiteId?: string
+  ): Promise<{ success: boolean; message: string }> => {
+    const prod = products.find((p) => p.id === productId);
+    if (!prod) {
+      const msg = 'Product not found.';
+      showToast(msg, 'error');
+      return { success: false, message: msg };
+    }
+
+    const targetSite =
+      resolveTargetWebsiteForProduct(prod, websiteId) ||
+      subscribedWebsites.find((w) => w.storeId === activeStore.id) ||
+      subscribedWebsites[0];
+
+    if (!targetSite) {
+      const msg = 'Create your website first before publishing products to your public storefront.';
+      showToast(msg, 'warning');
+      return { success: false, message: msg };
+    }
+
+    let confirmedProd: Product = {
+      ...prod,
+      status: 'active',
+      isVisible: true,
+      websiteId: targetSite.id,
+    };
+
+    if (isSupabaseConfigured && user?.id && UUID_REGEX.test(productId)) {
+      const { data, error } = await updateProductInDb(productId, {
+        status: 'active',
+        isVisible: true,
+        websiteId: targetSite.id,
+      });
+      if (error || !data) {
+        const msg = error?.message || 'Failed to update product status before publishing.';
+        showToast(msg, 'error');
+        return { success: false, message: msg };
+      }
+      confirmedProd = {
+        ...prod,
+        ...data,
+        image: prod.image || data.image,
+        discountPrice: prod.discountPrice,
+        status: 'active',
+        isVisible: true,
+        websiteId: targetSite.id,
+      };
+    }
+
+    const syncRes = await syncProductCatalogStateToWebsite(confirmedProd, {
+      targetWebsiteId: targetSite.id,
+      forcePublish: true,
+    });
+    if (!syncRes.success) {
+      const msg = syncRes.error?.message || 'Failed to publish product to website catalog.';
+      showToast(msg, 'error');
+      return { success: false, message: msg };
+    }
+
+    setProducts((prev) => prev.map((p) => (p.id === productId ? confirmedProd : p)));
+    const okMsg =
+      targetSite.deploymentStatus === 'live'
+        ? `"${confirmedProd.name}" is now live on ${targetSite.fullDomainUrl}`
+        : `"${confirmedProd.name}" added to ${targetSite.fullDomainUrl} catalog (will appear publicly once website goes live)`;
+    showToast(okMsg, 'success');
+    return { success: true, message: okMsg };
+  };
+
+  const unpublishProductFromWebsite = async (
+    productId: string,
+    websiteId?: string
+  ): Promise<{ success: boolean; message: string }> => {
+    const prod = products.find((p) => p.id === productId);
+    if (!prod) {
+      const msg = 'Product not found.';
+      showToast(msg, 'error');
+      return { success: false, message: msg };
+    }
+
+    const targetSite = resolveTargetWebsiteForProduct(prod, websiteId);
+    let confirmedProd: Product = {
+      ...prod,
+      isVisible: false,
+    };
+
+    if (isSupabaseConfigured && user?.id && UUID_REGEX.test(productId)) {
+      const { data, error } = await updateProductInDb(productId, {
+        isVisible: false,
+      });
+      if (error || !data) {
+        const msg = error?.message || 'Failed to unpublish product.';
+        showToast(msg, 'error');
+        return { success: false, message: msg };
+      }
+      confirmedProd = {
+        ...prod,
+        ...data,
+        image: prod.image || data.image,
+        discountPrice: prod.discountPrice,
+        isVisible: false,
+        websiteId: prod.websiteId || targetSite?.id,
+      };
+    }
+
+    const syncRes = await syncProductCatalogStateToWebsite(confirmedProd, {
+      targetWebsiteId: targetSite?.id,
+      removeFromCatalog: true,
+    });
+    if (!syncRes.success) {
+      const msg = syncRes.error?.message || 'Failed to remove product from website catalog.';
+      showToast(msg, 'error');
+      return { success: false, message: msg };
+    }
+
+    setProducts((prev) => prev.map((p) => (p.id === productId ? confirmedProd : p)));
+    const okMsg = `"${confirmedProd.name}" unpublished from public storefront. Past order records remain intact.`;
+    showToast(okMsg, 'info');
+    return { success: true, message: okMsg };
   };
 
   const adjustProductStock = (id: string, delta: number, reason: string) => {
     const prod = products.find((p) => p.id === id);
     if (!prod) return;
+    if (delta === 0) return;
 
     const previousStock = prod.stock;
+    if (delta < 0 && previousStock + delta < 0) {
+      showToast(
+        `Cannot deduct ${Math.abs(delta)} units from "${prod.name}" (only ${previousStock} in stock).`,
+        'error'
+      );
+      return;
+    }
     const newStock = Math.max(0, previousStock + delta);
     const moveType: 'restock' | 'adjustment' = delta > 0 ? 'restock' : 'adjustment';
 
+    const updatedLocalProd: Product = { ...prod, stock: newStock };
     setProducts((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, stock: newStock } : p))
+      prev.map((p) => (p.id === id ? updatedLocalProd : p))
     );
 
     if (isSupabaseConfigured && user?.id && UUID_REGEX.test(activeStore.id) && UUID_REGEX.test(id)) {
@@ -1180,6 +1585,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           showToast(prodErr.message || 'Failed to update stock in database', 'error');
           return;
         }
+        await syncProductCatalogStateToWebsite(updatedLocalProd, {
+          targetWebsiteId: updatedLocalProd.websiteId,
+        });
         const { data: logRow } = await createInventoryMovementInDb({
           storeId: activeStore.id,
           productId: id,
@@ -1197,6 +1605,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
+    void syncProductCatalogStateToWebsite(updatedLocalProd, {
+      targetWebsiteId: updatedLocalProd.websiteId,
+    });
     const log: InventoryMovement = {
       id: `inv-${Date.now()}`,
       productId: id,
@@ -1218,6 +1629,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [orders, setOrders] = useState<Order[]>(() =>
     isSupabaseConfigured ? [] : getStored('orders', INITIAL_ORDERS)
   );
+  const [isOrdersLoading, setIsOrdersLoading] = useState<boolean>(false);
+  const [ordersLoadError, setOrdersLoadError] = useState<string | null>(null);
+
+  const refreshStoreOrders = useCallback(async () => {
+    if (!isSupabaseConfigured || !supabase || !user?.id || !UUID_REGEX.test(activeStore.id)) {
+      return;
+    }
+    setIsOrdersLoading(true);
+    setOrdersLoadError(null);
+    try {
+      const { data, error } = await fetchStoreOrdersFromDb(activeStore.id);
+      if (error) {
+        setOrdersLoadError(error.message || 'Unable to load store orders from database.');
+        return;
+      }
+      if (data) {
+        setOrders(data);
+      }
+    } finally {
+      setIsOrdersLoading(false);
+    }
+  }, [user?.id, activeStore.id]);
+
   useEffect(() => {
     if (isSupabaseConfigured) {
       localStorage.removeItem('goamaas_orders');
@@ -1350,6 +1784,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const addOrder = (orderData: Omit<Order, 'id' | 'orderNumber' | 'createdAt'>) => {
+    if (!Array.isArray(orderData.items) || orderData.items.length === 0) {
+      showToast('Please select at least one product to create an order.', 'warning');
+      return;
+    }
+
+    for (const item of orderData.items) {
+      if (!Number.isInteger(item.quantity) || item.quantity <= 0) {
+        showToast(`Invalid quantity for "${item.name}".`, 'error');
+        return;
+      }
+      const matchingProd = products.find((p) => p.id === item.productId);
+      if (matchingProd && matchingProd.stock < item.quantity) {
+        showToast(
+          `Insufficient stock for "${matchingProd.name}". Only ${matchingProd.stock} available.`,
+          'error'
+        );
+        return;
+      }
+    }
+
     const orderNum = `ORD-${Date.now().toString().slice(-6)}-${Math.random().toString(36).slice(2, 4).toUpperCase()}`;
 
     if (isSupabaseConfigured && user?.id) {
@@ -1375,7 +1829,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               stock: nextStock,
             });
             if (updatedProd) {
-              setProducts((prev) => prev.map((p) => (p.id === updatedProd.id ? updatedProd : p)));
+              const mergedProd: Product = {
+                ...matchingProd,
+                ...updatedProd,
+                image: matchingProd.image || updatedProd.image,
+                discountPrice: matchingProd.discountPrice,
+                websiteId: matchingProd.websiteId,
+                isVisible: matchingProd.isVisible,
+              };
+              setProducts((prev) => prev.map((p) => (p.id === mergedProd.id ? mergedProd : p)));
+              await syncProductCatalogStateToWebsite(mergedProd, {
+                targetWebsiteId: mergedProd.websiteId,
+              });
+              const { data: logRow } = await createInventoryMovementInDb({
+                storeId: activeStore.id,
+                productId: mergedProd.id,
+                productName: mergedProd.name,
+                type: 'sale',
+                quantityDelta: -item.quantity,
+                newStock: nextStock,
+                reason: `Order #${createdOrder.orderNumber}`,
+              });
+              if (logRow) {
+                setInventoryLogs((prev) => [
+                  { ...logRow, sku: mergedProd.sku, operator: user.name || 'Store Merchant' },
+                  ...prev,
+                ]);
+              }
             }
           }
         }
@@ -1416,13 +1896,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setOrders((prev) => [newOrder, ...prev]);
 
     orderData.items.forEach((item) => {
-      setProducts((prev) =>
-        prev.map((p) =>
-          p.id === item.productId
-            ? { ...p, salesCount: (p.salesCount || 0) + item.quantity }
-            : p
-        )
-      );
+      const targetProd = products.find((p) => p.id === item.productId);
+      if (targetProd) {
+        const nextStock = Math.max(0, targetProd.stock - item.quantity);
+        const updatedProd: Product = {
+          ...targetProd,
+          stock: nextStock,
+          salesCount: (targetProd.salesCount || 0) + item.quantity,
+        };
+        setProducts((prev) => prev.map((p) => (p.id === updatedProd.id ? updatedProd : p)));
+        void syncProductCatalogStateToWebsite(updatedProd, {
+          targetWebsiteId: updatedProd.websiteId,
+        });
+      }
     });
 
     const existingCustomer = customers.find(
@@ -1449,7 +1935,188 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     showToast(`New order #${orderNum} created successfully!`, 'success');
   };
 
+  const submitPublicCustomerOrder = async (
+    input: PublicCustomerOrderInput
+  ): Promise<{ success: boolean; message: string; order?: Order; code?: string }> => {
+    const validation = validatePublicCustomerOrderInput(input);
+    if (!validation.valid) {
+      return {
+        success: false,
+        message: validation.error || 'Please review your order details and try again.',
+        code: 'INVALID_INPUT',
+      };
+    }
+
+    if (isSupabaseConfigured) {
+      const { data, error, code } = await submitPublicWebsiteOrderInDb(input);
+      if (error || !data) {
+        return {
+          success: false,
+          message: error?.message || 'Unable to confirm your order right now.',
+          code,
+        };
+      }
+
+      // If the owning merchant happens to be viewing the same store in another tab/view, refresh live state
+      if (user?.id && UUID_REGEX.test(activeStore.id)) {
+        const matchingSite = subscribedWebsites.find(
+          (w) => w.subdomain.toLowerCase() === input.subdomain.trim().toLowerCase()
+        );
+        if (matchingSite && matchingSite.storeId === activeStore.id) {
+          setOrders((prev) => [data, ...prev.filter((o) => o.id !== data.id)]);
+          void refreshSubscribedWebsites();
+        }
+      }
+
+      return {
+        success: true,
+        message: `Order #${data.orderNumber} confirmed!`,
+        order: data,
+        code,
+      };
+    }
+
+    // Offline local demo mode only (when Supabase is not configured)
+    const cleanSub = input.subdomain.trim().toLowerCase();
+    const targetSite = subscribedWebsites.find((w) => w.subdomain.toLowerCase() === cleanSub);
+    if (!targetSite || !isWebsiteTrulyLive(targetSite)) {
+      return {
+        success: false,
+        message: 'This storefront is not currently accepting online orders.',
+        code: 'WEBSITE_NOT_AVAILABLE',
+      };
+    }
+
+    let computedSubtotal = 0;
+    const confirmedItems: Order['items'] = [];
+    for (const line of input.items) {
+      const catalogItem = (targetSite.servicesOrProducts || []).find(
+        (ci) => ci.productId === line.productId || ci.id === line.productId
+      );
+      const storeProd = products.find((p) => p.id === line.productId);
+      if (!catalogItem && !storeProd) {
+        return {
+          success: false,
+          message: 'One or more selected products are no longer available.',
+          code: 'PRODUCT_UNAVAILABLE',
+        };
+      }
+      if (storeProd && storeProd.stock < line.quantity) {
+        return {
+          success: false,
+          message:
+            storeProd.stock <= 0
+              ? `"${storeProd.name}" is currently out of stock.`
+              : `Only ${storeProd.stock} unit(s) of "${storeProd.name}" remain in stock.`,
+          code: 'INSUFFICIENT_STOCK',
+        };
+      }
+      const unitPrice = storeProd
+        ? getEffectiveProductUnitPrice(storeProd).unitPrice
+        : Number(catalogItem?.discountPrice ?? catalogItem?.priceNumeric ?? 0) || 0;
+      const parsedCatalogOrig = catalogItem?.originalPrice
+        ? Number(String(catalogItem.originalPrice).replace(/[^0-9.]/g, '')) || undefined
+        : undefined;
+      computedSubtotal += unitPrice * line.quantity;
+      confirmedItems.push({
+        productId: line.productId,
+        name: storeProd?.name || catalogItem?.name || 'Product',
+        sku: storeProd?.sku || catalogItem?.sku || 'WEB-ITEM',
+        quantity: line.quantity,
+        price: unitPrice,
+        originalPrice:
+          storeProd && storeProd.discountPrice !== undefined && storeProd.discountPrice < storeProd.price
+            ? storeProd.price
+            : parsedCatalogOrig,
+        imageUrl: storeProd?.image || catalogItem?.imageUrl,
+        category: storeProd?.category || catalogItem?.category,
+      });
+    }
+
+    if (confirmedItems.length > 0) {
+      confirmedItems[0] = {
+        ...confirmedItems[0],
+        orderMeta: {
+          orderSource: 'public_website',
+          websiteId: targetSite.id,
+          subdomain: cleanSub,
+          websiteSubdomain: cleanSub,
+          deliveryArea: input.deliveryArea?.trim() || undefined,
+          deliveryMethod: input.deliveryMethod,
+          deliveryInstructions: input.deliveryInstructions?.trim() || undefined,
+          orderNotes: input.orderNotes?.trim() || undefined,
+        },
+      };
+    }
+
+    const normMethod = String(input.deliveryMethod || '').toLowerCase();
+    const deliveryFee =
+      normMethod === 'store pickup' || normMethod === 'store_pickup'
+        ? 0
+        : normMethod === 'outside dhaka' || normMethod === 'outside_dhaka'
+        ? 120
+        : 60;
+    const grandTotal = computedSubtotal + deliveryFee;
+    const orderNum = `ORD-${Date.now().toString().slice(-6)}-${Math.random().toString(36).slice(2, 4).toUpperCase()}`;
+    const fullAddr = input.deliveryArea?.trim()
+      ? `${input.shippingAddress.trim()}, ${input.deliveryArea.trim()}`
+      : input.shippingAddress.trim();
+
+    const demoOrder: Order = {
+      id: `ord-${Date.now()}`,
+      orderNumber: orderNum,
+      customerName: input.customerName.trim(),
+      customerPhone: normalizeCustomerPhone(input.customerPhone),
+      customerEmail: (input.customerEmail || '').trim(),
+      shippingAddress: fullAddr,
+      city: input.city.trim(),
+      deliveryArea: input.deliveryArea?.trim() || undefined,
+      deliveryMethod: input.deliveryMethod,
+      deliveryInstructions: input.deliveryInstructions?.trim() || undefined,
+      notes: input.orderNotes?.trim() || undefined,
+      items: confirmedItems,
+      subtotal: computedSubtotal,
+      deliveryFee,
+      discount: 0,
+      total: grandTotal,
+      status: 'pending',
+      paymentStatus: 'pending',
+      paymentMethod: input.paymentMethod,
+      websiteId: targetSite.id,
+      websiteSubdomain: cleanSub,
+      source: `Website (${cleanSub}.amaas.xyz)`,
+      createdAt: new Date().toISOString(),
+    };
+
+    setOrders((prev) => [demoOrder, ...prev]);
+    for (const item of confirmedItems) {
+      const storeProd = products.find((p) => p.id === item.productId);
+      if (storeProd) {
+        const nextStock = Math.max(0, storeProd.stock - item.quantity);
+        const updatedProd: Product = {
+          ...storeProd,
+          stock: nextStock,
+          salesCount: (storeProd.salesCount || 0) + item.quantity,
+        };
+        setProducts((prev) => prev.map((p) => (p.id === updatedProd.id ? updatedProd : p)));
+        await syncProductCatalogStateToWebsite(updatedProd, { targetWebsiteId: targetSite.id });
+      }
+    }
+
+    return {
+      success: true,
+      message: `Order #${demoOrder.orderNumber} confirmed!`,
+      order: demoOrder,
+      code: 'ORDER_CONFIRMED',
+    };
+  };
+
   const updateOrderStatus = (id: string, status: OrderStatus) => {
+    const targetOrder = orders.find((o) => o.id === id);
+    if (!targetOrder || targetOrder.status === status) return;
+    const wasCancelled = targetOrder.status === 'cancelled';
+    const isNowCancelling = !wasCancelled && status === 'cancelled';
+
     const prevSnapshot = orders;
     setOrders((prev) => prev.map((o) => (o.id === id ? { ...o, status } : o)));
 
@@ -1462,11 +2129,78 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           return;
         }
         setOrders((prev) => prev.map((o) => (o.id === id ? data : o)));
+
+        if (isNowCancelling) {
+          for (const item of targetOrder.items) {
+            const matchingProd = products.find((p) => p.id === item.productId);
+            if (matchingProd && UUID_REGEX.test(matchingProd.id) && item.quantity > 0) {
+              const restoredStock = matchingProd.stock + item.quantity;
+              const nextSales = Math.max(0, (matchingProd.salesCount || 0) - item.quantity);
+              const { data: restoredProd } = await updateProductInDb(matchingProd.id, {
+                stock: restoredStock,
+                salesCount: nextSales,
+              });
+              if (restoredProd) {
+                const mergedProd: Product = {
+                  ...matchingProd,
+                  ...restoredProd,
+                  image: matchingProd.image || restoredProd.image,
+                  discountPrice: matchingProd.discountPrice,
+                  websiteId: matchingProd.websiteId,
+                  isVisible: matchingProd.isVisible,
+                };
+                setProducts((prev) => prev.map((p) => (p.id === mergedProd.id ? mergedProd : p)));
+                await syncProductCatalogStateToWebsite(mergedProd, {
+                  targetWebsiteId: mergedProd.websiteId,
+                });
+                if (UUID_REGEX.test(activeStore.id)) {
+                  const { data: logRow } = await createInventoryMovementInDb({
+                    storeId: activeStore.id,
+                    productId: mergedProd.id,
+                    productName: mergedProd.name,
+                    type: 'return',
+                    quantityDelta: item.quantity,
+                    newStock: restoredStock,
+                    reason: `Cancelled Order #${targetOrder.orderNumber}`,
+                  });
+                  if (logRow) {
+                    setInventoryLogs((prev) => [
+                      { ...logRow, sku: mergedProd.sku, operator: user.name || 'Store Merchant' },
+                      ...prev,
+                    ]);
+                  }
+                }
+              }
+            }
+          }
+          showToast(
+            `Order #${targetOrder.orderNumber} cancelled and inventory stock restored.`,
+            'info'
+          );
+          return;
+        }
+
         showToast(`Order status updated to "${status}"`, 'info');
       })();
       return;
     }
 
+    if (isNowCancelling) {
+      targetOrder.items.forEach((item) => {
+        const matchingProd = products.find((p) => p.id === item.productId);
+        if (matchingProd && item.quantity > 0) {
+          const restoredProd: Product = {
+            ...matchingProd,
+            stock: matchingProd.stock + item.quantity,
+            salesCount: Math.max(0, (matchingProd.salesCount || 0) - item.quantity),
+          };
+          setProducts((prev) => prev.map((p) => (p.id === restoredProd.id ? restoredProd : p)));
+          void syncProductCatalogStateToWebsite(restoredProd, {
+            targetWebsiteId: restoredProd.websiteId,
+          });
+        }
+      });
+    }
     showToast(`Order status updated to "${status}"`, 'info');
   };
 
@@ -1636,21 +2370,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [websiteSubscriptionPlan, setWebsiteSubscriptionPlan] = useState<WebsiteSubscriptionPlanConfig>(() =>
     getStored('websiteSubscriptionPlan', DEFAULT_WEBSITE_SUBSCRIPTION_PLAN)
   );
-  const [subscribedWebsites, setSubscribedWebsites] = useState<SubscribedWebsite[]>(() =>
-    isSupabaseConfigured ? [] : getStored('subscribedWebsites', INITIAL_SUBSCRIBED_WEBSITES)
-  );
 
   useEffect(() => {
     setStored('websiteSubscriptionPlan', websiteSubscriptionPlan);
   }, [websiteSubscriptionPlan]);
-
-  useEffect(() => {
-    if (isSupabaseConfigured) {
-      localStorage.removeItem('goamaas_subscribedWebsites');
-    } else {
-      setStored('subscribedWebsites', subscribedWebsites);
-    }
-  }, [subscribedWebsites]);
 
   const updateWebsiteSubscriptionPlanConfig = (updates: Partial<WebsiteSubscriptionPlanConfig>) => {
     setWebsiteSubscriptionPlan((prev) => ({ ...prev, ...updates }));
@@ -1905,6 +2628,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
 
         if (createdProducts.length > 0) {
+          const canonicalItems = createdProducts.map((cp, idx) =>
+            buildWebsiteProductItemFromProduct(cp, idx)
+          );
+          const initialCatalogMeta: Record<string, any> = {};
+          for (let idx = 0; idx < createdProducts.length; idx++) {
+            const cp = createdProducts[idx];
+            initialCatalogMeta[cp.id] = {
+              imageUrl: cp.image || undefined,
+              discountPrice: cp.discountPrice,
+              websiteId: newSite.id,
+              isVisible: cp.isVisible !== false,
+              sortOrder: idx,
+              updatedAt: new Date().toISOString(),
+            };
+          }
+
+          await updateClientWebsiteInDb(
+            newSite.id,
+            {
+              servicesOrProducts: canonicalItems,
+              productCatalogMeta: initialCatalogMeta,
+            },
+            { saveAsDraftOnly: false }
+          );
+
+          newSite = {
+            ...newSite,
+            servicesOrProducts: canonicalItems,
+            productCatalogMeta: initialCatalogMeta,
+          };
+
           setProducts((prev) => [
             ...createdProducts,
             ...prev.filter((p) => !createdProducts.some((cp) => cp.id === p.id)),
@@ -1973,16 +2727,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const updateSubscribedWebsite = async (
     id: string,
     updates: Partial<SubscribedWebsite>,
-    options?: { saveAsDraftOnly?: boolean; silentToast?: boolean }
+    options?: { saveAsDraftOnly?: boolean; silentToast?: boolean; clearDraft?: boolean }
   ): Promise<{ success: boolean; error?: Error }> => {
     const today = new Date().toISOString().split('T')[0];
     const existingSite = subscribedWebsites.find((w) => w.id === id);
     const saveAsDraftOnly = Boolean(options?.saveAsDraftOnly && existingSite?.deploymentStatus === 'live');
+    const shouldClearDraft =
+      options?.clearDraft !== undefined ? options.clearDraft : !saveAsDraftOnly;
 
     if (isSupabaseConfigured && supabase) {
       const { success, error } = await updateClientWebsiteInDb(id, updates, {
         saveAsDraftOnly,
-        clearDraft: !saveAsDraftOnly,
+        clearDraft: shouldClearDraft,
       });
       if (!success && error) {
         showToast(error.message || 'Failed to update website in database', 'error');
@@ -2007,8 +2763,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return {
           ...w,
           ...updates,
-          hasUnpublishedDraft: false,
-          draftConfig: undefined,
+          hasUnpublishedDraft: shouldClearDraft ? false : w.hasUnpublishedDraft,
+          draftConfig: shouldClearDraft ? undefined : w.draftConfig,
           lastUpdatedAt: today,
         };
       })
@@ -2561,6 +3317,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     if (isSupabaseConfigured) {
+      // Promote any staged draftConfig into top-level config with embedded __storefrontMeta
+      // before calling publish_client_website so 20261018 Production publishes all staged edits & hero images.
+      if (site.hasUnpublishedDraft && site.draftConfig && Object.keys(site.draftConfig).length > 0) {
+        const promoteRes = await updateClientWebsiteInDb(
+          websiteId,
+          site.draftConfig as Record<string, any>,
+          { saveAsDraftOnly: false, clearDraft: true }
+        );
+        if (!promoteRes.success && promoteRes.error) {
+          showToast(promoteRes.error.message, 'error');
+          return { success: false, message: promoteRes.error.message };
+        }
+      }
+
       const { success, message, error } = await publishClientWebsiteInDb(websiteId);
       if (!success && error) {
         showToast(message || error.message, 'error');
@@ -2569,11 +3339,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await refreshSubscribedWebsites();
     } else {
       setSubscribedWebsites((prev) =>
-        prev.map((s) => (s.id === websiteId ? { ...s, deploymentStatus: 'live', subscriptionStatus: 'active' } : s))
+        prev.map((s) =>
+          s.id === websiteId
+            ? {
+                ...s,
+                ...(s.draftConfig || {}),
+                hasUnpublishedDraft: false,
+                draftConfig: undefined,
+                deploymentStatus: 'live',
+                subscriptionStatus: 'active',
+              }
+            : s
+        )
       );
     }
 
-    showToast(`🎉 Website published! Accessible at https://${site.fullDomainUrl}`, 'success');
+    showToast(`Website published! Accessible at https://${site.fullDomainUrl}`, 'success');
     return { success: true, message: 'Website published successfully' };
   };
 
@@ -2618,6 +3399,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (isSupabaseConfigured) {
       const { data } = await fetchPublishedWebsiteBySubdomain(clean);
       if (data) {
+        const storefrontMeta = extractPublicStorefrontMeta(
+          data.config && typeof data.config === 'object'
+            ? { ...data.config, ...data }
+            : data
+        );
         const mapped: SubscribedWebsite = {
           id: data.id || `site-${data.subdomain}`,
           storeId: data.storeId || data.store_id || 'store-tenant',
@@ -2626,24 +3412,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           email: data.email ?? data.config?.email ?? '',
           phone: data.phone ?? data.config?.phone ?? '',
           niche: data.niche || 'ecommerce',
-          nicheLabel: data.nicheLabel || data.template_name || 'Business Storefront',
+          nicheLabel: storefrontMeta.nicheLabel || data.template_name || 'Business Storefront',
           templateId: data.templateId || data.template_id || data.config?.templateId || 'tpl-modern-business',
           templateName: data.templateName || data.template_name || 'Modern Executive',
           subdomain: data.subdomain,
           fullDomainUrl: data.fullDomainUrl || data.full_domain || `${data.subdomain}.amaas.xyz`,
-          customDomain: data.customDomain || data.config?.customDomain || undefined,
+          customDomain: storefrontMeta.customDomain,
           brandColor: data.brandColor || data.config?.brandColor || '#2563EB',
           logoUrl: data.logoUrl || data.config?.logoUrl || undefined,
-          heroImageUrl: data.heroImageUrl || data.config?.heroImageUrl || undefined,
-          heroCtaText: data.heroCtaText || data.config?.heroCtaText || undefined,
-          heroCtaLink: data.heroCtaLink || data.config?.heroCtaLink || undefined,
-          secondaryCtaText: data.secondaryCtaText || data.config?.secondaryCtaText || undefined,
-          secondaryCtaLink: data.secondaryCtaLink || data.config?.secondaryCtaLink || undefined,
-          bannerImageUrl: data.bannerImageUrl || data.config?.bannerImageUrl || undefined,
-          bannerTitle: data.bannerTitle || data.config?.bannerTitle || undefined,
-          bannerSubtitle: data.bannerSubtitle || data.config?.bannerSubtitle || undefined,
-          bannerCtaText: data.bannerCtaText || data.config?.bannerCtaText || undefined,
-          bannerCtaLink: data.bannerCtaLink || data.config?.bannerCtaLink || undefined,
+          heroImageUrl: storefrontMeta.heroImageUrl,
+          heroCtaText: storefrontMeta.heroCtaText,
+          heroCtaLink: storefrontMeta.heroCtaLink,
+          secondaryCtaText: storefrontMeta.secondaryCtaText,
+          secondaryCtaLink: storefrontMeta.secondaryCtaLink,
+          bannerImageUrl: storefrontMeta.bannerImageUrl,
+          bannerTitle: storefrontMeta.bannerTitle,
+          bannerSubtitle: storefrontMeta.bannerSubtitle,
+          bannerCtaText: storefrontMeta.bannerCtaText,
+          bannerCtaLink: storefrontMeta.bannerCtaLink,
           address: data.address ?? data.config?.address ?? '',
           headline: data.headline || data.config?.headline || 'Welcome to our official website',
           subheadline: data.subheadline ?? data.config?.subheadline ?? '',
@@ -2655,21 +3441,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             []
           ).filter((item: any) => item && item.isVisible !== false),
           whatsappNumber: data.whatsappNumber ?? data.config?.whatsappNumber ?? data.phone ?? '',
-          socialLinks: data.socialLinks || data.config?.socialLinks || {},
-          customLinks: Array.isArray(data.customLinks)
-            ? data.customLinks
-            : Array.isArray(data.config?.customLinks)
-            ? data.config.customLinks
-            : [],
-          sections: Array.isArray(data.sections)
-            ? data.sections
-            : Array.isArray(data.config?.sections)
-            ? data.config.sections
-            : undefined,
-          themeSettings:
-            (data.themeSettings && typeof data.themeSettings === 'object'
-              ? data.themeSettings
-              : data.config?.themeSettings) || undefined,
+          socialLinks: storefrontMeta.socialLinks,
+          customLinks: storefrontMeta.customLinks || [],
+          sections: storefrontMeta.sections,
+          themeSettings: storefrontMeta.themeSettings,
           planName: data.planName || data.plan_tier || 'GoAMAAS Website',
           monthlyFee: Number(data.monthlyFee || data.monthly_fee || 600),
           subscriptionStatus: data.subscriptionStatus || data.status || 'active',
@@ -2708,17 +3483,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         linkedLocalProducts.length > 0
           ? linkedLocalProducts
               .filter((p) => p.status === 'active' && p.isVisible !== false)
-              .map((p) => ({
-                id: p.id,
-                productId: p.id,
-                name: p.name,
-                price: `৳${p.price.toLocaleString()}`,
-                priceNumeric: p.price,
-                description: p.description,
-                imageUrl: p.image,
-                category: p.category,
-                isVisible: true,
-              }))
+              .map((p, idx) => buildWebsiteProductItemFromProduct(p, idx))
           : (local.servicesOrProducts || []).filter((item) => item.isVisible !== false);
 
       return {
@@ -4271,6 +5036,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     let cancelled = false;
+    setIsOrdersLoading(true);
     (async () => {
       const extraWebsiteStoreIds = Array.from(
         new Set(
@@ -4289,6 +5055,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         fetchStoreMembersFromDb(activeStore.id),
       ]);
       if (cancelled) return;
+      setIsOrdersLoading(false);
 
       if (!prodRes.error && prodRes.data) {
         const mergedMap = new Map<string, Product>();
@@ -4300,9 +5067,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }
           }
         }
-        setProducts(Array.from(mergedMap.values()));
+        setProducts(mergeStoreProductsWithWebsites(Array.from(mergedMap.values()), subscribedWebsites));
       }
-      if (!ordRes.error && ordRes.data) setOrders(ordRes.data);
+      if (ordRes.error) {
+        setOrdersLoadError(ordRes.error.message || 'Unable to load store orders.');
+      } else if (ordRes.data) {
+        setOrdersLoadError(null);
+        setOrders(ordRes.data);
+      }
       if (!custRes.error && custRes.data) setCustomers(custRes.data);
       if (!invRes.error && invRes.data) setInventoryLogs(invRes.data);
       if (!teamRes.error && teamRes.data) setTeamMembers(teamRes.data);
@@ -4312,6 +5084,65 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       cancelled = true;
     };
   }, [user?.id, activeStore.id, subscribedWebsites]);
+
+  // Realtime order listener so public customer storefront orders appear immediately in the Merchant Dashboard
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase || !user?.id || !UUID_REGEX.test(activeStore.id)) {
+      return;
+    }
+
+    const sbClient = supabase;
+    const channel = sbClient
+      .channel(`merchant-orders-${activeStore.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'orders',
+          filter: `store_id=eq.${activeStore.id}`,
+        },
+        (payload) => {
+          void refreshStoreOrders();
+          if (payload.eventType === 'INSERT') {
+            const newRow = payload.new as { order_number?: string; customer_name?: string; total?: number } | null;
+            if (newRow?.order_number) {
+              const notif: AppNotification = {
+                id: `notif-order-${Date.now()}`,
+                title: `New Customer Order #${newRow.order_number}`,
+                message: `${newRow.customer_name || 'A customer'} placed a new order${newRow.total ? ` for ৳${Number(newRow.total).toLocaleString()}` : ''}.`,
+                type: 'order',
+                read: false,
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              };
+              setNotifications((prev) => [notif, ...prev]);
+              showToast(`New customer order #${newRow.order_number} received!`, 'success');
+            }
+            void Promise.all([
+              fetchStoreProductsFromDb(activeStore.id).then((res) => {
+                if (!res.error && res.data) {
+                  setProducts((prevWebMerged) => {
+                    void prevWebMerged;
+                    return mergeStoreProductsWithWebsites(res.data!, subscribedWebsites);
+                  });
+                }
+              }),
+              fetchStoreCustomersFromDb(activeStore.id).then((res) => {
+                if (!res.error && res.data) setCustomers(res.data);
+              }),
+              fetchStoreInventoryMovementsFromDb(activeStore.id).then((res) => {
+                if (!res.error && res.data) setInventoryLogs(res.data);
+              }),
+            ]);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void sbClient.removeChannel(channel);
+    };
+  }, [user?.id, activeStore.id, refreshStoreOrders, subscribedWebsites]);
 
   // Synchronize user-scoped support tickets & authoritative service pricing catalog
   useEffect(() => {
@@ -4418,9 +5249,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateProduct,
         deleteProduct,
         adjustProductStock,
+        publishProductToWebsite,
+        unpublishProductFromWebsite,
         ensureMerchantStore,
         orders,
+        isOrdersLoading,
+        ordersLoadError,
+        refreshStoreOrders,
         addOrder,
+        submitPublicCustomerOrder,
         updateOrderStatus,
         updateOrderPaymentStatus,
         updateOrderTracking,

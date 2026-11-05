@@ -182,17 +182,72 @@ export default async function handler(req: RequestWithQuery, res: ServerResponse
           return;
         }
 
-        const remainingSeconds = Number.isFinite(periodEndMs)
-          ? Math.max(0, Math.min(5, Math.floor((periodEndMs - nowMs) / 1000)))
-          : 5;
+        // Hydrate public visual builder fields from top-level RPC payload or __storefrontMeta fallback
+        const rawSocials =
+          site.socialLinks && typeof site.socialLinks === 'object' && !Array.isArray(site.socialLinks)
+            ? (site.socialLinks as Record<string, any>)
+            : {};
+        const meta =
+          rawSocials.__storefrontMeta &&
+          typeof rawSocials.__storefrontMeta === 'object' &&
+          !Array.isArray(rawSocials.__storefrontMeta)
+            ? (rawSocials.__storefrontMeta as Record<string, any>)
+            : {};
+
+        const cleanSocialLinks: Record<string, string> = {};
+        for (const k of ['facebook', 'instagram', 'twitter', 'linkedin', 'youtube']) {
+          if (typeof rawSocials[k] === 'string' && rawSocials[k].trim()) {
+            cleanSocialLinks[k] = rawSocials[k].trim();
+          }
+        }
+
+        const pickText = (field: string): string | undefined => {
+          if (typeof site[field] === 'string' && site[field].trim()) return site[field].trim();
+          if (site[field] === '') return undefined;
+          if (typeof meta[field] === 'string' && meta[field].trim()) return meta[field].trim();
+          return undefined;
+        };
+
+        const hydratedSite = {
+          ...site,
+          heroImageUrl: pickText('heroImageUrl'),
+          heroCtaText: pickText('heroCtaText'),
+          heroCtaLink: pickText('heroCtaLink'),
+          secondaryCtaText: pickText('secondaryCtaText'),
+          secondaryCtaLink: pickText('secondaryCtaLink'),
+          bannerImageUrl: pickText('bannerImageUrl'),
+          bannerTitle: pickText('bannerTitle'),
+          bannerSubtitle: pickText('bannerSubtitle'),
+          bannerCtaText: pickText('bannerCtaText'),
+          bannerCtaLink: pickText('bannerCtaLink'),
+          customDomain: pickText('customDomain'),
+          nicheLabel: pickText('nicheLabel') || site.templateName || 'Business Storefront',
+          customLinks: Array.isArray(site.customLinks)
+            ? site.customLinks
+            : Array.isArray(meta.customLinks)
+            ? meta.customLinks
+            : [],
+          sections: Array.isArray(site.sections)
+            ? site.sections
+            : Array.isArray(meta.sections)
+            ? meta.sections
+            : undefined,
+          themeSettings:
+            site.themeSettings && typeof site.themeSettings === 'object'
+              ? site.themeSettings
+              : meta.themeSettings && typeof meta.themeSettings === 'object'
+              ? meta.themeSettings
+              : undefined,
+          servicesOrProducts: Array.isArray(site.servicesOrProducts)
+            ? site.servicesOrProducts.filter((item: any) => item && item.isVisible !== false)
+            : [],
+          socialLinks: cleanSocialLinks,
+        };
 
         res.statusCode = 200;
         res.setHeader('Content-Type', 'application/json');
-        res.setHeader(
-          'Cache-Control',
-          `public, max-age=0, s-maxage=${remainingSeconds}, must-revalidate`
-        );
-        res.end(JSON.stringify({ found: true, subdomain, site }));
+        res.setHeader('Cache-Control', 'no-store, no-cache, max-age=0, must-revalidate');
+        res.end(JSON.stringify({ found: true, subdomain, site: hydratedSite }));
         return;
       }
       res.statusCode = 404;

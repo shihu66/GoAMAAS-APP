@@ -1,6 +1,13 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
+import { useLanguage } from '../../context/LanguageContext';
 import { Product } from '../../types';
+import {
+  computeProductWebsiteSyncState,
+  getEffectiveProductUnitPrice,
+  ProductWebsiteSyncState,
+} from '../../lib/storefrontSync';
 import {
   Package,
   Plus,
@@ -19,9 +26,25 @@ import {
   Globe,
   Loader2,
   X,
+  ExternalLink,
+  RefreshCw,
+  CheckCircle2,
+  Clock,
+  AlertCircle,
 } from 'lucide-react';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
+
+const DEFAULT_CATEGORIES = [
+  'Fashion & Apparel',
+  'Accessories',
+  'Sportswear',
+  'Gadgets & Electronics',
+  'Organic Foods & Grocery',
+  'Beauty & Skincare',
+  'Home & Living',
+  'Services & Packages',
+];
 
 export const ProductsPage: React.FC = () => {
   const {
@@ -32,18 +55,25 @@ export const ProductsPage: React.FC = () => {
     updateProduct,
     deleteProduct,
     adjustProductStock,
+    publishProductToWebsite,
+    unpublishProductFromWebsite,
     uploadWebsiteAsset,
     showToast,
   } = useApp();
+  const { lang } = useLanguage();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
   const [search, setSearch] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [selectedStockStatus, setSelectedStockStatus] = useState<string>('all');
+  const [selectedWebsiteSyncFilter, setSelectedWebsiteSyncFilter] = useState<
+    'all' | ProductWebsiteSyncState
+  >('all');
   const [sortField, setSortField] = useState<'name' | 'price' | 'stock' | 'salesCount'>('salesCount');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
   const [currentPage, setCurrentPage] = useState(1);
-  const itemsPerPage = 6;
+  const itemsPerPage = 8;
 
   // Modals state
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -52,7 +82,9 @@ export const ProductsPage: React.FC = () => {
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [isStockAdjustModalOpen, setIsStockAdjustModalOpen] = useState(false);
   const [isUploadingImage, setIsUploadingImage] = useState(false);
+  const [imageUploadError, setImageUploadError] = useState<string | null>(null);
   const [isSavingProduct, setIsSavingProduct] = useState(false);
+  const [publishingProductId, setPublishingProductId] = useState<string | null>(null);
 
   const [activeProduct, setActiveProduct] = useState<Product | null>(null);
 
@@ -64,12 +96,15 @@ export const ProductsPage: React.FC = () => {
     return storeMatched.length > 0 ? storeMatched : subscribedWebsites;
   }, [subscribedWebsites, activeStore]);
 
+  const primaryWebsite = myWebsites[0] || null;
+
   // Form states
   const [formData, setFormData] = useState({
     name: '',
     sku: '',
     category: 'Fashion & Apparel',
     price: 1500,
+    discountPrice: '' as string | number,
     costPrice: 800,
     stock: 25,
     lowStockThreshold: 10,
@@ -84,19 +119,84 @@ export const ProductsPage: React.FC = () => {
   const [stockAdjustDelta, setStockAdjustDelta] = useState(10);
   const [stockAdjustReason, setStockAdjustReason] = useState('New shipment restock');
 
-  // Categories list
+  const handleOpenAdd = () => {
+    setImageUploadError(null);
+    setFormData({
+      name: '',
+      sku: `SKU-${Math.floor(1000 + Math.random() * 9000)}`,
+      category: 'Fashion & Apparel',
+      price: 1500,
+      discountPrice: '',
+      costPrice: 800,
+      stock: 25,
+      lowStockThreshold: 10,
+      status: 'active',
+      description: '',
+      imageUrl: '',
+      websiteId: primaryWebsite?.id || '',
+      isVisible: Boolean(primaryWebsite),
+      sortOrder: products.length,
+    });
+    setIsAddModalOpen(true);
+  };
+
+  // Support `?action=add` shortcut from Dashboard Overview
+  useEffect(() => {
+    if (searchParams.get('action') === 'add') {
+      handleOpenAdd();
+      const next = new URLSearchParams(searchParams);
+      next.delete('action');
+      setSearchParams(next, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
+  // Categories list combining defaults + merchant custom categories
   const categories = useMemo(() => {
-    const set = new Set(products.map((p) => p.category));
+    const set = new Set<string>(DEFAULT_CATEGORIES);
+    for (const p of products) {
+      if (p.category?.trim()) set.add(p.category.trim());
+    }
     return ['all', ...Array.from(set)];
   }, [products]);
+
+  const productSyncMap = useMemo(() => {
+    const map = new Map<
+      string,
+      ReturnType<typeof computeProductWebsiteSyncState>
+    >();
+    for (const p of products) {
+      map.set(p.id, computeProductWebsiteSyncState(p, myWebsites));
+    }
+    return map;
+  }, [products, myWebsites]);
+
+  const syncSummaryCounts = useMemo(() => {
+    let published = 0;
+    let update_pending = 0;
+    let draft = 0;
+    let unavailable = 0;
+    for (const p of products) {
+      const info = productSyncMap.get(p.id);
+      if (!info) continue;
+      if (info.state === 'published') published += 1;
+      else if (info.state === 'update_pending') update_pending += 1;
+      else if (info.state === 'unavailable') unavailable += 1;
+      else draft += 1;
+    }
+    return { all: products.length, published, update_pending, draft, unavailable };
+  }, [products, productSyncMap]);
 
   // Filtering & Sorting
   const filteredProducts = useMemo(() => {
     return products
       .filter((p) => {
+        const q = search.trim().toLowerCase();
         const matchesSearch =
-          p.name.toLowerCase().includes(search.toLowerCase()) ||
-          p.sku.toLowerCase().includes(search.toLowerCase());
+          !q ||
+          p.name.toLowerCase().includes(q) ||
+          p.sku.toLowerCase().includes(q) ||
+          p.category.toLowerCase().includes(q);
         const matchesCategory =
           selectedCategory === 'all' || p.category === selectedCategory;
         const matchesStock =
@@ -104,7 +204,10 @@ export const ProductsPage: React.FC = () => {
           (selectedStockStatus === 'low' && p.stock <= p.lowStockThreshold && p.stock > 0) ||
           (selectedStockStatus === 'out' && p.stock === 0) ||
           (selectedStockStatus === 'in' && p.stock > p.lowStockThreshold);
-        return matchesSearch && matchesCategory && matchesStock;
+        const syncState = productSyncMap.get(p.id)?.state || 'draft';
+        const matchesWebsiteSync =
+          selectedWebsiteSyncFilter === 'all' || syncState === selectedWebsiteSyncFilter;
+        return matchesSearch && matchesCategory && matchesStock && matchesWebsiteSync;
       })
       .sort((a, b) => {
         const valA = a[sortField];
@@ -116,7 +219,16 @@ export const ProductsPage: React.FC = () => {
           ? (valA as number) - (valB as number)
           : (valB as number) - (valA as number);
       });
-  }, [products, search, selectedCategory, selectedStockStatus, sortField, sortOrder]);
+  }, [
+    products,
+    search,
+    selectedCategory,
+    selectedStockStatus,
+    selectedWebsiteSyncFilter,
+    sortField,
+    sortOrder,
+    productSyncMap,
+  ]);
 
   const totalPages = Math.ceil(filteredProducts.length / itemsPerPage) || 1;
   const paginatedProducts = filteredProducts.slice(
@@ -124,39 +236,23 @@ export const ProductsPage: React.FC = () => {
     currentPage * itemsPerPage
   );
 
-  const handleOpenAdd = () => {
-    setFormData({
-      name: '',
-      sku: `APX-${Math.floor(100 + Math.random() * 900)}`,
-      category: 'Fashion & Apparel',
-      price: 1500,
-      costPrice: 800,
-      stock: 25,
-      lowStockThreshold: 10,
-      status: 'active',
-      description: '',
-      imageUrl: '',
-      websiteId: myWebsites[0]?.id || '',
-      isVisible: true,
-      sortOrder: products.length,
-    });
-    setIsAddModalOpen(true);
-  };
-
   const handleOpenEdit = (p: Product) => {
     setActiveProduct(p);
+    setImageUploadError(null);
     setFormData({
       name: p.name,
       sku: p.sku,
       category: p.category,
       price: p.price,
+      discountPrice:
+        typeof p.discountPrice === 'number' && p.discountPrice > 0 ? p.discountPrice : '',
       costPrice: p.costPrice,
       stock: p.stock,
       lowStockThreshold: p.lowStockThreshold,
       status: p.status,
       description: p.description,
       imageUrl: p.image || '',
-      websiteId: p.websiteId || '',
+      websiteId: p.websiteId || primaryWebsite?.id || '',
       isVisible: p.isVisible !== false,
       sortOrder: p.sortOrder ?? 0,
     });
@@ -168,44 +264,68 @@ export const ProductsPage: React.FC = () => {
     e.target.value = '';
     if (!file) return;
 
+    setImageUploadError(null);
     setIsUploadingImage(true);
     try {
       const res = await uploadWebsiteAsset({
         file,
         folder: 'products',
-        websiteId: formData.websiteId || undefined,
+        websiteId: formData.websiteId || primaryWebsite?.id || undefined,
       });
       if (res.publicUrl && !res.error) {
         setFormData((prev) => ({ ...prev, imageUrl: res.publicUrl! }));
         showToast('Product image uploaded.', 'success');
       } else {
-        showToast(res.error?.message || 'Image upload failed.', 'error');
+        const msg = res.error?.message || 'Image upload failed.';
+        setImageUploadError(msg);
+        showToast(msg, 'error');
       }
     } finally {
       setIsUploadingImage(false);
     }
   };
 
+  const parseDiscountValue = (raw: string | number, basePrice: number): number | undefined => {
+    if (raw === '' || raw === null || raw === undefined) return undefined;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+    if (parsed >= basePrice) return undefined;
+    return parsed;
+  };
+
   const handleSaveAdd = async (e: React.FormEvent) => {
     e.preventDefault();
+    const basePrice = Math.max(0, Number(formData.price) || 0);
+    if (
+      formData.discountPrice !== '' &&
+      Number(formData.discountPrice) > 0 &&
+      Number(formData.discountPrice) >= basePrice
+    ) {
+      showToast('Discount price must be lower than the regular selling price.', 'warning');
+      return;
+    }
+
     setIsSavingProduct(true);
     try {
-      await addProduct({
+      const created = await addProduct({
         name: formData.name.trim(),
         sku: formData.sku.trim(),
-        category: formData.category,
-        price: Number(formData.price),
-        costPrice: Number(formData.costPrice),
-        stock: Number(formData.stock),
-        lowStockThreshold: Number(formData.lowStockThreshold),
+        category: formData.category.trim() || 'General',
+        price: basePrice,
+        discountPrice: parseDiscountValue(formData.discountPrice, basePrice),
+        costPrice: Math.max(0, Number(formData.costPrice) || 0),
+        stock: Math.max(0, Math.trunc(Number(formData.stock) || 0)),
+        lowStockThreshold: Math.max(1, Math.trunc(Number(formData.lowStockThreshold) || 5)),
         status: formData.status,
         description: formData.description.trim(),
         image: formData.imageUrl.trim() || undefined,
         websiteId: formData.websiteId || undefined,
-        isVisible: formData.isVisible,
-        sortOrder: formData.sortOrder,
+        isVisible: Boolean(formData.websiteId) && formData.isVisible,
+        sortOrder: Number(formData.sortOrder) || 0,
       });
-      setIsAddModalOpen(false);
+      if (created) {
+        setIsAddModalOpen(false);
+      }
     } finally {
       setIsSavingProduct(false);
     }
@@ -214,32 +334,65 @@ export const ProductsPage: React.FC = () => {
   const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeProduct) return;
+    const basePrice = Math.max(0, Number(formData.price) || 0);
+    if (
+      formData.discountPrice !== '' &&
+      Number(formData.discountPrice) > 0 &&
+      Number(formData.discountPrice) >= basePrice
+    ) {
+      showToast('Discount price must be lower than the regular selling price.', 'warning');
+      return;
+    }
+
     setIsSavingProduct(true);
     try {
-      await updateProduct(activeProduct.id, {
+      const updated = await updateProduct(activeProduct.id, {
         name: formData.name.trim(),
         sku: formData.sku.trim(),
-        category: formData.category,
-        price: Number(formData.price),
-        costPrice: Number(formData.costPrice),
-        stock: Number(formData.stock),
-        lowStockThreshold: Number(formData.lowStockThreshold),
+        category: formData.category.trim() || 'General',
+        price: basePrice,
+        discountPrice: parseDiscountValue(formData.discountPrice, basePrice),
+        costPrice: Math.max(0, Number(formData.costPrice) || 0),
+        stock: Math.max(0, Math.trunc(Number(formData.stock) || 0)),
+        lowStockThreshold: Math.max(1, Math.trunc(Number(formData.lowStockThreshold) || 5)),
         status: formData.status,
         description: formData.description.trim(),
         image: formData.imageUrl.trim(),
         websiteId: formData.websiteId,
-        isVisible: formData.isVisible,
+        isVisible: Boolean(formData.websiteId) && formData.isVisible,
         sortOrder: Number(formData.sortOrder) || 0,
       });
-      setIsEditModalOpen(false);
+      if (updated) {
+        setIsEditModalOpen(false);
+      }
     } finally {
       setIsSavingProduct(false);
     }
   };
 
-  const handleToggleWebsiteVisibility = async (p: Product) => {
-    const nextVisible = p.isVisible === false;
-    await updateProduct(p.id, { isVisible: nextVisible });
+  const handlePublishAction = async (p: Product) => {
+    const targetSiteId = p.websiteId || primaryWebsite?.id;
+    if (!targetSiteId) {
+      showToast('Create your GoAMAAS Website first before publishing products.', 'warning');
+      return;
+    }
+    setPublishingProductId(p.id);
+    try {
+      await publishProductToWebsite(p.id, targetSiteId);
+    } finally {
+      setPublishingProductId(null);
+    }
+  };
+
+  const handleUnpublishAction = async (p: Product) => {
+    const syncInfo = productSyncMap.get(p.id);
+    const targetSiteId = p.websiteId || syncInfo?.website?.id || primaryWebsite?.id;
+    setPublishingProductId(p.id);
+    try {
+      await unpublishProductFromWebsite(p.id, targetSiteId);
+    } finally {
+      setPublishingProductId(null);
+    }
   };
 
   const handleSaveStockAdjust = (e: React.FormEvent) => {
@@ -259,10 +412,37 @@ export const ProductsPage: React.FC = () => {
     }
   };
 
-  const getWebsiteDomainLabel = (websiteId?: string) => {
-    if (!websiteId) return null;
-    const found = subscribedWebsites.find((w) => w.id === websiteId);
-    return found ? found.fullDomainUrl : null;
+  const renderWebsiteSyncStatus = (state: ProductWebsiteSyncState) => {
+    if (state === 'published') {
+      return (
+        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+          <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+          <span>Published</span>
+        </span>
+      );
+    }
+    if (state === 'update_pending') {
+      return (
+        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-600 dark:text-amber-400">
+          <Clock className="w-3.5 h-3.5 shrink-0" />
+          <span>Update Pending</span>
+        </span>
+      );
+    }
+    if (state === 'unavailable') {
+      return (
+        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-rose-600 dark:text-rose-400">
+          <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+          <span>Unavailable / Out of Stock</span>
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-500 dark:text-slate-400">
+        <EyeOff className="w-3.5 h-3.5 shrink-0" />
+        <span>Draft / Not Published</span>
+      </span>
+    );
   };
 
   return (
@@ -271,14 +451,29 @@ export const ProductsPage: React.FC = () => {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
-            Products & Inventory Catalog
+            {lang === 'bn' ? 'পণ্য ও ওয়েবসাইট ক্যাটালগ' : 'Products & Website Catalog'}
           </h1>
           <p className="text-xs text-slate-500 mt-1">
-            Manage product pricing, images, connected website storefront synchronization, and stock thresholds.
+            {lang === 'bn'
+              ? 'পণ্যের মূল্য, স্টক পরিচালনা করুন এবং সরাসরি আপনার পাবলিক ওয়েবসাইটে প্রকাশ করুন।'
+              : 'Manage inventory, pricing, discounts, and publish products directly to your live storefront.'}
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          {primaryWebsite && (
+            <a
+              href={`/s/${primaryWebsite.subdomain}#services`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+            >
+              <Globe className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+              <span>{lang === 'bn' ? 'ওয়েবসাইট দেখুন' : 'Preview Storefront'}</span>
+              <ExternalLink className="w-3 h-3 text-slate-400" />
+            </a>
+          )}
+
           {/* View Mode Toggle */}
           <div className="flex items-center p-1 rounded-lg bg-slate-100 dark:bg-slate-800">
             <button
@@ -310,9 +505,37 @@ export const ProductsPage: React.FC = () => {
             className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer whitespace-nowrap shrink-0"
           >
             <Plus className="w-4 h-4" />
-            <span>Add New Product</span>
+            <span>{lang === 'bn' ? 'নতুন পণ্য যোগ করুন' : 'Add Product'}</span>
           </button>
         </div>
+      </div>
+
+      {/* Website Publishing State Segmented Filter */}
+      <div className="flex items-center gap-1 overflow-x-auto pb-1 text-xs">
+        {[
+          { key: 'all', label: 'All Products', count: syncSummaryCounts.all },
+          { key: 'published', label: 'Published on Website', count: syncSummaryCounts.published },
+          { key: 'update_pending', label: 'Update Pending', count: syncSummaryCounts.update_pending },
+          { key: 'draft', label: 'Draft / Not Published', count: syncSummaryCounts.draft },
+          { key: 'unavailable', label: 'Unavailable / Out of Stock', count: syncSummaryCounts.unavailable },
+        ].map((tab) => (
+          <button
+            key={tab.key}
+            type="button"
+            onClick={() => {
+              setSelectedWebsiteSyncFilter(tab.key as any);
+              setCurrentPage(1);
+            }}
+            className={`px-3 py-1.5 rounded-lg font-medium whitespace-nowrap shrink-0 transition-colors flex items-center gap-1.5 cursor-pointer ${
+              selectedWebsiteSyncFilter === tab.key
+                ? 'bg-blue-600 text-white shadow-xs'
+                : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white border border-slate-200 dark:border-slate-800'
+            }`}
+          >
+            <span>{tab.label}</span>
+            <span className="font-mono text-[10px] tabular-nums opacity-80">({tab.count})</span>
+          </button>
+        ))}
       </div>
 
       {/* Filter and Search Bar */}
@@ -327,7 +550,7 @@ export const ProductsPage: React.FC = () => {
               setSearch(e.target.value);
               setCurrentPage(1);
             }}
-            placeholder="Search by product name or SKU..."
+            placeholder="Search by product name, SKU, or category..."
             className="w-full pl-9 pr-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-hidden focus:ring-1 focus:ring-blue-500"
           />
         </div>
@@ -375,18 +598,29 @@ export const ProductsPage: React.FC = () => {
       {products.length === 0 ? (
         <div className="p-12 text-center rounded-xl bg-white dark:bg-slate-900 border border-dashed border-slate-200 dark:border-slate-800 space-y-3">
           <Package className="w-10 h-10 text-slate-400 mx-auto" />
-          <h3 className="text-base font-bold text-slate-900 dark:text-white">Your product catalog is empty</h3>
+          <h3 className="text-base font-bold text-slate-900 dark:text-white">
+            Your product catalog is empty
+          </h3>
           <p className="text-xs text-slate-500 max-w-sm mx-auto">
-            Add your first item to start tracking inventory, receiving orders, and showcasing items on your GoAMAAS Website.
+            Add your first product to track inventory, accept customer orders, and publish directly to your GoAMAAS Website.
           </p>
-          <div className="pt-2">
+          <div className="pt-2 flex items-center justify-center gap-2">
             <button
               onClick={handleOpenAdd}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 shadow-xs transition-colors cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 shadow-xs transition-colors cursor-pointer whitespace-nowrap"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>Add First Product</span>
             </button>
+            {!primaryWebsite && (
+              <Link
+                to="/create-website"
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors whitespace-nowrap"
+              >
+                <Globe className="w-3.5 h-3.5" />
+                <span>Create Website</span>
+              </Link>
+            )}
           </div>
         </div>
       ) : paginatedProducts.length === 0 ? (
@@ -394,7 +628,7 @@ export const ProductsPage: React.FC = () => {
           <Package className="w-10 h-10 text-slate-400 mx-auto" />
           <h3 className="text-base font-bold text-slate-900 dark:text-white">No products found</h3>
           <p className="text-xs text-slate-500 max-w-sm mx-auto">
-            Try adjusting your search query or filters.
+            Try adjusting your search query or clearing your active filter tabs.
           </p>
         </div>
       ) : viewMode === 'table' ? (
@@ -412,8 +646,8 @@ export const ProductsPage: React.FC = () => {
                       <ArrowUpDown className="w-3 h-3" />
                     </button>
                   </th>
-                  <th className="py-3 px-4">SKU / Category</th>
-                  <th className="py-3 px-4">Website Display</th>
+                  <th className="py-3 px-4">SKU · Category</th>
+                  <th className="py-3 px-4">Website Publishing</th>
                   <th className="py-3 px-4 text-right">
                     <button
                       onClick={() => toggleSort('price')}
@@ -432,16 +666,19 @@ export const ProductsPage: React.FC = () => {
                       <ArrowUpDown className="w-3 h-3" />
                     </button>
                   </th>
-                  <th className="py-3 px-4 text-center">Status</th>
-                  <th className="py-3 px-4 text-right">Actions</th>
+                  <th className="py-3 px-4 text-right">Website &amp; Catalog Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {paginatedProducts.map((p) => {
                   const isLow = p.stock <= p.lowStockThreshold && p.stock > 0;
-                  const isOut = p.stock === 0;
-                  const siteDomain = getWebsiteDomainLabel(p.websiteId);
-                  const isShownOnWebsite = Boolean(p.websiteId) && p.isVisible !== false && p.status === 'active';
+                  const isOut = p.stock <= 0;
+                  const syncInfo =
+                    productSyncMap.get(p.id) || computeProductWebsiteSyncState(p, myWebsites);
+                  const targetWebsite = syncInfo.website || primaryWebsite;
+                  const { unitPrice, hasDiscount, originalPrice } = getEffectiveProductUnitPrice(p);
+                  const isBusy = publishingProductId === p.id;
+                  const hasPublishedEntry = Boolean(syncInfo.publishedItem);
 
                   return (
                     <tr
@@ -454,6 +691,7 @@ export const ProductsPage: React.FC = () => {
                             <img
                               src={p.image}
                               alt={p.name}
+                              referrerPolicy="no-referrer"
                               className="w-10 h-10 rounded-lg object-cover border border-slate-200 dark:border-slate-700 shrink-0"
                             />
                           ) : (
@@ -465,97 +703,148 @@ export const ProductsPage: React.FC = () => {
                             <div className="font-semibold text-slate-900 dark:text-white max-w-xs truncate">
                               {p.name}
                             </div>
-                            <div className="text-[10px] text-slate-400 line-clamp-1">
-                              {p.description || 'No description provided.'}
+                            <div className="text-[11px] text-slate-400 line-clamp-1">
+                              {p.description || 'No description provided'}
                             </div>
                           </div>
                         </div>
                       </td>
-                      <td className="py-3.5 px-4 font-mono text-[11px]">
-                        <span className="text-blue-600 dark:text-blue-400 block">{p.sku}</span>
-                        <span className="text-slate-400 text-[10px]">{p.category}</span>
-                      </td>
+
                       <td className="py-3.5 px-4">
-                        {p.websiteId ? (
-                          <div className="space-y-0.5">
-                            <button
-                              type="button"
-                              onClick={() => void handleToggleWebsiteVisibility(p)}
-                              className={`inline-flex items-center gap-1 text-[11px] font-semibold cursor-pointer ${
-                                isShownOnWebsite
-                                  ? 'text-emerald-600 dark:text-emerald-400'
-                                  : 'text-slate-400 hover:text-slate-600'
-                              }`}
-                              title="Toggle visibility on published website"
-                            >
-                              {p.isVisible === false ? (
-                                <EyeOff className="w-3.5 h-3.5" />
-                              ) : (
-                                <Globe className="w-3.5 h-3.5" />
-                              )}
-                              <span>{p.isVisible === false ? 'Hidden on Site' : 'Visible on Site'}</span>
-                            </button>
-                            {siteDomain && (
-                              <span className="block font-mono text-[10px] text-slate-400 truncate max-w-[160px]">
-                                {siteDomain}
-                              </span>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-[11px] text-slate-400">Inventory only</span>
-                        )}
-                      </td>
-                      <td className="py-3.5 px-4 text-right font-mono font-bold tabular-nums text-slate-900 dark:text-white">
-                        ৳{p.price.toLocaleString()}
-                        <span className="block text-[10px] text-slate-400 font-normal">
-                          Cost: ৳{p.costPrice.toLocaleString()}
+                        <span className="font-mono text-[11px] text-blue-600 dark:text-blue-400 block">
+                          {p.sku}
+                        </span>
+                        <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                          {p.category} · <span className="capitalize">{p.status}</span>
                         </span>
                       </td>
+
+                      <td className="py-3.5 px-4">
+                        <div className="space-y-0.5">
+                          {renderWebsiteSyncStatus(syncInfo.state)}
+                          {targetWebsite ? (
+                            <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-mono">
+                              <span className="truncate max-w-[150px]">
+                                {targetWebsite.fullDomainUrl}
+                              </span>
+                              <span aria-hidden="true">·</span>
+                              <a
+                                href={`/s/${targetWebsite.subdomain}#services`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-blue-600 dark:text-blue-400 hover:underline font-sans whitespace-nowrap"
+                              >
+                                Preview
+                              </a>
+                            </div>
+                          ) : (
+                            <Link
+                              to="/create-website"
+                              className="block text-[10px] text-blue-600 dark:text-blue-400 hover:underline"
+                            >
+                              Connect a website →
+                            </Link>
+                          )}
+                        </div>
+                      </td>
+
+                      <td className="py-3.5 px-4 text-right font-mono tabular-nums">
+                        <span className="font-bold text-slate-900 dark:text-white">
+                          ৳{unitPrice.toLocaleString()}
+                        </span>
+                        {hasDiscount && originalPrice ? (
+                          <span className="block text-[10px] text-slate-400 line-through">
+                            ৳{originalPrice.toLocaleString()}
+                          </span>
+                        ) : (
+                          <span className="block text-[10px] text-slate-400">
+                            Cost ৳{p.costPrice.toLocaleString()}
+                          </span>
+                        )}
+                      </td>
+
                       <td className="py-3.5 px-4 text-right font-mono tabular-nums">
                         <span
                           className={`font-bold ${
                             isOut
-                              ? 'text-rose-600'
+                              ? 'text-rose-600 dark:text-rose-400'
                               : isLow
-                              ? 'text-amber-600'
-                              : 'text-emerald-600'
+                              ? 'text-amber-600 dark:text-amber-400'
+                              : 'text-emerald-600 dark:text-emerald-400'
                           }`}
                         >
                           {p.stock} units
                         </span>
                         {isLow && (
-                          <span className="block text-[10px] text-amber-500 font-semibold">
-                            Low Stock (&lt;{p.lowStockThreshold})
+                          <span className="block text-[10px] text-amber-600 dark:text-amber-400 font-sans">
+                            Low (&le;{p.lowStockThreshold})
                           </span>
                         )}
                         {isOut && (
-                          <span className="block text-[10px] text-rose-500 font-semibold">
-                            Out of Stock
+                          <span className="block text-[10px] text-rose-600 dark:text-rose-400 font-sans">
+                            Out of stock
                           </span>
                         )}
                       </td>
-                      <td className="py-3.5 px-4 text-center">
-                        <span
-                          className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
-                            p.status === 'active'
-                              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400'
-                              : p.status === 'draft'
-                              ? 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
-                              : 'bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-400'
-                          }`}
-                        >
-                          {p.status}
-                        </span>
-                      </td>
+
                       <td className="py-3.5 px-4 text-right">
-                        <div className="flex items-center justify-end gap-1.5">
+                        <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                          {targetWebsite && syncInfo.state === 'draft' && p.stock > 0 && (
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() => void handlePublishAction(p)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-[11px] font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                            >
+                              {isBusy ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <Globe className="w-3 h-3" />
+                              )}
+                              <span>Publish to Website</span>
+                            </button>
+                          )}
+
+                          {targetWebsite && syncInfo.state === 'update_pending' && p.stock > 0 && (
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() => void handlePublishAction(p)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-[11px] font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                            >
+                              {isBusy ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <RefreshCw className="w-3 h-3" />
+                              )}
+                              <span>Update on Website</span>
+                            </button>
+                          )}
+
+                          {hasPublishedEntry && (
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() => void handleUnpublishAction(p)}
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50 text-slate-600 dark:text-slate-300 text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                              title="Remove from public website storefront"
+                            >
+                              {isBusy ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <EyeOff className="w-3 h-3" />
+                              )}
+                              <span>Unpublish</span>
+                            </button>
+                          )}
+
                           <button
                             onClick={() => {
                               setActiveProduct(p);
                               setIsDetailModalOpen(true);
                             }}
-                            className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
-                            title="View Details"
+                            className="p-1.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
+                            title="View Product Details"
                           >
                             <Eye className="w-3.5 h-3.5" />
                           </button>
@@ -565,14 +854,14 @@ export const ProductsPage: React.FC = () => {
                               setStockAdjustDelta(10);
                               setIsStockAdjustModalOpen(true);
                             }}
-                            className="p-1 text-blue-500 hover:text-blue-700 cursor-pointer"
+                            className="p-1.5 text-blue-500 hover:text-blue-700 cursor-pointer"
                             title="Adjust Stock"
                           >
                             <SlidersHorizontal className="w-3.5 h-3.5" />
                           </button>
                           <button
                             onClick={() => handleOpenEdit(p)}
-                            className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
+                            className="p-1.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
                             title="Edit Product"
                           >
                             <Edit className="w-3.5 h-3.5" />
@@ -582,7 +871,7 @@ export const ProductsPage: React.FC = () => {
                               setActiveProduct(p);
                               setIsDeleteDialogOpen(true);
                             }}
-                            className="p-1 text-rose-400 hover:text-rose-600 cursor-pointer"
+                            className="p-1.5 text-rose-400 hover:text-rose-600 cursor-pointer"
                             title="Delete Product"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
@@ -601,8 +890,13 @@ export const ProductsPage: React.FC = () => {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
           {paginatedProducts.map((p) => {
             const isLow = p.stock <= p.lowStockThreshold && p.stock > 0;
-            const isOut = p.stock === 0;
-            const siteDomain = getWebsiteDomainLabel(p.websiteId);
+            const isOut = p.stock <= 0;
+            const syncInfo =
+              productSyncMap.get(p.id) || computeProductWebsiteSyncState(p, myWebsites);
+            const targetWebsite = syncInfo.website || primaryWebsite;
+            const { unitPrice, hasDiscount, originalPrice } = getEffectiveProductUnitPrice(p);
+            const isBusy = publishingProductId === p.id;
+            const hasPublishedEntry = Boolean(syncInfo.publishedItem);
 
             return (
               <div
@@ -614,54 +908,53 @@ export const ProductsPage: React.FC = () => {
                     <img
                       src={p.image}
                       alt={p.name}
+                      referrerPolicy="no-referrer"
                       className="w-full h-full object-cover"
                     />
                   </div>
-                ) : null}
+                ) : (
+                  <div className="aspect-[16/10] w-full bg-slate-50 dark:bg-slate-800/50 flex items-center justify-center text-slate-300 dark:text-slate-600">
+                    <Package className="w-8 h-8" />
+                  </div>
+                )}
 
                 <div className="p-5 flex-1 flex flex-col justify-between space-y-4">
-                  <div className="space-y-3">
-                    <div className="flex items-start justify-between gap-2">
-                      <span className="font-mono text-[10px] text-blue-600 dark:text-blue-400">
-                        {p.sku}
+                  <div className="space-y-2.5">
+                    <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500">
+                      <span className="font-mono text-blue-600 dark:text-blue-400 truncate">
+                        {p.sku} · {p.category}
                       </span>
-                      <span
-                        className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
-                          p.status === 'active'
-                            ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400'
-                            : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
-                        }`}
-                      >
-                        {p.status}
-                      </span>
+                      {renderWebsiteSyncStatus(syncInfo.state)}
                     </div>
 
                     <h3 className="font-bold text-sm text-slate-900 dark:text-white line-clamp-1">
                       {p.name}
                     </h3>
-                    <p className="text-[11px] text-slate-500 line-clamp-2">
+                    <p className="text-xs text-slate-500 line-clamp-2">
                       {p.description || 'No detailed specifications recorded.'}
                     </p>
 
-                    {siteDomain && (
-                      <div className="text-[10px] text-slate-400 font-mono truncate">
-                        {p.isVisible === false ? 'Hidden on ' : 'Shown on '}
-                        {siteDomain}
-                      </div>
-                    )}
-
-                    <div className="flex items-center justify-between text-xs pt-2 border-t border-slate-100 dark:border-slate-800 font-mono">
+                    <div className="flex items-center justify-between text-xs pt-2 border-t border-slate-100 dark:border-slate-800 font-mono tabular-nums">
                       <div>
-                        <span className="text-slate-400 text-[10px] block">Price</span>
-                        <span className="font-bold text-slate-900 dark:text-white tabular-nums">
-                          ৳{p.price.toLocaleString()}
+                        <span className="text-slate-400 text-[10px] font-sans block">Price</span>
+                        <span className="font-bold text-slate-900 dark:text-white">
+                          ৳{unitPrice.toLocaleString()}
                         </span>
+                        {hasDiscount && originalPrice && (
+                          <span className="ml-1.5 text-[10px] text-slate-400 line-through">
+                            ৳{originalPrice.toLocaleString()}
+                          </span>
+                        )}
                       </div>
                       <div className="text-right">
-                        <span className="text-slate-400 text-[10px] block">In Stock</span>
+                        <span className="text-slate-400 text-[10px] font-sans block">Stock</span>
                         <span
-                          className={`font-bold tabular-nums ${
-                            isOut ? 'text-rose-600' : isLow ? 'text-amber-600' : 'text-emerald-600'
+                          className={`font-bold ${
+                            isOut
+                              ? 'text-rose-600 dark:text-rose-400'
+                              : isLow
+                              ? 'text-amber-600 dark:text-amber-400'
+                              : 'text-emerald-600 dark:text-emerald-400'
                           }`}
                         >
                           {p.stock} units
@@ -670,21 +963,55 @@ export const ProductsPage: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-xs">
-                    <span className="text-[10px] text-slate-400">{p.salesCount} sold</span>
-                    <div className="flex items-center gap-2">
+                  <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2 text-xs">
+                    <div className="flex items-center gap-1.5">
+                      {targetWebsite && syncInfo.state !== 'published' && p.stock > 0 && (
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => void handlePublishAction(p)}
+                          className="px-2.5 py-1 text-[11px] font-semibold rounded-md bg-blue-600 hover:bg-blue-700 text-white cursor-pointer whitespace-nowrap"
+                        >
+                          {syncInfo.state === 'update_pending' ? 'Update Site' : 'Publish'}
+                        </button>
+                      )}
+                      {hasPublishedEntry && (
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => void handleUnpublishAction(p)}
+                          className="px-2 py-1 text-[11px] font-medium rounded-md border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer whitespace-nowrap"
+                        >
+                          Unpublish
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      {targetWebsite && (
+                        <a
+                          href={`/s/${targetWebsite.subdomain}#services`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="p-1 text-slate-400 hover:text-blue-600"
+                          title="Preview on Website"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                        </a>
+                      )}
                       <button
                         onClick={() => {
                           setActiveProduct(p);
                           setIsStockAdjustModalOpen(true);
                         }}
-                        className="px-2 py-1 text-[11px] font-medium rounded bg-blue-50 dark:bg-blue-950 text-blue-600 dark:text-blue-400 hover:bg-blue-100 cursor-pointer"
+                        className="p-1 text-blue-500 hover:text-blue-700 cursor-pointer"
+                        title="Adjust Stock"
                       >
-                        Adjust Stock
+                        <SlidersHorizontal className="w-3.5 h-3.5" />
                       </button>
                       <button
                         onClick={() => handleOpenEdit(p)}
-                        className="p-1 text-slate-400 hover:text-slate-700 cursor-pointer"
+                        className="p-1 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
                         title="Edit Product"
                       >
                         <Edit className="w-3.5 h-3.5" />
@@ -711,7 +1038,7 @@ export const ProductsPage: React.FC = () => {
       {/* Pagination */}
       {totalPages > 1 && (
         <div className="flex items-center justify-between pt-2 text-xs text-slate-500">
-          <div>
+          <div className="font-mono tabular-nums">
             Showing {(currentPage - 1) * itemsPerPage + 1} to{' '}
             {Math.min(currentPage * itemsPerPage, filteredProducts.length)} of{' '}
             {filteredProducts.length} items
@@ -724,7 +1051,7 @@ export const ProductsPage: React.FC = () => {
             >
               <ChevronLeft className="w-4 h-4" />
             </button>
-            <span className="px-2 font-semibold text-slate-900 dark:text-white font-mono">
+            <span className="px-2 font-semibold text-slate-900 dark:text-white font-mono tabular-nums">
               {currentPage} / {totalPages}
             </span>
             <button
@@ -752,19 +1079,20 @@ export const ProductsPage: React.FC = () => {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                Product Title *
+                Product Name *
               </label>
               <input
                 type="text"
                 required
                 value={formData.name}
                 onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                placeholder="e.g. Handwoven Jamdani Saree"
                 className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
               />
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                SKU Barcode *
+                SKU / Product Code *
               </label>
               <input
                 type="text"
@@ -782,22 +1110,41 @@ export const ProductsPage: React.FC = () => {
               <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
                 Product Image
               </label>
-              <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-semibold cursor-pointer">
-                {isUploadingImage ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Upload className="w-3.5 h-3.5" />
+              <div className="flex items-center gap-2">
+                {formData.imageUrl && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFormData((prev) => ({ ...prev, imageUrl: '' }));
+                      setImageUploadError(null);
+                    }}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/30 text-[11px] font-medium cursor-pointer"
+                  >
+                    <X className="w-3 h-3" />
+                    <span>Remove</span>
+                  </button>
                 )}
-                <span>{formData.imageUrl ? 'Replace Image' : 'Upload Image'}</span>
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
-                  onChange={handleImageFileUpload}
-                  disabled={isUploadingImage}
-                  className="hidden"
-                />
-              </label>
+                <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-semibold cursor-pointer">
+                  {isUploadingImage ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Upload className="w-3.5 h-3.5" />
+                  )}
+                  <span>{formData.imageUrl ? 'Replace Image' : 'Upload Image'}</span>
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
+                    onChange={handleImageFileUpload}
+                    disabled={isUploadingImage}
+                    className="hidden"
+                  />
+                </label>
+              </div>
             </div>
+
+            {imageUploadError && (
+              <p className="text-[11px] text-rose-600 dark:text-rose-400">{imageUploadError}</p>
+            )}
 
             <div className="flex items-center gap-3">
               {formData.imageUrl ? (
@@ -805,16 +1152,9 @@ export const ProductsPage: React.FC = () => {
                   <img
                     src={formData.imageUrl}
                     alt="Product preview"
+                    referrerPolicy="no-referrer"
                     className="w-full h-full object-cover"
                   />
-                  <button
-                    type="button"
-                    onClick={() => setFormData({ ...formData, imageUrl: '' })}
-                    className="absolute top-0.5 right-0.5 p-0.5 rounded bg-slate-900/80 text-white hover:bg-rose-600 cursor-pointer"
-                    title="Remove image"
-                  >
-                    <X className="w-3 h-3" />
-                  </button>
                 </div>
               ) : null}
 
@@ -822,7 +1162,7 @@ export const ProductsPage: React.FC = () => {
                 type="url"
                 value={formData.imageUrl}
                 onChange={(e) => setFormData({ ...formData, imageUrl: e.target.value })}
-                placeholder="Or paste an image URL (https://...)"
+                placeholder="Or paste a public image URL (https://...)"
                 className="flex-1 px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white"
               />
             </div>
@@ -840,7 +1180,7 @@ export const ProductsPage: React.FC = () => {
                   onChange={(e) => setFormData({ ...formData, websiteId: e.target.value })}
                   className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white"
                 >
-                  <option value="">Do not link to website</option>
+                  <option value="">Keep in Dashboard only (Draft)</option>
                   {myWebsites.map((site) => (
                     <option key={site.id} value={site.id}>
                       {site.businessName} ({site.fullDomainUrl})
@@ -870,33 +1210,34 @@ export const ProductsPage: React.FC = () => {
                     disabled={!formData.websiteId}
                     className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
                   />
-                  <span>Show on Published Website</span>
+                  <span>Publish to Website on Save</span>
                 </label>
               </div>
             </div>
           )}
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
             <div>
               <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
                 Category
               </label>
-              <select
+              <input
+                type="text"
+                list="goamaas-product-categories"
                 value={formData.category}
                 onChange={(e) => setFormData({ ...formData, category: e.target.value })}
+                placeholder="e.g. Fashion & Apparel"
                 className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
-              >
-                <option value="Fashion & Apparel">Fashion & Apparel</option>
-                <option value="Accessories">Accessories</option>
-                <option value="Sportswear">Sportswear</option>
-                <option value="Gadgets">Gadgets</option>
-                <option value="Organic Foods">Organic Foods</option>
-                <option value="Home & Living">Home & Living</option>
-              </select>
+              />
+              <datalist id="goamaas-product-categories">
+                {DEFAULT_CATEGORIES.map((cat) => (
+                  <option key={cat} value={cat} />
+                ))}
+              </datalist>
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                Selling Price (৳) *
+                Regular Price (৳) *
               </label>
               <input
                 type="number"
@@ -904,7 +1245,20 @@ export const ProductsPage: React.FC = () => {
                 min={0}
                 value={formData.price}
                 onChange={(e) => setFormData({ ...formData, price: Number(e.target.value) })}
-                className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-mono"
+                className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-mono tabular-nums"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                Discount Price (৳)
+              </label>
+              <input
+                type="number"
+                min={0}
+                value={formData.discountPrice}
+                onChange={(e) => setFormData({ ...formData, discountPrice: e.target.value })}
+                placeholder="Optional sale price"
+                className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-mono tabular-nums"
               />
             </div>
             <div>
@@ -916,7 +1270,7 @@ export const ProductsPage: React.FC = () => {
                 min={0}
                 value={formData.costPrice}
                 onChange={(e) => setFormData({ ...formData, costPrice: Number(e.target.value) })}
-                className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-mono"
+                className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-mono tabular-nums"
               />
             </div>
           </div>
@@ -924,52 +1278,58 @@ export const ProductsPage: React.FC = () => {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
               <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                Initial Stock Count
+                Available Stock Quantity *
               </label>
               <input
                 type="number"
+                required
                 min={0}
                 value={formData.stock}
-                onChange={(e) => setFormData({ ...formData, stock: Number(e.target.value) })}
-                className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-mono"
+                onChange={(e) => setFormData({ ...formData, stock: Math.max(0, Number(e.target.value)) })}
+                className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-mono tabular-nums"
               />
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                Low Stock Threshold
+                Low Stock Alert Threshold
               </label>
               <input
                 type="number"
                 min={1}
                 value={formData.lowStockThreshold}
-                onChange={(e) => setFormData({ ...formData, lowStockThreshold: Number(e.target.value) })}
-                className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-mono"
+                onChange={(e) =>
+                  setFormData({ ...formData, lowStockThreshold: Math.max(1, Number(e.target.value)) })
+                }
+                className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-mono tabular-nums"
               />
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                Status
+                Availability Status
               </label>
               <select
                 value={formData.status}
-                onChange={(e) => setFormData({ ...formData, status: e.target.value as Product['status'] })}
+                onChange={(e) =>
+                  setFormData({ ...formData, status: e.target.value as Product['status'] })
+                }
                 className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
               >
-                <option value="active">Active</option>
-                <option value="draft">Draft</option>
-                <option value="archived">Archived</option>
+                <option value="active">Active (Available for Sale)</option>
+                <option value="draft">Draft (Internal Only)</option>
+                <option value="archived">Archived (Unavailable)</option>
               </select>
             </div>
           </div>
 
           <div>
             <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-              Description & Specifications
+              Product Description &amp; Specifications
             </label>
             <textarea
               rows={3}
               value={formData.description}
               onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+              placeholder="Describe fabric, dimensions, warranty, or package details..."
               className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
             />
           </div>
@@ -991,10 +1351,12 @@ export const ProductsPage: React.FC = () => {
               className="px-5 py-2 text-xs font-semibold rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white cursor-pointer"
             >
               {isSavingProduct
-                ? 'Saving...'
+                ? 'Saving to Server...'
                 : isAddModalOpen
-                ? 'Create Product'
-                : 'Save Changes'}
+                ? formData.websiteId && formData.isVisible
+                  ? 'Save & Publish to Website'
+                  : 'Create Product'
+                : 'Save Product Changes'}
             </button>
           </div>
         </form>
@@ -1010,7 +1372,7 @@ export const ProductsPage: React.FC = () => {
         <form onSubmit={handleSaveStockAdjust} className="space-y-4">
           <div className="p-3 rounded-lg bg-slate-50 dark:bg-slate-800 text-xs">
             <span className="text-slate-400 block">Current Stock:</span>
-            <span className="text-lg font-bold font-mono text-slate-900 dark:text-white">
+            <span className="text-lg font-bold font-mono tabular-nums text-slate-900 dark:text-white">
               {activeProduct?.stock} units
             </span>
           </div>
@@ -1025,11 +1387,11 @@ export const ProductsPage: React.FC = () => {
               value={stockAdjustDelta}
               onChange={(e) => setStockAdjustDelta(Number(e.target.value))}
               placeholder="e.g. +20 to restock, or -5 for damage"
-              className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-mono"
+              className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-mono tabular-nums"
             />
             <p className="text-[11px] text-slate-400 mt-1">
-              Resulting Stock:{' '}
-              <strong className="font-mono text-blue-600">
+              Resulting Stock (never negative):{' '}
+              <strong className="font-mono tabular-nums text-blue-600">
                 {Math.max(0, (activeProduct?.stock || 0) + stockAdjustDelta)}
               </strong>
             </p>
@@ -1066,7 +1428,7 @@ export const ProductsPage: React.FC = () => {
         </form>
       </Modal>
 
-      {/* Product Details Drawer/Modal */}
+      {/* Product Details Modal */}
       {activeProduct && (
         <Modal
           isOpen={isDetailModalOpen}
@@ -1081,36 +1443,54 @@ export const ProductsPage: React.FC = () => {
                 <img
                   src={activeProduct.image}
                   alt={activeProduct.name}
+                  referrerPolicy="no-referrer"
                   className="max-h-56 w-auto object-contain"
                 />
               </div>
             )}
+
+            <div className="flex items-center justify-between p-3 rounded-lg border border-slate-200 dark:border-slate-800">
+              <span className="text-slate-500">Website Publishing Status:</span>
+              {renderWebsiteSyncStatus(
+                productSyncMap.get(activeProduct.id)?.state ||
+                  computeProductWebsiteSyncState(activeProduct, myWebsites).state
+              )}
+            </div>
+
             <div className="grid grid-cols-2 gap-3 p-3 rounded-lg bg-slate-50 dark:bg-slate-800">
               <div>
-                <span className="text-slate-400 block text-[10px]">Selling Price:</span>
-                <span className="font-bold text-sm font-mono text-slate-900 dark:text-white">
-                  ৳{activeProduct.price.toLocaleString()}
+                <span className="text-slate-400 block text-[10px]">Effective Selling Price:</span>
+                <span className="font-bold text-sm font-mono tabular-nums text-slate-900 dark:text-white">
+                  ৳{getEffectiveProductUnitPrice(activeProduct).unitPrice.toLocaleString()}
                 </span>
+                {activeProduct.discountPrice && activeProduct.discountPrice < activeProduct.price && (
+                  <span className="ml-1.5 text-[10px] font-mono text-slate-400 line-through">
+                    ৳{activeProduct.price.toLocaleString()}
+                  </span>
+                )}
               </div>
               <div>
-                <span className="text-slate-400 block text-[10px]">Estimated Margin:</span>
-                <span className="font-bold text-sm font-mono text-emerald-600">
-                  ৳{(activeProduct.price - activeProduct.costPrice).toLocaleString()} (
-                  {activeProduct.price > 0
-                    ? Math.round(((activeProduct.price - activeProduct.costPrice) / activeProduct.price) * 100)
-                    : 0}
-                  %)
-                </span>
+                <span className="text-slate-400 block text-[10px]">Estimated Unit Margin:</span>
+                {(() => {
+                  const eff = getEffectiveProductUnitPrice(activeProduct).unitPrice;
+                  const margin = eff - activeProduct.costPrice;
+                  return (
+                    <span className="font-bold text-sm font-mono tabular-nums text-emerald-600">
+                      ৳{margin.toLocaleString()} (
+                      {eff > 0 ? Math.round((margin / eff) * 100) : 0}%)
+                    </span>
+                  );
+                })()}
               </div>
               <div>
                 <span className="text-slate-400 block text-[10px]">Current Stock:</span>
-                <span className="font-bold font-mono text-slate-900 dark:text-white">
+                <span className="font-bold font-mono tabular-nums text-slate-900 dark:text-white">
                   {activeProduct.stock} units
                 </span>
               </div>
               <div>
                 <span className="text-slate-400 block text-[10px]">Total Sold:</span>
-                <span className="font-bold font-mono text-blue-600">
+                <span className="font-bold font-mono tabular-nums text-blue-600">
                   {activeProduct.salesCount} units
                 </span>
               </div>
@@ -1123,7 +1503,32 @@ export const ProductsPage: React.FC = () => {
               </p>
             </div>
 
-            <div className="pt-2 flex justify-end">
+            <div className="pt-2 flex items-center justify-between gap-2 border-t border-slate-100 dark:border-slate-800">
+              <div className="flex items-center gap-2">
+                {primaryWebsite && activeProduct.stock > 0 && (
+                  <button
+                    type="button"
+                    disabled={publishingProductId === activeProduct.id}
+                    onClick={() => void handlePublishAction(activeProduct)}
+                    className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold cursor-pointer"
+                  >
+                    {productSyncMap.get(activeProduct.id)?.state === 'published'
+                      ? 'Sync Again'
+                      : 'Publish to Website'}
+                  </button>
+                )}
+                {primaryWebsite && (
+                  <a
+                    href={`/s/${primaryWebsite.subdomain}#services`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+                  >
+                    <span>Preview on Website</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
+              </div>
               <button
                 type="button"
                 onClick={() => setIsDetailModalOpen(false)}
@@ -1146,7 +1551,7 @@ export const ProductsPage: React.FC = () => {
           }
         }}
         title="Delete Product?"
-        message={`Are you sure you want to permanently remove "${activeProduct?.name}" (${activeProduct?.sku})? This will remove it from your catalog and published website.`}
+        message={`Are you sure you want to permanently remove "${activeProduct?.name}" (${activeProduct?.sku})? Existing historical orders will retain their saved product snapshot, while the item will be removed from your active catalog and public website.`}
         confirmLabel="Delete Product"
         cancelLabel="Keep Product"
         isDestructive

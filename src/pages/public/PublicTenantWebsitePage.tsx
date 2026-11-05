@@ -12,7 +12,7 @@ import { Globe, ArrowLeft, Loader2, Sparkles } from 'lucide-react';
 
 export const PublicTenantWebsitePage: React.FC = () => {
   const { subdomain: paramSubdomain } = useParams<{ subdomain?: string }>();
-  const { subscribedWebsites, resolvePublicWebsite } = useApp();
+  const { subscribedWebsites, resolvePublicWebsite, submitPublicCustomerOrder } = useApp();
   const [loading, setLoading] = useState(true);
   const [site, setSite] = useState<SubscribedWebsite | null>(null);
 
@@ -36,6 +36,15 @@ export const PublicTenantWebsitePage: React.FC = () => {
 
   const resolvePublicWebsiteRef = React.useRef(resolvePublicWebsite);
   resolvePublicWebsiteRef.current = resolvePublicWebsite;
+
+  const refreshResolvedSite = React.useCallback(async () => {
+    if (!resolvedSubdomain) return;
+    const res = await resolvePublicWebsiteRef.current(resolvedSubdomain);
+    const validLiveSite = res.site && isWebsiteTrulyLive(res.site) ? res.site : null;
+    if (validLiveSite) {
+      setSite(validLiveSite);
+    }
+  }, [resolvedSubdomain]);
 
   useEffect(() => {
     let cancelled = false;
@@ -133,6 +142,8 @@ export const PublicTenantWebsitePage: React.FC = () => {
         viewMode="desktop"
         isPublicView={true}
         showGraceBanner={false}
+        onSubmitOrder={submitPublicCustomerOrder}
+        onOrderPlaced={() => void refreshResolvedSite()}
       />
     </div>
   );

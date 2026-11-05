@@ -32,6 +32,12 @@ import {
   validateManualPaymentSubmissionInput,
 } from './paymentWorkflow';
 import { emitPaymentDiagnostic } from './paymentDiagnostics';
+import {
+  PublicCustomerOrderInput,
+  embedPublicStorefrontMetaInConfig,
+  extractOrderMetadataFromItems,
+  extractPublicStorefrontMeta,
+} from './storefrontSync';
 
 export const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -2158,6 +2164,66 @@ function readFileAsDataUrl(file: File): Promise<string> {
 }
 
 /**
+ * Resizes and compresses an image in the browser to a compact WebP/JPEG data URL (<= ~115 KB)
+ * strictly for pre-authentication local previews or when the Storage bucket is confirmed
+ * unprovisioned on a project, preventing multi-megabyte raw base64 blobs from ever entering state or DB.
+ */
+export async function compressImageFileToCompactDataUrl(
+  file: File,
+  opts?: { maxWidth?: number; maxHeight?: number; maxChars?: number }
+): Promise<string> {
+  const rawDataUrl = await readFileAsDataUrl(file);
+  if (typeof document === 'undefined' || typeof Image === 'undefined') {
+    return rawDataUrl;
+  }
+
+  const maxWidth = opts?.maxWidth ?? 1280;
+  const maxHeight = opts?.maxHeight ?? 960;
+  const maxChars = opts?.maxChars ?? 155_000;
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        let width = img.naturalWidth || img.width || 800;
+        let height = img.naturalHeight || img.height || 600;
+        const scale = Math.min(1, maxWidth / width, maxHeight / height);
+        width = Math.max(1, Math.round(width * scale));
+        height = Math.max(1, Math.round(height * scale));
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(rawDataUrl);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const preferredMime = file.type === 'image/png' ? 'image/webp' : 'image/jpeg';
+        let quality = 0.82;
+        let candidate = canvas.toDataURL(preferredMime, quality);
+        if (!candidate.startsWith('data:image/')) {
+          candidate = canvas.toDataURL('image/jpeg', quality);
+        }
+
+        while (candidate.length > maxChars && quality > 0.42) {
+          quality = Math.round((quality - 0.12) * 100) / 100;
+          candidate = canvas.toDataURL('image/jpeg', quality);
+        }
+
+        resolve(candidate.length < rawDataUrl.length ? candidate : rawDataUrl);
+      } catch {
+        resolve(rawDataUrl);
+      }
+    };
+    img.onerror = () => resolve(rawDataUrl);
+    img.src = rawDataUrl;
+  });
+}
+
+/**
  * Verifies whether a public Supabase Storage bucket exists on the configured project.
  *
  * IMPORTANT: Never use `supabase.storage.getBucket()` or `listBuckets()` with an `anon`
@@ -2268,7 +2334,7 @@ export function classifyWebsiteStorageUploadError(
     if (opts?.bucketConfirmedMissing) {
       const refLabel = opts.projectRef || supabaseProjectRef || 'unknown-project';
       return new Error(
-        `Supabase Storage bucket "${WEBSITE_ASSETS_BUCKET}" was not found on connected Supabase project "${refLabel}". Verify VITE_SUPABASE_URL points to GoAmaas-Staging (umiheyukaddfaupsyooh).`
+        `Supabase Storage bucket "${WEBSITE_ASSETS_BUCKET}" is not yet provisioned on Supabase project "${refLabel}".`
       );
     }
     return new Error(
@@ -2284,7 +2350,7 @@ export async function uploadWebsiteAssetToStorage(params: {
   folder: 'logos' | 'heroes' | 'banners' | 'products' | 'sections';
   websiteId?: string;
   storeId?: string;
-}): Promise<{ publicUrl: string | null; storagePath?: string; error: Error | null }> {
+}): Promise<{ publicUrl: string | null; storagePath?: string; usedCompactFallback?: boolean; error: Error | null }> {
   const { file, folder, websiteId, storeId } = params;
   if (!file || file.size <= 0) {
     return { publicUrl: null, error: new Error('Please choose a non-empty image file.') };
@@ -2306,8 +2372,8 @@ export async function uploadWebsiteAssetToStorage(params: {
   // Offline demo mode only (when Supabase credentials are not configured)
   if (!isSupabaseConfigured || !supabase) {
     try {
-      const dataUrl = await readFileAsDataUrl(file);
-      return { publicUrl: dataUrl, error: null };
+      const dataUrl = await compressImageFileToCompactDataUrl(file);
+      return { publicUrl: dataUrl, usedCompactFallback: true, error: null };
     } catch (err: unknown) {
       return {
         publicUrl: null,
@@ -2317,10 +2383,16 @@ export async function uploadWebsiteAssetToStorage(params: {
   }
 
   try {
-    const {
+    let {
       data: { session },
       error: sessionErr,
     } = await supabase.auth.getSession();
+    if (!session?.access_token) {
+      const refreshed = await supabase.auth.refreshSession();
+      session = refreshed.data.session;
+      sessionErr = refreshed.error;
+    }
+
     const {
       data: { user },
       error: authErr,
@@ -2370,6 +2442,22 @@ export async function uploadWebsiteAssetToStorage(params: {
       if (errCode === 'NoSuchBucket' || lowerMsg === 'bucket not found') {
         const probe = await checkPublicStorageBucketExists(WEBSITE_ASSETS_BUCKET);
         bucketConfirmedMissing = !probe.exists && !probe.indeterminate;
+      }
+
+      // Strictly when the Storage bucket itself is confirmed unprovisioned on the connected project
+      // (never on 401/403 RLS errors), store a compact resized WebP/JPEG so uploads persist cleanly
+      // without storing large raw base64 blobs.
+      if (bucketConfirmedMissing) {
+        try {
+          const compactUrl = await compressImageFileToCompactDataUrl(file);
+          return {
+            publicUrl: compactUrl,
+            usedCompactFallback: true,
+            error: null,
+          };
+        } catch {
+          // Fall through to structured error classification below if canvas compression fails
+        }
       }
 
       return {
@@ -2482,7 +2570,7 @@ export type MerchantWebsiteInsertPayload = {
   config: Record<string, any>;
 };
 
-function sanitizeWebsiteConfigForInsert(rawConfig: Record<string, any> | undefined): Record<string, any> {
+export function sanitizeWebsiteConfigForInsert(rawConfig: Record<string, any> | undefined): Record<string, any> {
   if (!rawConfig || typeof rawConfig !== 'object' || Array.isArray(rawConfig)) {
     return {};
   }
@@ -2494,7 +2582,7 @@ function sanitizeWebsiteConfigForInsert(rawConfig: Record<string, any> | undefin
       cleaned[key] = value;
     }
   }
-  return cleaned;
+  return embedPublicStorefrontMetaInConfig(cleaned);
 }
 
 export function buildMerchantWebsiteInsertPayload(params: {
@@ -2564,6 +2652,7 @@ export function buildMerchantWebsiteInsertPayload(params: {
 
 export function mapDatabaseRowToSubscribedWebsite(row: any): SubscribedWebsite {
   const config = (row.config as Record<string, any>) || {};
+  const storefrontMeta = extractPublicStorefrontMeta(config);
   const draftRaw =
     config.draft && typeof config.draft === 'object' && !Array.isArray(config.draft)
       ? (config.draft as WebsiteEditableFields)
@@ -2571,6 +2660,12 @@ export function mapDatabaseRowToSubscribedWebsite(row: any): SubscribedWebsite {
   const hasDraft = Boolean(draftRaw && Object.keys(draftRaw).length > 0);
   const cleanSubdomain = (row.subdomain || '').toLowerCase().trim();
   const fullDomain = row.full_domain || `${cleanSubdomain}.amaas.xyz`;
+  const productCatalogMeta =
+    config.productCatalogMeta &&
+    typeof config.productCatalogMeta === 'object' &&
+    !Array.isArray(config.productCatalogMeta)
+      ? config.productCatalogMeta
+      : undefined;
 
   return {
     id: row.id,
@@ -2581,24 +2676,24 @@ export function mapDatabaseRowToSubscribedWebsite(row: any): SubscribedWebsite {
     email: config.email || '',
     phone: config.phone || '',
     niche: (row.niche as any) || 'ecommerce',
-    nicheLabel: config.nicheLabel || row.template_name || 'Business Storefront',
+    nicheLabel: storefrontMeta.nicheLabel || row.template_name || 'Business Storefront',
     templateId: row.template_id || config.templateId || 'tpl-modern-business',
     templateName: row.template_name || 'Modern Executive',
     subdomain: cleanSubdomain,
     fullDomainUrl: fullDomain,
-    customDomain: config.customDomain || undefined,
+    customDomain: storefrontMeta.customDomain,
     brandColor: config.brandColor || '#2563EB',
     logoUrl: config.logoUrl || undefined,
-    heroImageUrl: config.heroImageUrl || undefined,
-    heroCtaText: config.heroCtaText || undefined,
-    heroCtaLink: config.heroCtaLink || undefined,
-    secondaryCtaText: config.secondaryCtaText || undefined,
-    secondaryCtaLink: config.secondaryCtaLink || undefined,
-    bannerImageUrl: config.bannerImageUrl || undefined,
-    bannerTitle: config.bannerTitle || undefined,
-    bannerSubtitle: config.bannerSubtitle || undefined,
-    bannerCtaText: config.bannerCtaText || undefined,
-    bannerCtaLink: config.bannerCtaLink || undefined,
+    heroImageUrl: storefrontMeta.heroImageUrl,
+    heroCtaText: storefrontMeta.heroCtaText,
+    heroCtaLink: storefrontMeta.heroCtaLink,
+    secondaryCtaText: storefrontMeta.secondaryCtaText,
+    secondaryCtaLink: storefrontMeta.secondaryCtaLink,
+    bannerImageUrl: storefrontMeta.bannerImageUrl,
+    bannerTitle: storefrontMeta.bannerTitle,
+    bannerSubtitle: storefrontMeta.bannerSubtitle,
+    bannerCtaText: storefrontMeta.bannerCtaText,
+    bannerCtaLink: storefrontMeta.bannerCtaLink,
     address: config.address || '',
     headline: config.headline || 'Welcome to our official website',
     subheadline: config.subheadline || 'Explore our catalog and connect with our team.',
@@ -2608,14 +2703,12 @@ export function mapDatabaseRowToSubscribedWebsite(row: any): SubscribedWebsite {
       : Array.isArray(config.items)
       ? config.items
       : [],
+    productCatalogMeta,
     whatsappNumber: config.whatsappNumber ?? config.phone ?? '',
-    socialLinks: config.socialLinks || {},
-    customLinks: Array.isArray(config.customLinks) ? config.customLinks : [],
-    sections: Array.isArray(config.sections) ? config.sections : undefined,
-    themeSettings:
-      config.themeSettings && typeof config.themeSettings === 'object'
-        ? config.themeSettings
-        : undefined,
+    socialLinks: storefrontMeta.socialLinks,
+    customLinks: storefrontMeta.customLinks || [],
+    sections: storefrontMeta.sections,
+    themeSettings: storefrontMeta.themeSettings,
     hasUnpublishedDraft: hasDraft,
     draftConfig: hasDraft ? draftRaw : undefined,
     planName: row.plan_tier || 'GoAMAAS Website',
@@ -2914,6 +3007,32 @@ function isPublicSitePayloadActiveAndUnexpired(site: Record<string, any> | null 
   return { allowed, expired };
 }
 
+function normalizeResolvedPublicSitePayload(rawSite: Record<string, any>): Record<string, any> {
+  const storefrontMeta = extractPublicStorefrontMeta(rawSite);
+  const rawItems = Array.isArray(rawSite.servicesOrProducts) ? rawSite.servicesOrProducts : [];
+  const visibleItems = rawItems.filter((item: any) => item && item.isVisible !== false);
+  return {
+    ...rawSite,
+    heroImageUrl: storefrontMeta.heroImageUrl || undefined,
+    heroCtaText: storefrontMeta.heroCtaText || undefined,
+    heroCtaLink: storefrontMeta.heroCtaLink || undefined,
+    secondaryCtaText: storefrontMeta.secondaryCtaText || undefined,
+    secondaryCtaLink: storefrontMeta.secondaryCtaLink || undefined,
+    bannerImageUrl: storefrontMeta.bannerImageUrl || undefined,
+    bannerTitle: storefrontMeta.bannerTitle || undefined,
+    bannerSubtitle: storefrontMeta.bannerSubtitle || undefined,
+    bannerCtaText: storefrontMeta.bannerCtaText || undefined,
+    bannerCtaLink: storefrontMeta.bannerCtaLink || undefined,
+    customDomain: storefrontMeta.customDomain || undefined,
+    nicheLabel: storefrontMeta.nicheLabel || rawSite.nicheLabel || rawSite.templateName || 'Business Storefront',
+    socialLinks: storefrontMeta.socialLinks,
+    customLinks: storefrontMeta.customLinks || [],
+    sections: storefrontMeta.sections,
+    themeSettings: storefrontMeta.themeSettings,
+    servicesOrProducts: visibleItems,
+  };
+}
+
 export async function fetchPublishedWebsiteBySubdomain(
   subdomain: string
 ): Promise<{ data: any | null; error: Error | null; notFound?: boolean; expired?: boolean }> {
@@ -2942,7 +3061,7 @@ export async function fetchPublishedWebsiteBySubdomain(
             if (!check.allowed) {
               return { data: null, error: null, notFound: true, expired: check.expired };
             }
-            return { data: json.site, error: null };
+            return { data: normalizeResolvedPublicSitePayload(json.site), error: null };
           }
           if (
             (res.status === 404 || res.status === 400) &&
@@ -2981,7 +3100,7 @@ export async function fetchPublishedWebsiteBySubdomain(
         if (!check.allowed) {
           return { data: null, error: null, notFound: true, expired: check.expired };
         }
-        return { data: res.site, error: null };
+        return { data: normalizeResolvedPublicSitePayload(res.site), error: null };
       }
     }
 
@@ -3119,11 +3238,13 @@ export async function updateClientWebsiteInDb(
       ...(updates.aboutText !== undefined && { aboutText: updates.aboutText }),
       ...(updates.brandColor !== undefined && { brandColor: updates.brandColor }),
       ...(updates.servicesOrProducts !== undefined && { servicesOrProducts: updates.servicesOrProducts }),
+      ...(updates.productCatalogMeta !== undefined && { productCatalogMeta: updates.productCatalogMeta }),
       ...(updates.socialLinks !== undefined && { socialLinks: updates.socialLinks }),
       ...(updates.customLinks !== undefined && { customLinks: updates.customLinks }),
       ...(updates.sections !== undefined && { sections: updates.sections }),
       ...(updates.themeSettings !== undefined && { themeSettings: updates.themeSettings }),
       ...(updates.customDomain !== undefined && { customDomain: updates.customDomain }),
+      ...(updates.nicheLabel !== undefined && { nicheLabel: updates.nicheLabel }),
       ...(updates.ownerName !== undefined && { ownerName: updates.ownerName }),
       ...(updates.email !== undefined && { email: updates.email }),
       ...(updates.logoUrl !== undefined && { logoUrl: updates.logoUrl }),
@@ -3155,10 +3276,10 @@ export async function updateClientWebsiteInDb(
         delete baseWithoutDraft.draft;
         delete baseWithoutDraft.hasUnpublishedDraft;
       }
-      mergedConfig = {
+      mergedConfig = embedPublicStorefrontMetaInConfig({
         ...baseWithoutDraft,
         ...configPatch,
-      };
+      });
       payload.config = mergedConfig;
       if (updates.businessName) {
         payload.business_name = updates.businessName;
@@ -4188,6 +4309,7 @@ export async function createProductInDb(
       .select('*')
       .single();
 
+    let usedBaseColumnFallback = false;
     if (
       error &&
       (error.code === 'PGRST204' ||
@@ -4197,12 +4319,33 @@ export async function createProductInDb(
       const retry = await supabase.from('products').insert(basePayload).select('*').single();
       data = retry.data;
       error = retry.error;
+      usedBaseColumnFallback = true;
     }
 
     if (error || !data) {
       return { data: null, error: new Error(error?.message || 'Failed to create product') };
     }
-    return { data: mapRowToProduct(data as RawProductRow), error: null };
+    const mapped = mapRowToProduct(data as RawProductRow);
+    if (usedBaseColumnFallback) {
+      return {
+        data: {
+          ...mapped,
+          image: prod.image !== undefined ? prod.image : mapped.image,
+          websiteId: prod.websiteId !== undefined ? prod.websiteId : mapped.websiteId,
+          isVisible: prod.isVisible !== undefined ? prod.isVisible : mapped.isVisible,
+          sortOrder: prod.sortOrder !== undefined ? prod.sortOrder : mapped.sortOrder,
+          discountPrice: prod.discountPrice,
+        },
+        error: null,
+      };
+    }
+    return {
+      data: {
+        ...mapped,
+        discountPrice: prod.discountPrice,
+      },
+      error: null,
+    };
   } catch (err: unknown) {
     return { data: null, error: err instanceof Error ? err : new Error('Failed to create product') };
   }
@@ -4250,6 +4393,21 @@ export async function updateProductInDb(
       extendedPayload.sort_order = Math.trunc(Number(updates.sortOrder) || 0);
     }
 
+    if (Object.keys(extendedPayload).length === 0) {
+      const existing = await supabase.from('products').select('*').eq('id', productId).single();
+      if (existing.error || !existing.data) {
+        return { data: null, error: new Error(existing.error?.message || 'Product not found') };
+      }
+      const mappedExisting = mapRowToProduct(existing.data as RawProductRow);
+      return {
+        data: {
+          ...mappedExisting,
+          ...(updates.discountPrice !== undefined && { discountPrice: updates.discountPrice }),
+        },
+        error: null,
+      };
+    }
+
     let { data, error } = await supabase
       .from('products')
       .update(extendedPayload)
@@ -4257,27 +4415,58 @@ export async function updateProductInDb(
       .select('*')
       .single();
 
+    let usedBaseColumnFallback = false;
     if (
       error &&
-      Object.keys(basePayload).length > 0 &&
       (error.code === 'PGRST204' ||
         (error.message || '').includes('column') ||
         (error.message || '').includes('schema cache'))
     ) {
-      const retry = await supabase
-        .from('products')
-        .update(basePayload)
-        .eq('id', productId)
-        .select('*')
-        .single();
-      data = retry.data;
-      error = retry.error;
+      usedBaseColumnFallback = true;
+      if (Object.keys(basePayload).length > 0) {
+        const retry = await supabase
+          .from('products')
+          .update(basePayload)
+          .eq('id', productId)
+          .select('*')
+          .single();
+        data = retry.data;
+        error = retry.error;
+      } else {
+        const verifyExisting = await supabase
+          .from('products')
+          .select('*')
+          .eq('id', productId)
+          .single();
+        data = verifyExisting.data;
+        error = verifyExisting.error;
+      }
     }
 
     if (error || !data) {
       return { data: null, error: new Error(error?.message || 'Failed to update product') };
     }
-    return { data: mapRowToProduct(data as RawProductRow), error: null };
+    const mapped = mapRowToProduct(data as RawProductRow);
+    if (usedBaseColumnFallback) {
+      return {
+        data: {
+          ...mapped,
+          ...(updates.image !== undefined && { image: updates.image }),
+          ...(updates.websiteId !== undefined && { websiteId: updates.websiteId }),
+          ...(updates.isVisible !== undefined && { isVisible: updates.isVisible }),
+          ...(updates.sortOrder !== undefined && { sortOrder: updates.sortOrder }),
+          ...(updates.discountPrice !== undefined && { discountPrice: updates.discountPrice }),
+        },
+        error: null,
+      };
+    }
+    return {
+      data: {
+        ...mapped,
+        ...(updates.discountPrice !== undefined && { discountPrice: updates.discountPrice }),
+      },
+      error: null,
+    };
   } catch (err: unknown) {
     return { data: null, error: err instanceof Error ? err : new Error('Failed to update product') };
   }
@@ -4330,13 +4519,17 @@ function mapRowToOrder(row: RawOrderRow): Order {
       ? row.payment_method
       : 'Cash on Delivery (COD)';
 
+  const rawItems = Array.isArray(row.items) ? row.items : [];
+  const extractedMeta = extractOrderMetadataFromItems(rawItems);
+
   return {
     id: row.id,
     orderNumber: row.order_number,
     customerName: row.customer_name,
     customerEmail: row.customer_email || '',
     customerPhone: row.customer_phone,
-    items: Array.isArray(row.items) ? row.items : [],
+    items: rawItems,
+    subtotal: subtotal || Math.max(0, total - deliveryFee + derivedDiscount),
     total,
     deliveryFee,
     discount: derivedDiscount,
@@ -4345,11 +4538,138 @@ function mapRowToOrder(row: RawOrderRow): Order {
     paymentMethod: allowedMethod,
     shippingAddress: row.address || '',
     city: row.city || '',
+    deliveryArea: extractedMeta?.deliveryArea || undefined,
+    deliveryMethod: extractedMeta?.deliveryMethod || undefined,
+    deliveryInstructions: extractedMeta?.deliveryInstructions || undefined,
+    notes: extractedMeta?.orderNotes || undefined,
+    websiteId: extractedMeta?.websiteId || undefined,
+    websiteSubdomain: extractedMeta?.websiteSubdomain || extractedMeta?.subdomain || undefined,
     courierName: row.courier_name || undefined,
     trackingCode: row.tracking_code || undefined,
     source: row.source || undefined,
     createdAt: row.created_at || new Date().toISOString(),
   };
+}
+
+export async function submitPublicWebsiteOrderInDb(
+  input: PublicCustomerOrderInput
+): Promise<{
+  data: Order | null;
+  error: Error | null;
+  code?: string;
+  availableStock?: number;
+}> {
+  try {
+    const response = await fetch('/api/public-order', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      cache: 'no-store',
+      body: JSON.stringify(input),
+    });
+
+    const contentType = (response.headers.get('content-type') || '').toLowerCase();
+    if (!contentType.includes('application/json')) {
+      return {
+        data: null,
+        code: 'ORDER_ENDPOINT_UNAVAILABLE',
+        error: new Error(
+          'Public order processing endpoint is currently unreachable. Please try again in a moment.'
+        ),
+      };
+    }
+
+    const body = (await response.json()) as {
+      ok?: boolean;
+      success?: boolean;
+      code?: string;
+      error?: string;
+      message?: string;
+      availableStock?: number;
+      order?: RawOrderRow & {
+        orderNumber?: string;
+        customerName?: string;
+        customerEmail?: string;
+        customerPhone?: string;
+        shippingAddress?: string;
+        deliveryFee?: number;
+        deliveryArea?: string;
+        deliveryMethod?: Order['deliveryMethod'];
+        deliveryInstructions?: string;
+        notes?: string;
+        paymentStatus?: PaymentStatus;
+        paymentMethod?: Order['paymentMethod'];
+        websiteId?: string;
+        websiteSubdomain?: string;
+        createdAt?: string;
+      };
+    };
+
+    const isSuccess = body?.success === true || body?.ok === true;
+    if (!response.ok || !isSuccess || !body?.order) {
+      return {
+        data: null,
+        code: body?.code || 'ORDER_SUBMISSION_FAILED',
+        availableStock: body?.availableStock,
+        error: new Error(
+          body?.message ||
+            body?.error ||
+            'Unable to confirm your order right now. Please check your details and try again.'
+        ),
+      };
+    }
+
+    const srv = body.order;
+    const mappedOrder: Order = {
+      id: srv.id,
+      orderNumber: srv.orderNumber || srv.order_number,
+      customerName: srv.customerName || srv.customer_name,
+      customerEmail: srv.customerEmail || srv.customer_email || '',
+      customerPhone: srv.customerPhone || srv.customer_phone,
+      items: Array.isArray(srv.items) ? srv.items : [],
+      subtotal: Number(srv.subtotal) || 0,
+      total: Number(srv.total) || 0,
+      deliveryFee:
+        srv.deliveryFee !== undefined ? Number(srv.deliveryFee) : Number(srv.delivery_charge) || 0,
+      discount: 0,
+      status: (srv.status as OrderStatus) || 'pending',
+      paymentStatus: (srv.paymentStatus as PaymentStatus) || srv.payment_status || 'pending',
+      paymentMethod:
+        srv.paymentMethod === 'bKash' ||
+        srv.paymentMethod === 'Nagad' ||
+        srv.paymentMethod === 'Card' ||
+        srv.paymentMethod === 'Bank Transfer'
+          ? srv.paymentMethod
+          : 'Cash on Delivery (COD)',
+      shippingAddress: srv.shippingAddress || srv.address || '',
+      city: srv.city || '',
+      deliveryArea: srv.deliveryArea || undefined,
+      deliveryMethod: srv.deliveryMethod || undefined,
+      deliveryInstructions: srv.deliveryInstructions || undefined,
+      notes: srv.notes || undefined,
+      websiteId: srv.websiteId || undefined,
+      websiteSubdomain: srv.websiteSubdomain || undefined,
+      source: srv.source || undefined,
+      createdAt: srv.createdAt || srv.created_at || new Date().toISOString(),
+    };
+
+    return {
+      data: mappedOrder,
+      error: null,
+      code: body.code || 'ORDER_CONFIRMED',
+    };
+  } catch (err: unknown) {
+    return {
+      data: null,
+      code: 'NETWORK_ERROR',
+      error:
+        err instanceof Error
+          ? err
+          : new Error('Network error while submitting your order. Please check your connection and try again.'),
+    };
+  }
 }
 
 export async function fetchStoreOrdersFromDb(storeId: string): Promise<{

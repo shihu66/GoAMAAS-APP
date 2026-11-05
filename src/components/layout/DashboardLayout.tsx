@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Link, useLocation, useNavigate, Outlet } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
+import { useLanguage } from '../../context/LanguageContext';
 import {
   LayoutDashboard,
   Package,
@@ -23,14 +24,12 @@ import {
   Sun,
   Moon,
   LogOut,
-  RotateCcw,
   Check,
   ExternalLink,
   ChevronRight,
   Store as StoreIcon,
 } from 'lucide-react';
 import { ToastContainer } from '../ui/Toast';
-import { ConfirmDialog } from '../ui/ConfirmDialog';
 
 export const DashboardLayout: React.FC = () => {
   const {
@@ -45,13 +44,12 @@ export const DashboardLayout: React.FC = () => {
     notifications,
     markNotificationRead,
     markAllNotificationsRead,
-    resetDemoData,
-    trialDaysLeft,
-    currentPlan,
     products,
     orders,
     customers,
+    subscribedWebsites,
   } = useApp();
+  const { lang, toggleLang } = useLanguage();
 
   const location = useLocation();
   const navigate = useNavigate();
@@ -77,25 +75,43 @@ export const DashboardLayout: React.FC = () => {
   }, []);
 
   const unreadNotifCount = notifications.filter((n) => !n.read).length;
+  const pendingOrderCount = useMemo(
+    () => orders.filter((o) => o.status === 'pending').length,
+    [orders]
+  );
+
+  const connectedWebsite = useMemo(() => {
+    if (!subscribedWebsites || subscribedWebsites.length === 0) return null;
+    if (activeStore) {
+      const match = subscribedWebsites.find((w) => w.storeId === activeStore.id);
+      if (match) return match;
+    }
+    return subscribedWebsites[0];
+  }, [subscribedWebsites, activeStore]);
 
   const navItems = useMemo(
     () => [
-      { label: 'Overview', path: '/dashboard', icon: LayoutDashboard },
-      { label: 'Products', path: '/dashboard/products', icon: Package },
-      { label: 'Orders', path: '/dashboard/orders', icon: ShoppingCart },
-      { label: 'Customers', path: '/dashboard/customers', icon: Users },
-      { label: 'Inventory', path: '/dashboard/inventory', icon: Boxes },
-      { label: 'Analytics', path: '/dashboard/analytics', icon: BarChart3 },
-      { label: 'Page Builder', path: '/dashboard/landing-pages', icon: Layers },
-      { label: 'AI Automations', path: '/dashboard/automations', icon: Bot },
-      { label: 'My Website', path: '/dashboard/subscribed-website', icon: Globe2 },
-      { label: 'Create New Website', path: '/create-website', icon: Sparkles },
-      { label: 'Bespoke Dev', path: '/dashboard/website-requests', icon: Sparkles },
-      { label: 'Billing & Plans', path: '/dashboard/billing', icon: CreditCard },
-      { label: 'Team & Settings', path: '/dashboard/settings', icon: Settings },
-      { label: 'Support & Help', path: '/dashboard/support', icon: HelpCircle },
+      { label: lang === 'bn' ? 'ওভারভিউ' : 'Overview', path: '/dashboard', icon: LayoutDashboard },
+      { label: lang === 'bn' ? 'আমার ওয়েবসাইট' : 'My Website', path: '/dashboard/subscribed-website', icon: Globe2 },
+      { label: lang === 'bn' ? 'পণ্যসমূহ' : 'Products', path: '/dashboard/products', icon: Package },
+      {
+        label: lang === 'bn' ? 'অর্ডারসমূহ' : 'Orders',
+        path: '/dashboard/orders',
+        icon: ShoppingCart,
+        count: pendingOrderCount > 0 ? pendingOrderCount : undefined,
+      },
+      { label: lang === 'bn' ? 'ইনভেন্টরি' : 'Inventory', path: '/dashboard/inventory', icon: Boxes },
+      { label: lang === 'bn' ? 'গ্রাহকবৃন্দ' : 'Customers', path: '/dashboard/customers', icon: Users },
+      { label: lang === 'bn' ? 'অ্যানালিটিক্স' : 'Analytics', path: '/dashboard/analytics', icon: BarChart3 },
+      { label: lang === 'bn' ? 'সেটিংস' : 'Settings', path: '/dashboard/settings', icon: Settings },
+      { label: 'Page Builder', path: '/dashboard/landing-pages', icon: Layers, secondary: true },
+      { label: 'AI Automations', path: '/dashboard/automations', icon: Bot, secondary: true },
+      { label: 'Create New Website', path: '/create-website', icon: Sparkles, secondary: true },
+      { label: 'Bespoke Dev', path: '/dashboard/website-requests', icon: Sparkles, secondary: true },
+      { label: 'Billing & Plans', path: '/dashboard/billing', icon: CreditCard, secondary: true },
+      { label: 'Support & Help', path: '/dashboard/support', icon: HelpCircle, secondary: true },
     ],
-    []
+    [lang, pendingOrderCount]
   );
 
   const normalizedQuery = searchQuery.trim().toLowerCase();
@@ -249,35 +265,64 @@ export const DashboardLayout: React.FC = () => {
 
           {/* Navigation Links */}
           <nav className="flex-1 overflow-y-auto p-3 space-y-1">
-            {navItems.map((item) => {
+            {navItems.map((item, idx) => {
               const active = isActive(item.path);
               const Icon = item.icon;
+              const showDivider = item.secondary && !navItems[idx - 1]?.secondary;
               return (
-                <Link
-                  key={item.path}
-                  to={item.path}
-                  className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-medium transition-colors ${
-                    active
-                      ? 'bg-blue-600 text-white shadow-xs'
-                      : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white'
-                  }`}
-                  title={sidebarCollapsed ? item.label : undefined}
-                >
-                  <Icon className="w-4 h-4 shrink-0" />
-                  {!sidebarCollapsed && <span>{item.label}</span>}
-                </Link>
+                <React.Fragment key={item.path}>
+                  {showDivider && (
+                    <div className="my-2 border-t border-slate-100 dark:border-slate-800" />
+                  )}
+                  <Link
+                    to={item.path}
+                    className={`flex items-center justify-between gap-2 px-3 py-2.5 rounded-lg text-xs font-medium transition-colors ${
+                      active
+                        ? 'bg-blue-600 text-white shadow-xs'
+                        : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white'
+                    }`}
+                    title={sidebarCollapsed ? item.label : undefined}
+                  >
+                    <span className="flex items-center gap-3 min-w-0">
+                      <Icon className="w-4 h-4 shrink-0" />
+                      {!sidebarCollapsed && <span className="truncate">{item.label}</span>}
+                    </span>
+                    {!sidebarCollapsed && item.count !== undefined && (
+                      <span
+                        className={`font-mono text-[10px] tabular-nums ${
+                          active ? 'text-white/90' : 'text-amber-600 dark:text-amber-400 font-semibold'
+                        }`}
+                      >
+                        {item.count}
+                      </span>
+                    )}
+                  </Link>
+                </React.Fragment>
               );
             })}
           </nav>
 
-          {/* Public Website Link */}
+          {/* Connected Storefront & Platform Links */}
           {!sidebarCollapsed && (
-            <div className="p-3 border-t border-slate-100 dark:border-slate-800">
+            <div className="p-3 border-t border-slate-100 dark:border-slate-800 space-y-1">
+              {connectedWebsite && (
+                <a
+                  href={`/s/${connectedWebsite.subdomain}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center justify-between px-3 py-2 text-xs font-semibold text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded-lg transition-colors"
+                >
+                  <span className="truncate">
+                    {lang === 'bn' ? 'আমার ওয়েবসাইট দেখুন' : 'Visit My Website'}
+                  </span>
+                  <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                </a>
+              )}
               <Link
                 to="/"
                 className="flex items-center justify-between px-3 py-2 text-xs text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
               >
-                <span>View Public Site</span>
+                <span>{lang === 'bn' ? 'প্ল্যাটফর্ম হোম' : 'GoAMAAS Home'}</span>
                 <ExternalLink className="w-3.5 h-3.5" />
               </Link>
             </div>
@@ -396,6 +441,16 @@ export const DashboardLayout: React.FC = () => {
                 <kbd className="hidden lg:inline px-1.5 py-0.5 text-[10px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded font-mono">
                   ⌘K
                 </kbd>
+              </button>
+
+              {/* Language toggle (EN / বাংলা) */}
+              <button
+                type="button"
+                onClick={toggleLang}
+                className="px-2.5 py-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                title="Switch Language (English / বাংলা)"
+              >
+                {lang === 'en' ? 'বাংলা' : 'EN'}
               </button>
 
               {/* Theme toggle */}
