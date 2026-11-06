@@ -31,6 +31,7 @@ import {
   CheckCircle2,
   Clock,
   AlertCircle,
+  Star,
 } from 'lucide-react';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
@@ -114,6 +115,7 @@ export const ProductsPage: React.FC = () => {
     websiteId: '',
     isVisible: true,
     sortOrder: 0,
+    isFeatured: false,
   });
 
   const [stockAdjustDelta, setStockAdjustDelta] = useState(10);
@@ -136,6 +138,7 @@ export const ProductsPage: React.FC = () => {
       websiteId: primaryWebsite?.id || '',
       isVisible: Boolean(primaryWebsite),
       sortOrder: products.length,
+      isFeatured: false,
     });
     setIsAddModalOpen(true);
   };
@@ -255,8 +258,20 @@ export const ProductsPage: React.FC = () => {
       websiteId: p.websiteId || primaryWebsite?.id || '',
       isVisible: p.isVisible !== false,
       sortOrder: p.sortOrder ?? 0,
+      isFeatured: Boolean(p.isFeatured),
     });
     setIsEditModalOpen(true);
+  };
+
+  const handleToggleFeatured = async (p: Product) => {
+    const nextFeatured = !p.isFeatured;
+    await updateProduct(p.id, { isFeatured: nextFeatured });
+    showToast(
+      nextFeatured
+        ? `"${p.name}" marked as Featured on website.`
+        : `"${p.name}" removed from Featured.`,
+      'info'
+    );
   };
 
   const handleImageFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -322,6 +337,7 @@ export const ProductsPage: React.FC = () => {
         websiteId: formData.websiteId || undefined,
         isVisible: Boolean(formData.websiteId) && formData.isVisible,
         sortOrder: Number(formData.sortOrder) || 0,
+        isFeatured: Boolean(formData.isFeatured),
       });
       if (created) {
         setIsAddModalOpen(false);
@@ -361,6 +377,7 @@ export const ProductsPage: React.FC = () => {
         websiteId: formData.websiteId,
         isVisible: Boolean(formData.websiteId) && formData.isVisible,
         sortOrder: Number(formData.sortOrder) || 0,
+        isFeatured: Boolean(formData.isFeatured),
       });
       if (updated) {
         setIsEditModalOpen(false);
@@ -839,6 +856,22 @@ export const ProductsPage: React.FC = () => {
                           )}
 
                           <button
+                            type="button"
+                            onClick={() => void handleToggleFeatured(p)}
+                            className={`p-1.5 cursor-pointer transition-colors ${
+                              p.isFeatured
+                                ? 'text-amber-500 hover:text-amber-600'
+                                : 'text-slate-300 dark:text-slate-600 hover:text-amber-400'
+                            }`}
+                            title={
+                              p.isFeatured
+                                ? 'Featured on storefront (click to remove)'
+                                : 'Mark as Featured on storefront'
+                            }
+                          >
+                            <Star className={`w-3.5 h-3.5 ${p.isFeatured ? 'fill-amber-400' : ''}`} />
+                          </button>
+                          <button
                             onClick={() => {
                               setActiveProduct(p);
                               setIsDetailModalOpen(true);
@@ -988,6 +1021,22 @@ export const ProductsPage: React.FC = () => {
                     </div>
 
                     <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => void handleToggleFeatured(p)}
+                        className={`p-1 cursor-pointer transition-colors ${
+                          p.isFeatured
+                            ? 'text-amber-500 hover:text-amber-600'
+                            : 'text-slate-300 dark:text-slate-600 hover:text-amber-400'
+                        }`}
+                        title={
+                          p.isFeatured
+                            ? 'Featured on storefront (click to remove)'
+                            : 'Mark as Featured on storefront'
+                        }
+                      >
+                        <Star className={`w-3.5 h-3.5 ${p.isFeatured ? 'fill-amber-400' : ''}`} />
+                      </button>
                       {targetWebsite && (
                         <a
                           href={`/s/${targetWebsite.subdomain}#services`}
@@ -1332,6 +1381,23 @@ export const ProductsPage: React.FC = () => {
               placeholder="Describe fabric, dimensions, warranty, or package details..."
               className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
             />
+          </div>
+
+          <div className="flex items-center gap-2.5 p-3 rounded-xl bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200/60 dark:border-amber-900/40">
+            <input
+              type="checkbox"
+              id="product-is-featured-input"
+              checked={formData.isFeatured}
+              onChange={(e) => setFormData({ ...formData, isFeatured: e.target.checked })}
+              className="w-4 h-4 text-amber-600 rounded border-slate-300 focus:ring-amber-500 cursor-pointer"
+            />
+            <label
+              htmlFor="product-is-featured-input"
+              className="text-xs font-semibold text-slate-800 dark:text-slate-200 cursor-pointer flex items-center gap-1.5"
+            >
+              <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-500" />
+              <span>Mark as Featured Product (prioritized on public website catalog)</span>
+            </label>
           </div>
 
           <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100 dark:border-slate-800">

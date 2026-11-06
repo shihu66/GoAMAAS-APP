@@ -276,9 +276,9 @@ interface AppContextType {
     websiteId?: string;
   }) => Promise<{ publicUrl: string | null; error: Error | null }>;
   removeWebsiteAsset: (publicUrl: string) => Promise<void>;
-  renewSubscribedWebsite: (id: string, reason?: string) => void;
-  suspendSubscribedWebsite: (id: string, reason?: string) => void;
-  reactivateSubscribedWebsite: (id: string, reason?: string) => void;
+  renewSubscribedWebsite: (id: string, reason?: string) => Promise<{ success: boolean; message: string }>;
+  suspendSubscribedWebsite: (id: string, reason?: string) => Promise<{ success: boolean; message: string }>;
+  reactivateSubscribedWebsite: (id: string, reason?: string) => Promise<{ success: boolean; message: string }>;
   adminDeleteSubscribedWebsite: (id: string) => Promise<{ success: boolean; message: string }>;
   websiteLifecycleAuditLogs: WebsiteLifecycleAuditLog[];
   refreshWebsiteLifecycleAuditLogs: () => Promise<void>;
@@ -2884,46 +2884,48 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [user?.id, user?.role, role, refreshWebsiteLifecycleAuditLogs]);
 
-  const renewSubscribedWebsite = (id: string, reason?: string) => {
+  const renewSubscribedWebsite = async (
+    id: string,
+    reason?: string
+  ): Promise<{ success: boolean; message: string }> => {
     const site = subscribedWebsites.find((w) => w.id === id);
-    if (!site) return;
+    if (!site) return { success: false, message: 'Website not found' };
 
     if (site.paymentStatus !== 'paid') {
-      showToast(
-        'Cannot renew an unpaid website. Verify and approve a payment submission first.',
-        'error'
-      );
-      return;
+      const msg = 'Cannot renew an unpaid website. Verify and approve a payment submission first.';
+      showToast(msg, 'error');
+      return { success: false, message: msg };
     }
 
     const cleanReason = (reason || '').trim();
     if (!cleanReason) {
-      showToast('An explicit administrative reason is required to renew a website.', 'warning');
-      return;
+      const msg = 'An explicit administrative reason is required to renew a website.';
+      showToast(msg, 'warning');
+      return { success: false, message: msg };
     }
 
     if (isSupabaseConfigured) {
       if (role !== 'admin' || user?.role !== 'admin') {
-        showToast('Unauthorized: Only verified administrators can manually renew subscriptions.', 'error');
-        return;
+        const msg = 'Unauthorized: Only verified administrators can manually renew subscriptions.';
+        showToast(msg, 'error');
+        return { success: false, message: msg };
       }
-      void (async () => {
-        const res = await adminUpdateWebsiteLifecycleInDb(id, 'renew', cleanReason);
-        if (!res.success) {
-          showToast(res.message || 'Failed to renew website subscription', 'error');
-          return;
-        }
-        await Promise.all([refreshSubscribedWebsites(), refreshWebsiteLifecycleAuditLogs()]);
-        showToast(res.message || 'Subscription renewed for 30 days.', 'success');
-      })();
-      return;
+      const res = await adminUpdateWebsiteLifecycleInDb(id, 'renew', cleanReason);
+      if (!res.success) {
+        showToast(res.message || 'Failed to renew website subscription', 'error');
+        return { success: false, message: res.message || 'Failed to renew website subscription' };
+      }
+      await Promise.all([refreshSubscribedWebsites(), refreshWebsiteLifecycleAuditLogs()]);
+      const msg = res.message || 'Subscription renewed for 30 days.';
+      showToast(msg, 'success');
+      return { success: true, message: msg };
     }
 
     const nextDate = new Date();
     nextDate.setDate(nextDate.getDate() + 30);
     const formattedNext = nextDate.toISOString().split('T')[0];
 
-    void updateSubscribedWebsite(id, {
+    await updateSubscribedWebsite(id, {
       subscriptionStatus: 'active',
       nextBillingDate: formattedNext,
       gracePeriodEndsAt: undefined,
@@ -2947,35 +2949,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       },
       ...prev,
     ]);
-    showToast(`Subscription renewed for 30 days until ${formattedNext}`, 'success');
+    const msg = `Subscription renewed for 30 days until ${formattedNext}`;
+    showToast(msg, 'success');
+    return { success: true, message: msg };
   };
 
-  const suspendSubscribedWebsite = (id: string, reason?: string) => {
+  const suspendSubscribedWebsite = async (
+    id: string,
+    reason?: string
+  ): Promise<{ success: boolean; message: string }> => {
     const site = subscribedWebsites.find((w) => w.id === id);
     const cleanReason = (reason || '').trim();
     if (!cleanReason) {
-      showToast('An explicit administrative reason is required to suspend a website.', 'warning');
-      return;
+      const msg = 'An explicit administrative reason is required to suspend a website.';
+      showToast(msg, 'warning');
+      return { success: false, message: msg };
     }
 
     if (isSupabaseConfigured) {
       if (role !== 'admin' || user?.role !== 'admin') {
-        showToast('Unauthorized: Only verified administrators can suspend websites.', 'error');
-        return;
+        const msg = 'Unauthorized: Only verified administrators can suspend websites.';
+        showToast(msg, 'error');
+        return { success: false, message: msg };
       }
-      void (async () => {
-        const res = await adminUpdateWebsiteLifecycleInDb(id, 'suspend', cleanReason);
-        if (!res.success) {
-          showToast(res.message || 'Failed to suspend website', 'error');
-          return;
-        }
-        await Promise.all([refreshSubscribedWebsites(), refreshWebsiteLifecycleAuditLogs()]);
-        showToast(`Website has been suspended: ${cleanReason}`, 'warning');
-      })();
-      return;
+      const res = await adminUpdateWebsiteLifecycleInDb(id, 'suspend', cleanReason);
+      if (!res.success) {
+        showToast(res.message || 'Failed to suspend website', 'error');
+        return { success: false, message: res.message || 'Failed to suspend website' };
+      }
+      await Promise.all([refreshSubscribedWebsites(), refreshWebsiteLifecycleAuditLogs()]);
+      const msg = res.message || `Website has been suspended: ${cleanReason}`;
+      showToast(msg, 'warning');
+      return { success: true, message: msg };
     }
 
-    void updateSubscribedWebsite(id, {
+    await updateSubscribedWebsite(id, {
       subscriptionStatus: 'suspended',
       deploymentStatus: 'suspended',
       notes: cleanReason,
@@ -2996,43 +3004,47 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       },
       ...prev,
     ]);
-    showToast(`Website has been suspended: ${cleanReason}`, 'warning');
+    const msg = `Website has been suspended: ${cleanReason}`;
+    showToast(msg, 'warning');
+    return { success: true, message: msg };
   };
 
-  const reactivateSubscribedWebsite = (id: string, reason?: string) => {
+  const reactivateSubscribedWebsite = async (
+    id: string,
+    reason?: string
+  ): Promise<{ success: boolean; message: string }> => {
     const site = subscribedWebsites.find((w) => w.id === id);
     if (site && site.paymentStatus !== 'paid') {
-      showToast(
-        'Cannot reactivate an unpaid website. Verify and approve a payment submission first.',
-        'error'
-      );
-      return;
+      const msg = 'Cannot reactivate an unpaid website. Verify and approve a payment submission first.';
+      showToast(msg, 'error');
+      return { success: false, message: msg };
     }
 
     const cleanReason = (reason || '').trim();
     if (!cleanReason) {
-      showToast('An explicit administrative reason is required to reactivate a website.', 'warning');
-      return;
+      const msg = 'An explicit administrative reason is required to reactivate a website.';
+      showToast(msg, 'warning');
+      return { success: false, message: msg };
     }
 
     if (isSupabaseConfigured) {
       if (role !== 'admin' || user?.role !== 'admin') {
-        showToast('Unauthorized: Only verified administrators can reactivate websites.', 'error');
-        return;
+        const msg = 'Unauthorized: Only verified administrators can reactivate websites.';
+        showToast(msg, 'error');
+        return { success: false, message: msg };
       }
-      void (async () => {
-        const res = await adminUpdateWebsiteLifecycleInDb(id, 'reactivate', cleanReason);
-        if (!res.success) {
-          showToast(res.message || 'Failed to reactivate website', 'error');
-          return;
-        }
-        await Promise.all([refreshSubscribedWebsites(), refreshWebsiteLifecycleAuditLogs()]);
-        showToast('Website has been reactivated and brought online', 'success');
-      })();
-      return;
+      const res = await adminUpdateWebsiteLifecycleInDb(id, 'reactivate', cleanReason);
+      if (!res.success) {
+        showToast(res.message || 'Failed to reactivate website', 'error');
+        return { success: false, message: res.message || 'Failed to reactivate website' };
+      }
+      await Promise.all([refreshSubscribedWebsites(), refreshWebsiteLifecycleAuditLogs()]);
+      const msg = res.message || 'Website has been reactivated and brought online';
+      showToast(msg, 'success');
+      return { success: true, message: msg };
     }
 
-    void updateSubscribedWebsite(id, {
+    await updateSubscribedWebsite(id, {
       subscriptionStatus: 'active',
       deploymentStatus: 'live',
       notes: cleanReason,
@@ -3053,7 +3065,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       },
       ...prev,
     ]);
-    showToast('Website has been reactivated and brought online', 'success');
+    const msg = 'Website has been reactivated and brought online';
+    showToast(msg, 'success');
+    return { success: true, message: msg };
   };
 
   const adminDeleteSubscribedWebsite = async (

@@ -14,6 +14,123 @@ export const STOREFRONT_META_SOCIAL_KEY = '__storefrontMeta';
 
 const ALLOWED_SOCIAL_KEYS = ['facebook', 'instagram', 'twitter', 'linkedin', 'youtube'] as const;
 
+/**
+ * Validates and normalizes Google Maps URLs and share links securely.
+ * Supports:
+ * - https://maps.app.goo.gl/... / https://goo.gl/maps/...
+ * - https://www.google.com/maps/... / https://maps.google.com/...
+ * Returns sanitized URL and optionally extracted latitude & longitude.
+ */
+export function validateAndNormalizeGoogleMapsUrl(rawUrl?: string): {
+  valid: boolean;
+  normalizedUrl?: string;
+  latitude?: number;
+  longitude?: number;
+  error?: string;
+} {
+  if (!rawUrl || typeof rawUrl !== 'string') {
+    return { valid: false };
+  }
+  const trimmed = rawUrl.trim();
+  if (!trimmed) {
+    return { valid: false };
+  }
+
+  // Enforce http/https protocol
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed.startsWith('http://') || trimmed.startsWith('https://') ? trimmed : `https://${trimmed}`);
+  } catch {
+    return { valid: false, error: 'Please enter a valid Google Maps link (e.g. https://maps.app.goo.gl/... or https://maps.google.com/...)' };
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  const isGoogleMapsHost =
+    hostname === 'maps.app.goo.gl' ||
+    hostname === 'goo.gl' ||
+    hostname === 'maps.google.com' ||
+    hostname.endsWith('.google.com') ||
+    hostname === 'google.com';
+
+  if (!isGoogleMapsHost) {
+    return { valid: false, error: 'Only official Google Maps links (maps.google.com, maps.app.goo.gl, goo.gl/maps) are supported.' };
+  }
+
+  // Attempt coordinates extraction: @lat,lng,zoom or ?q=lat,lng or &ll=lat,lng
+  let lat: number | undefined;
+  let lng: number | undefined;
+
+  const atMatch = parsed.pathname.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+  if (atMatch) {
+    const pLat = parseFloat(atMatch[1]);
+    const pLng = parseFloat(atMatch[2]);
+    if (Number.isFinite(pLat) && Number.isFinite(pLng) && pLat >= -90 && pLat <= 90 && pLng >= -180 && pLng <= 180) {
+      lat = pLat;
+      lng = pLng;
+    }
+  }
+
+  if (lat === undefined) {
+    const qParam = parsed.searchParams.get('q') || parsed.searchParams.get('ll') || '';
+    const qMatch = qParam.match(/^(-?\d+\.\d+),(-?\d+\.\d+)/);
+    if (qMatch) {
+      const pLat = parseFloat(qMatch[1]);
+      const pLng = parseFloat(qMatch[2]);
+      if (Number.isFinite(pLat) && Number.isFinite(pLng) && pLat >= -90 && pLat <= 90 && pLng >= -180 && pLng <= 180) {
+        lat = pLat;
+        lng = pLng;
+      }
+    }
+  }
+
+  return {
+    valid: true,
+    normalizedUrl: parsed.toString(),
+    latitude: lat,
+    longitude: lng,
+  };
+}
+
+/**
+ * Generates an authoritative "Get Directions" link for Google Maps.
+ * Priority:
+ * 1. Resolved coordinates (daddr=lat,lng)
+ * 2. Verified Google Maps share URL
+ * 3. Business Name + Exact Physical Address query
+ */
+export function buildGoogleMapsDirectionsUrl(options: {
+  businessName?: string;
+  address?: string;
+  mapsShareUrl?: string;
+  latitude?: number;
+  longitude?: number;
+}): string | undefined {
+  const { businessName, address, mapsShareUrl, latitude, longitude } = options;
+
+  if (typeof latitude === 'number' && typeof longitude === 'number' && Number.isFinite(latitude) && Number.isFinite(longitude)) {
+    return `https://www.google.com/maps/dir/?api=1&destination=${latitude},${longitude}`;
+  }
+
+  if (mapsShareUrl && mapsShareUrl.trim()) {
+    const validated = validateAndNormalizeGoogleMapsUrl(mapsShareUrl);
+    if (validated.valid && validated.normalizedUrl) {
+      if (validated.latitude && validated.longitude) {
+        return `https://www.google.com/maps/dir/?api=1&destination=${validated.latitude},${validated.longitude}`;
+      }
+      return validated.normalizedUrl;
+    }
+  }
+
+  const cleanAddr = (address || '').trim();
+  const cleanBiz = (businessName || '').trim();
+  if (cleanAddr) {
+    const query = cleanBiz ? `${cleanBiz}, ${cleanAddr}` : cleanAddr;
+    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+  }
+
+  return undefined;
+}
+
 export interface PublicStorefrontMetaEnvelope {
   heroImageUrl?: string;
   heroCtaText?: string;
@@ -236,6 +353,7 @@ export function buildWebsiteProductItemFromProduct(
     inStock,
     isVisible: product.isVisible !== false && product.status !== 'archived',
     sortOrder: sortOrderOverride ?? product.sortOrder ?? 0,
+    isFeatured: product.isFeatured === true,
     publishedAt: new Date().toISOString(),
   };
 }

@@ -7,6 +7,8 @@ import {
 } from '../../types';
 import {
   PublicCustomerOrderInput,
+  buildGoogleMapsDirectionsUrl,
+  validateAndNormalizeGoogleMapsUrl,
   validatePublicCustomerOrderInput,
 } from '../../lib/storefrontSync';
 import {
@@ -14,6 +16,7 @@ import {
   Phone,
   Mail,
   MapPin,
+  Navigation,
   MessageSquare,
   Clock,
   CheckCircle2,
@@ -283,6 +286,64 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
       ),
     [site.servicesOrProducts]
   );
+
+  const [storefrontSort, setStorefrontSort] = useState<
+    'custom' | 'featured' | 'price-low' | 'price-high' | 'name' | 'newest'
+  >('custom');
+
+  const sortedProducts: WebsiteProductItem[] = useMemo(() => {
+    const list = [...visibleProducts];
+    if (storefrontSort === 'featured') {
+      return list.sort((a, b) => {
+        const aFeat = a.isFeatured ? 1 : 0;
+        const bFeat = b.isFeatured ? 1 : 0;
+        return bFeat - aFeat;
+      });
+    }
+    if (storefrontSort === 'price-low') {
+      return list.sort((a, b) => parseItemNumericPrice(a) - parseItemNumericPrice(b));
+    }
+    if (storefrontSort === 'price-high') {
+      return list.sort((a, b) => parseItemNumericPrice(b) - parseItemNumericPrice(a));
+    }
+    if (storefrontSort === 'name') {
+      return list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    }
+    if (storefrontSort === 'newest') {
+      return list.reverse();
+    }
+    return list;
+  }, [visibleProducts, storefrontSort]);
+
+  // Animation & Effect Styling
+  const anims = themeSettings.animations;
+  const animationsEnabled = anims ? anims.enabled !== false : true;
+  const animReducedMotion = anims?.reducedMotion === true;
+  const animSpeed = anims?.transitionSpeed || 'normal';
+  const animReveal =
+    animationsEnabled && !animReducedMotion ? anims?.sectionReveal || 'fade-up' : 'none';
+  const hoverEffect =
+    animationsEnabled && !animReducedMotion ? anims?.hoverEffect || 'lift' : 'none';
+  const smoothScroll = anims ? anims.smoothScroll !== false : true;
+
+  const animRevealClass =
+    animReveal === 'fade-up'
+      ? 'ams-anim-fade-up'
+      : animReveal === 'fade-in'
+      ? 'ams-anim-fade-in'
+      : animReveal === 'zoom-in'
+      ? 'ams-anim-zoom-in'
+      : '';
+
+  const cardHoverClass =
+    hoverEffect === 'lift'
+      ? 'transition-all duration-200 hover:-translate-y-1 hover:shadow-lg'
+      : hoverEffect === 'scale'
+      ? 'transition-all duration-200 hover:scale-[1.02] hover:shadow-lg'
+      : hoverEffect === 'glow'
+      ? 'transition-all duration-200 hover:ring-2 hover:ring-blue-400 hover:shadow-md'
+      : '';
+  const animHoverClass = cardHoverClass;
 
   // Keep cart synced if product stock or prices update after refresh
   useEffect(() => {
@@ -627,20 +688,54 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
         const rawHeroImg = ((site.heroImageUrl ?? section.imageUrl) || '').trim();
         const heroImg = !brokenHeroImg ? rawHeroImg : '';
 
+        // Hero Cover Image Styling Controls
+        const heroPos = themeSettings.heroImagePosition || 'center';
+        const heroPosClass =
+          heroPos === 'top'
+            ? 'object-top'
+            : heroPos === 'bottom'
+            ? 'object-bottom'
+            : heroPos === 'left'
+            ? 'object-left'
+            : heroPos === 'right'
+            ? 'object-right'
+            : 'object-center';
+
+        const overlayOpacityPct =
+          typeof themeSettings.heroOverlayOpacity === 'number'
+            ? Math.max(0, Math.min(100, themeSettings.heroOverlayOpacity))
+            : 65;
+        const brightnessPct =
+          typeof themeSettings.heroBrightness === 'number'
+            ? Math.max(50, Math.min(150, themeSettings.heroBrightness))
+            : 100;
+
+        const heroHeightChoice = themeSettings.heroHeight || 'medium';
+        const heroHeightClass =
+          heroHeightChoice === 'compact'
+            ? 'py-10 sm:py-14'
+            : heroHeightChoice === 'tall'
+            ? 'py-20 sm:py-32'
+            : heroHeightChoice === 'full'
+            ? 'min-h-[75vh] py-16 flex flex-col justify-center'
+            : 'py-14 sm:py-20';
+
         if (heroLayout === 'split' && heroImg) {
           return (
             <section
               key={section.id}
-              className="py-12 sm:py-16 px-4 sm:px-8 border-b border-slate-200/70"
+              className={`px-4 sm:px-8 border-b border-slate-200/70 ${heroHeightClass} ${animRevealClass}`}
               style={{ backgroundColor: surfaceColor }}
             >
               <div className="max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-12 gap-8 items-center">
                 <div className="md:col-span-7 space-y-4 text-left">
                   {site.nicheLabel && (
-                    <p className="text-xs font-semibold text-slate-500">{site.nicheLabel}</p>
+                    <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                      {site.nicheLabel}
+                    </p>
                   )}
                   <h2
-                    className="text-2xl sm:text-4xl font-extrabold tracking-tight leading-tight text-balance"
+                    className="text-2xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight leading-tight text-balance"
                     style={{ color: textColor }}
                   >
                     {heroHeading}
@@ -655,7 +750,7 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                       href={primaryCtaHref}
                       target={isPrimaryExternal ? '_blank' : undefined}
                       rel={isPrimaryExternal ? 'noreferrer' : undefined}
-                      className={`min-h-[42px] px-5 py-2.5 ${buttonRadiusClass} text-white font-semibold text-xs shadow-sm hover:opacity-90 transition-opacity inline-flex items-center gap-1.5`}
+                      className={`min-h-[44px] px-5 py-2.5 ${buttonRadiusClass} text-white font-semibold text-xs shadow-sm hover:opacity-90 ${animHoverClass} transition-all inline-flex items-center gap-1.5`}
                       style={{ backgroundColor: brandColor }}
                     >
                       <span>{primaryCtaLabel}</span>
@@ -664,7 +759,7 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                     {secondaryCtaLabel && (
                       <a
                         href={secondaryCtaHref}
-                        className={`min-h-[42px] px-5 py-2.5 ${buttonRadiusClass} border border-slate-300 bg-white text-slate-800 hover:bg-slate-50 font-semibold text-xs transition-colors inline-flex items-center`}
+                        className={`min-h-[44px] px-5 py-2.5 ${buttonRadiusClass} border border-slate-300 bg-white text-slate-800 hover:bg-slate-50 ${animHoverClass} font-semibold text-xs transition-colors inline-flex items-center`}
                       >
                         {secondaryCtaLabel}
                       </a>
@@ -673,14 +768,23 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                 </div>
 
                 <div className="md:col-span-5">
-                  <div className="rounded-2xl overflow-hidden border border-slate-200 shadow-md bg-slate-100 aspect-[4/3]">
+                  <div className="rounded-2xl overflow-hidden border border-slate-200 shadow-md bg-slate-100 aspect-[4/3] relative">
                     <img
                       src={heroImg}
                       alt={heroHeading}
                       referrerPolicy="no-referrer"
                       onError={() => setBrokenHeroImg(true)}
-                      className="w-full h-full object-cover"
+                      className={`w-full h-full object-cover ${heroPosClass}`}
+                      style={{
+                        filter: brightnessPct !== 100 ? `brightness(${brightnessPct}%)` : undefined,
+                      }}
                     />
+                    {overlayOpacityPct > 0 && (
+                      <div
+                        className="absolute inset-0 bg-slate-950 pointer-events-none"
+                        style={{ opacity: overlayOpacityPct / 300 }}
+                      />
+                    )}
                   </div>
                 </div>
               </div>
@@ -692,25 +796,33 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
           return (
             <section
               key={section.id}
-              className="relative py-16 sm:py-24 px-4 sm:px-8 text-center text-white overflow-hidden"
+              className={`relative px-4 sm:px-8 text-center text-white overflow-hidden ${heroHeightClass} ${animRevealClass}`}
             >
               <img
                 src={heroImg}
                 alt={heroHeading}
                 referrerPolicy="no-referrer"
                 onError={() => setBrokenHeroImg(true)}
-                className="absolute inset-0 w-full h-full object-cover"
+                className={`absolute inset-0 w-full h-full object-cover ${heroPosClass}`}
+                style={{
+                  filter: brightnessPct !== 100 ? `brightness(${brightnessPct}%)` : undefined,
+                }}
               />
-              <div className="absolute inset-0 bg-slate-950/65" />
+              <div
+                className="absolute inset-0 bg-slate-950 transition-opacity"
+                style={{ opacity: overlayOpacityPct / 100 }}
+              />
               <div className="max-w-3xl mx-auto space-y-4 relative z-10">
                 {site.nicheLabel && (
-                  <p className="text-xs font-medium text-slate-200">{site.nicheLabel}</p>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-white/90">
+                    {site.nicheLabel}
+                  </p>
                 )}
-                <h2 className="text-2xl sm:text-4xl font-extrabold tracking-tight leading-tight text-balance">
+                <h2 className="text-2xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight leading-tight text-balance text-white drop-shadow-sm">
                   {heroHeading}
                 </h2>
                 {heroDesc && (
-                  <p className="text-xs sm:text-sm text-slate-200 max-w-xl mx-auto leading-relaxed">
+                  <p className="text-xs sm:text-sm text-slate-100 max-w-xl mx-auto leading-relaxed drop-shadow-xs">
                     {heroDesc}
                   </p>
                 )}
@@ -719,7 +831,7 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                     href={primaryCtaHref}
                     target={isPrimaryExternal ? '_blank' : undefined}
                     rel={isPrimaryExternal ? 'noreferrer' : undefined}
-                    className={`min-h-[42px] px-5 py-2.5 ${buttonRadiusClass} text-white font-semibold text-xs shadow-md hover:opacity-90 transition-opacity inline-flex items-center gap-1.5`}
+                    className={`min-h-[44px] px-6 py-2.5 ${buttonRadiusClass} text-white font-semibold text-xs shadow-md hover:opacity-95 ${animHoverClass} transition-all inline-flex items-center gap-1.5`}
                     style={{ backgroundColor: brandColor }}
                   >
                     <span>{primaryCtaLabel}</span>
@@ -728,7 +840,7 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                   {secondaryCtaLabel && (
                     <a
                       href={secondaryCtaHref}
-                      className={`min-h-[42px] px-5 py-2.5 ${buttonRadiusClass} bg-white/15 hover:bg-white/25 text-white font-medium text-xs border border-white/25 transition-colors inline-flex items-center`}
+                      className={`min-h-[44px] px-5 py-2.5 ${buttonRadiusClass} bg-white/20 hover:bg-white/30 text-white font-medium text-xs border border-white/30 backdrop-blur-xs ${animHoverClass} transition-colors inline-flex items-center`}
                     >
                       {secondaryCtaLabel}
                     </a>
@@ -742,16 +854,18 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
         return (
           <section
             key={section.id}
-            className="py-12 sm:py-16 px-4 sm:px-6 text-center text-white relative overflow-hidden"
+            className={`px-4 sm:px-6 text-center text-white relative overflow-hidden ${heroHeightClass} ${animRevealClass}`}
             style={{
               background: `linear-gradient(135deg, ${brandColor} 0%, #0F172A 100%)`,
             }}
           >
             <div className="max-w-3xl mx-auto space-y-4 relative z-10">
               {site.nicheLabel && (
-                <p className="text-xs font-medium text-white/80">{site.nicheLabel}</p>
+                <p className="text-xs font-semibold uppercase tracking-wider text-white/80">
+                  {site.nicheLabel}
+                </p>
               )}
-              <h2 className="text-2xl sm:text-4xl font-extrabold tracking-tight leading-tight text-balance">
+              <h2 className="text-2xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight leading-tight text-balance text-white">
                 {heroHeading}
               </h2>
               {heroDesc && (
@@ -764,7 +878,7 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                   href={primaryCtaHref}
                   target={isPrimaryExternal ? '_blank' : undefined}
                   rel={isPrimaryExternal ? 'noreferrer' : undefined}
-                  className={`min-h-[42px] px-5 py-2.5 ${buttonRadiusClass} bg-white text-slate-900 font-bold text-xs shadow-md hover:bg-slate-100 transition-colors inline-flex items-center gap-1.5`}
+                  className={`min-h-[44px] px-6 py-2.5 ${buttonRadiusClass} bg-white text-slate-900 font-bold text-xs shadow-md hover:bg-slate-100 ${animHoverClass} transition-all inline-flex items-center gap-1.5`}
                 >
                   <span>{primaryCtaLabel}</span>
                   <ChevronRight className="w-3.5 h-3.5" />
@@ -772,7 +886,7 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                 {secondaryCtaLabel && (
                   <a
                     href={secondaryCtaHref}
-                    className={`min-h-[42px] px-5 py-2.5 ${buttonRadiusClass} bg-white/15 hover:bg-white/25 text-white font-medium text-xs border border-white/20 transition-colors inline-flex items-center`}
+                    className={`min-h-[44px] px-5 py-2.5 ${buttonRadiusClass} bg-white/15 hover:bg-white/25 text-white font-medium text-xs border border-white/20 ${animHoverClass} transition-colors inline-flex items-center`}
                   >
                     {secondaryCtaLabel}
                   </a>
@@ -780,14 +894,23 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
               </div>
               {heroImg && (
                 <div className="pt-6 max-w-2xl mx-auto">
-                  <div className="rounded-2xl overflow-hidden border border-white/20 shadow-xl aspect-[16/9] bg-slate-900">
+                  <div className="rounded-2xl overflow-hidden border border-white/20 shadow-xl aspect-[16/9] bg-slate-900 relative">
                     <img
                       src={heroImg}
                       alt={heroHeading}
                       referrerPolicy="no-referrer"
                       onError={() => setBrokenHeroImg(true)}
-                      className="w-full h-full object-cover"
+                      className={`w-full h-full object-cover ${heroPosClass}`}
+                      style={{
+                        filter: brightnessPct !== 100 ? `brightness(${brightnessPct}%)` : undefined,
+                      }}
                     />
+                    {overlayOpacityPct > 0 && (
+                      <div
+                        className="absolute inset-0 bg-slate-950 pointer-events-none"
+                        style={{ opacity: overlayOpacityPct / 250 }}
+                      />
+                    )}
                   </div>
                 </div>
               )}
@@ -805,15 +928,158 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
 
         if (!bTitle && !bImg && !bSub) return null;
 
+        const bannerLayout = themeSettings.bannerLayout || 'split';
+        const bannerBg = themeSettings.bannerBgColor || surfaceColor;
+        const bannerTxt = themeSettings.bannerTextColor || textColor;
+        const bannerAlign = themeSettings.bannerAlignment || 'left';
+        const bannerImgPos = themeSettings.bannerImagePosition || 'right';
+        const bannerCtaStyle = themeSettings.bannerCtaStyle || 'solid';
+
+        const ctaBtnClass =
+          bannerCtaStyle === 'outline'
+            ? `border border-current bg-transparent hover:bg-black/5 dark:hover:bg-white/10`
+            : bannerCtaStyle === 'ghost'
+            ? `bg-transparent hover:underline px-0`
+            : `text-white shadow-xs hover:opacity-90`;
+
+        const ctaBtnStyle =
+          bannerCtaStyle === 'solid' ? { backgroundColor: brandColor } : undefined;
+
+        // Option 1: Compact Promotional Strip (e.g. Free shipping alert)
+        if (bannerLayout === 'strip') {
+          return (
+            <section
+              key={section.id}
+              className={`py-3 px-4 sm:px-6 border-y border-slate-200/80 ${animRevealClass}`}
+              style={{ backgroundColor: bannerBg, color: bannerTxt }}
+            >
+              <div className="max-w-5xl mx-auto flex flex-wrap items-center justify-between gap-3 text-xs">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: brandColor }} />
+                  <span className="font-bold truncate">{bTitle || 'Special Promotion'}</span>
+                  {bSub && <span className="text-slate-500 hidden sm:inline">· {bSub}</span>}
+                </div>
+                {bCtaText && (
+                  <a
+                    href={bCtaHref}
+                    target={bCtaHref.startsWith('http') ? '_blank' : undefined}
+                    rel={bCtaHref.startsWith('http') ? 'noreferrer' : undefined}
+                    className={`font-semibold inline-flex items-center gap-1 hover:underline text-xs`}
+                    style={{ color: brandColor }}
+                  >
+                    <span>{bCtaText}</span>
+                    <ChevronRight className="w-3 h-3" />
+                  </a>
+                )}
+              </div>
+            </section>
+          );
+        }
+
+        // Option 2: Minimal Text-Only Announcement
+        if (bannerLayout === 'minimal' || (!bImg && bannerLayout !== 'full')) {
+          return (
+            <section
+              key={section.id}
+              className={`py-8 px-4 sm:px-6 max-w-4xl mx-auto ${animRevealClass}`}
+            >
+              <div
+                className={`p-6 sm:p-8 rounded-2xl border border-slate-200 shadow-xs text-${bannerAlign}`}
+                style={{ backgroundColor: bannerBg, color: bannerTxt }}
+              >
+                {bTitle && (
+                  <h3 className="text-lg sm:text-2xl font-extrabold tracking-tight">
+                    {bTitle}
+                  </h3>
+                )}
+                {bSub && <p className="text-xs sm:text-sm text-slate-600 mt-2 leading-relaxed">{bSub}</p>}
+                {bCtaText && (
+                  <div className="pt-4">
+                    <a
+                      href={bCtaHref}
+                      target={bCtaHref.startsWith('http') ? '_blank' : undefined}
+                      rel={bCtaHref.startsWith('http') ? 'noreferrer' : undefined}
+                      className={`inline-flex items-center gap-1.5 px-4 py-2 ${buttonRadiusClass} font-semibold text-xs ${ctaBtnClass}`}
+                      style={ctaBtnStyle}
+                    >
+                      <span>{bCtaText}</span>
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </a>
+                  </div>
+                )}
+              </div>
+            </section>
+          );
+        }
+
+        // Option 3: Full-Width Image Banner with overlay
+        if (bannerLayout === 'full' && bImg) {
+          return (
+            <section
+              key={section.id}
+              className={`py-6 px-4 sm:px-6 max-w-5xl mx-auto ${animRevealClass}`}
+            >
+              <div className="relative rounded-2xl overflow-hidden min-h-[220px] sm:min-h-[280px] flex items-center p-6 sm:p-10 text-white shadow-md">
+                <img
+                  src={bImg}
+                  alt={bTitle || businessName}
+                  referrerPolicy="no-referrer"
+                  className="absolute inset-0 w-full h-full object-cover"
+                />
+                <div className="absolute inset-0 bg-slate-950/60" />
+                <div className="relative z-10 max-w-xl space-y-3">
+                  {bTitle && (
+                    <h3 className="text-xl sm:text-3xl font-extrabold tracking-tight drop-shadow-sm">
+                      {bTitle}
+                    </h3>
+                  )}
+                  {bSub && (
+                    <p className="text-xs sm:text-sm text-slate-100 leading-relaxed drop-shadow-xs">
+                      {bSub}
+                    </p>
+                  )}
+                  {bCtaText && (
+                    <div className="pt-2">
+                      <a
+                        href={bCtaHref}
+                        target={bCtaHref.startsWith('http') ? '_blank' : undefined}
+                        rel={bCtaHref.startsWith('http') ? 'noreferrer' : undefined}
+                        className={`inline-flex items-center gap-1.5 px-5 py-2.5 ${buttonRadiusClass} text-white font-semibold text-xs shadow-md hover:opacity-90 transition-opacity`}
+                        style={{ backgroundColor: brandColor }}
+                      >
+                        <span>{bCtaText}</span>
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      </a>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </section>
+          );
+        }
+
+        // Option 4 (Default): Split Image + Text Banner
         return (
-          <section key={section.id} className="py-8 px-4 sm:px-6 max-w-5xl mx-auto">
+          <section key={section.id} className={`py-8 px-4 sm:px-6 max-w-5xl mx-auto ${animRevealClass}`}>
             <div
               className="rounded-2xl overflow-hidden border border-slate-200 shadow-xs grid grid-cols-1 md:grid-cols-12 items-center"
-              style={{ backgroundColor: surfaceColor }}
+              style={{ backgroundColor: bannerBg, color: bannerTxt }}
             >
-              <div className={`${bImg ? 'md:col-span-7' : 'md:col-span-12'} p-6 sm:p-8 space-y-3`}>
+              {bImg && bannerImgPos === 'left' && (
+                <div className="md:col-span-5 h-48 md:h-full min-h-[200px] bg-slate-100 order-last md:order-first">
+                  <img
+                    src={bImg}
+                    alt={bTitle || businessName}
+                    referrerPolicy="no-referrer"
+                    className="w-full h-full object-cover"
+                  />
+                </div>
+              )}
+              <div
+                className={`${bImg ? 'md:col-span-7' : 'md:col-span-12'} p-6 sm:p-8 space-y-3 text-${bannerAlign}`}
+              >
                 {bTitle && (
-                  <h3 className="text-lg sm:text-2xl font-extrabold tracking-tight" style={{ color: textColor }}>
+                  <h3 className="text-lg sm:text-2xl font-extrabold tracking-tight">
                     {bTitle}
                   </h3>
                 )}
@@ -824,8 +1090,8 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                       href={bCtaHref}
                       target={bCtaHref.startsWith('http') ? '_blank' : undefined}
                       rel={bCtaHref.startsWith('http') ? 'noreferrer' : undefined}
-                      className={`inline-flex items-center gap-1.5 px-4 py-2 ${buttonRadiusClass} text-white font-semibold text-xs hover:opacity-90 transition-opacity`}
-                      style={{ backgroundColor: brandColor }}
+                      className={`inline-flex items-center gap-1.5 px-4 py-2 ${buttonRadiusClass} font-semibold text-xs transition-opacity ${ctaBtnClass}`}
+                      style={ctaBtnStyle}
                     >
                       <span>{bCtaText}</span>
                       <ChevronRight className="w-3.5 h-3.5" />
@@ -833,8 +1099,8 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                   </div>
                 )}
               </div>
-              {bImg && (
-                <div className="md:col-span-5 h-48 md:h-full min-h-[180px] bg-slate-100">
+              {bImg && bannerImgPos !== 'left' && (
+                <div className="md:col-span-5 h-48 md:h-full min-h-[200px] bg-slate-100">
                   <img
                     src={bImg}
                     alt={bTitle || businessName}
@@ -979,11 +1245,11 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
           <React.Fragment key={section.id}>
             <section
               id="services"
-              className="py-12 px-4 sm:px-6 border-t border-slate-200/80"
+              className={`py-12 px-4 sm:px-6 border-t border-slate-200/80 ${animRevealClass}`}
               style={{ backgroundColor: surfaceColor }}
             >
               <div className="max-w-5xl mx-auto space-y-6">
-                <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-2">
+                <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 pb-2 border-b border-slate-200/60">
                   <div className="space-y-1">
                     <h3 className="text-xl sm:text-2xl font-extrabold tracking-tight" style={{ color: textColor }}>
                       {section.title || 'Featured Products & Offerings'}
@@ -995,16 +1261,36 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                           : 'Explore our current catalog of products and services.')}
                     </p>
                   </div>
-                  {visibleProducts.length > 0 && (
-                    <span className="text-xs text-slate-500 font-mono tabular-nums">
-                      {visibleProducts.length} {visibleProducts.length === 1 ? 'item' : 'items'}
-                    </span>
-                  )}
+                  <div className="flex flex-wrap items-center gap-3">
+                    {visibleProducts.length > 0 && (
+                      <span className="text-xs text-slate-500 font-mono tabular-nums">
+                        {visibleProducts.length} {visibleProducts.length === 1 ? 'item' : 'items'}
+                      </span>
+                    )}
+                    {visibleProducts.length > 1 && (
+                      <div className="flex items-center gap-1.5 text-xs">
+                        <span className="text-slate-500 font-medium">Sort:</span>
+                        <select
+                          value={storefrontSort}
+                          onChange={(e) => setStorefrontSort(e.target.value as any)}
+                          aria-label="Sort products"
+                          className="px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-slate-800 text-xs font-medium focus:ring-1 focus:ring-blue-500 outline-none cursor-pointer"
+                        >
+                          <option value="custom">Default Order</option>
+                          <option value="featured">Featured First</option>
+                          <option value="price-low">Price: Low to High</option>
+                          <option value="price-high">Price: High to Low</option>
+                          <option value="name">Name: A to Z</option>
+                          <option value="newest">Newest First</option>
+                        </select>
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-5">
-                  {visibleProducts.length > 0 ? (
-                    visibleProducts.map((item, idx) => {
+                  {sortedProducts.length > 0 ? (
+                    sortedProducts.map((item, idx) => {
                       const itemKey = (item.productId || item.id || `idx-${idx}`).trim();
                       const priceText = formatProductPrice(item);
                       const unitNumeric = parseItemNumericPrice(item);
@@ -1039,7 +1325,7 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                       return (
                         <div
                           key={itemKey}
-                          className="rounded-xl bg-white border border-slate-200 hover:border-slate-300 shadow-xs overflow-hidden flex flex-col justify-between transition-all"
+                          className={`rounded-xl bg-white border border-slate-200 hover:border-slate-300 shadow-xs overflow-hidden flex flex-col justify-between transition-all ${cardHoverClass}`}
                         >
                           <div>
                             <button
@@ -1775,6 +2061,18 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
         if (!hasAnyDirectContact && isPublicView) {
           return null;
         }
+        const locConfig = themeSettings.location;
+        const effectiveAddr = (locConfig?.address || address || '').trim();
+        const locShareUrl = (locConfig?.mapsShareUrl || '').trim();
+        const dirUrl = buildGoogleMapsDirectionsUrl({
+          businessName,
+          address: effectiveAddr,
+          mapsShareUrl: locShareUrl,
+          latitude: locConfig?.latitude,
+          longitude: locConfig?.longitude,
+        });
+        const showMapCard = Boolean(dirUrl || effectiveAddr || locShareUrl);
+
         return (
           <section key={section.id} id="contact" className="py-12 px-4 sm:px-6 max-w-5xl mx-auto space-y-6">
             <div className="text-center space-y-1">
@@ -1875,35 +2173,142 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                 )}
               </div>
 
-              {address && (
+              {showMapCard && (
                 <div
-                  className="rounded-2xl border border-slate-200 overflow-hidden flex flex-col items-center justify-center p-6 text-center space-y-3"
+                  className="rounded-2xl border border-slate-200 overflow-hidden flex flex-col items-center justify-between p-6 text-center space-y-4 shadow-xs"
                   style={{ backgroundColor: surfaceColor }}
                 >
-                  <div
-                    className="w-11 h-11 rounded-xl flex items-center justify-center text-white shadow-xs"
-                    style={{ backgroundColor: brandColor }}
-                  >
-                    <MapPin className="w-5 h-5" />
+                  <div className="flex flex-col items-center space-y-3">
+                    <div
+                      className="w-12 h-12 rounded-2xl flex items-center justify-center text-white shadow-sm"
+                      style={{ backgroundColor: brandColor }}
+                    >
+                      <MapPin className="w-6 h-6" />
+                    </div>
+                    <div className="space-y-1">
+                      <h4 className="text-sm font-bold text-slate-900">
+                        {locConfig?.placeName || 'Store / Office Location'}
+                      </h4>
+                      <p className="text-xs text-slate-600 max-w-xs leading-relaxed">
+                        {effectiveAddr || 'Open Google Maps below for our verified location and direct driving route.'}
+                      </p>
+                      {locConfig?.latitude && locConfig?.longitude && (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-mono text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
+                          <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                          <span>Verified Pin ({locConfig.latitude.toFixed(4)}, {locConfig.longitude.toFixed(4)})</span>
+                        </span>
+                      )}
+                    </div>
                   </div>
-                  <div className="space-y-1">
-                    <h4 className="text-xs font-bold text-slate-900">Store / Office Location</h4>
-                    <p className="text-xs text-slate-600 max-w-xs leading-relaxed">{address}</p>
+
+                  <div className="w-full flex flex-col sm:flex-row items-center justify-center gap-2 pt-2">
+                    <a
+                      href={dirUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className={`w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-4 py-2.5 ${buttonRadiusClass} text-white font-semibold text-xs shadow-sm hover:opacity-90 transition-opacity`}
+                      style={{ backgroundColor: brandColor }}
+                    >
+                      <Navigation className="w-3.5 h-3.5" />
+                      <span>Get Directions</span>
+                    </a>
+                    {locShareUrl && (
+                      <a
+                        href={locShareUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="w-full sm:w-auto inline-flex items-center justify-center gap-1 px-3 py-2.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium transition-colors"
+                      >
+                        <span>View Map</span>
+                        <ExternalLink className="w-3 h-3 text-slate-400" />
+                      </a>
+                    )}
                   </div>
-                  <a
-                    href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-                      `${businessName} ${address}`
-                    )}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1 text-xs font-semibold hover:underline"
-                    style={{ color: brandColor }}
-                  >
-                    <span>Open in Google Maps</span>
-                    <ExternalLink className="w-3 h-3" />
-                  </a>
                 </div>
               )}
+            </div>
+          </section>
+        );
+      }
+
+      case 'location': {
+        const locConfig = themeSettings.location;
+        const effectiveAddr = (locConfig?.address || address || '').trim();
+        const locShareUrl = (locConfig?.mapsShareUrl || '').trim();
+        const hasLocationData = Boolean(effectiveAddr || locShareUrl);
+        if (!hasLocationData && isPublicView) return null;
+
+        const dirUrl = buildGoogleMapsDirectionsUrl({
+          address: effectiveAddr,
+          mapsShareUrl: locShareUrl,
+          businessName: locConfig?.placeName || businessName,
+          latitude: locConfig?.latitude,
+          longitude: locConfig?.longitude,
+        });
+
+        return (
+          <section key={section.id} id="location" className={`py-12 px-4 sm:px-6 max-w-5xl mx-auto space-y-6 ${animRevealClass}`}>
+            <div className="text-center space-y-1">
+              <h3 className="text-xl sm:text-2xl font-extrabold tracking-tight" style={{ color: textColor }}>
+                {section.title || 'Store & Office Location'}
+              </h3>
+              {section.subtitle && <p className="text-xs text-slate-500">{section.subtitle}</p>}
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 sm:p-8 shadow-xs flex flex-col md:flex-row items-center justify-between gap-6">
+              <div className="flex items-start gap-4">
+                <div
+                  className="w-12 h-12 rounded-2xl flex items-center justify-center text-white shrink-0 shadow-sm"
+                  style={{ backgroundColor: brandColor }}
+                >
+                  <MapPin className="w-6 h-6" />
+                </div>
+                <div className="space-y-1.5">
+                  <h4 className="text-sm sm:text-base font-bold text-slate-900">
+                    {locConfig?.placeName || businessName}
+                  </h4>
+                  <p className="text-xs sm:text-sm text-slate-600 leading-relaxed max-w-md">
+                    {effectiveAddr || 'Visit us during our regular business hours.'}
+                  </p>
+                  {phone && (
+                    <p className="text-xs text-slate-500 font-mono">
+                      Contact: {phone}
+                    </p>
+                  )}
+                  {locConfig?.latitude && locConfig?.longitude && (
+                    <div className="pt-1">
+                      <span className="inline-flex items-center gap-1 text-[11px] font-mono text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
+                        <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                        <span>Verified Location ({locConfig.latitude.toFixed(4)}, {locConfig.longitude.toFixed(4)})</span>
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row items-center gap-2.5 w-full md:w-auto">
+                <a
+                  href={dirUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className={`w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-3 ${buttonRadiusClass} text-white font-semibold text-xs shadow-sm hover:opacity-90 transition-opacity`}
+                  style={{ backgroundColor: brandColor }}
+                >
+                  <Navigation className="w-4 h-4" />
+                  <span>Get Directions</span>
+                </a>
+                {locShareUrl && (
+                  <a
+                    href={locShareUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-4 py-3 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-semibold transition-colors"
+                  >
+                    <span>View on Google Maps</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                )}
+              </div>
             </div>
           </section>
         );
@@ -1925,6 +2330,45 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
       }`}
       style={{ backgroundColor }}
     >
+      {animationsEnabled && (
+        <style>{`
+          ${smoothScroll ? 'html { scroll-behavior: smooth; }' : ''}
+          @keyframes amsFadeUp {
+            from { opacity: 0; transform: translateY(16px); }
+            to { opacity: 1; transform: translateY(0); }
+          }
+          @keyframes amsFadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+          }
+          @keyframes amsZoomIn {
+            from { opacity: 0; transform: scale(0.96); }
+            to { opacity: 1; transform: scale(1); }
+          }
+          .ams-anim-fade-up {
+            animation: amsFadeUp ${
+              animSpeed === 'fast' ? '0.3s' : animSpeed === 'relaxed' ? '0.75s' : '0.45s'
+            } cubic-bezier(0.16, 1, 0.3, 1) forwards;
+          }
+          .ams-anim-fade-in {
+            animation: amsFadeIn ${
+              animSpeed === 'fast' ? '0.25s' : animSpeed === 'relaxed' ? '0.65s' : '0.4s'
+            } ease-out forwards;
+          }
+          .ams-anim-zoom-in {
+            animation: amsZoomIn ${
+              animSpeed === 'fast' ? '0.3s' : animSpeed === 'relaxed' ? '0.7s' : '0.45s'
+            } cubic-bezier(0.16, 1, 0.3, 1) forwards;
+          }
+          @media (prefers-reduced-motion: reduce) {
+            .ams-anim-fade-up, .ams-anim-fade-in, .ams-anim-zoom-in {
+              animation: none !important;
+              opacity: 1 !important;
+              transform: none !important;
+            }
+          }
+        `}</style>
+      )}
       {/* Browser Chrome Simulation Header */}
       {!isPublicView && (
         <div className="bg-slate-900 text-slate-300 px-4 py-2.5 flex items-center justify-between border-b border-slate-800 text-xs select-none">

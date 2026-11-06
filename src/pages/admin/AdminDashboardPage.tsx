@@ -707,12 +707,13 @@ export const AdminDashboardPage: React.FC = () => {
       setLifecycleModal(null);
       setLifecycleReason('');
 
+      let res: { success: boolean; message: string };
       if (action === 'suspend') {
-        suspendSubscribedWebsite(site.id, cleanReason);
+        res = await suspendSubscribedWebsite(site.id, cleanReason);
       } else if (action === 'reactivate') {
-        reactivateSubscribedWebsite(site.id, cleanReason);
+        res = await reactivateSubscribedWebsite(site.id, cleanReason);
       } else {
-        renewSubscribedWebsite(site.id, cleanReason);
+        res = await renewSubscribedWebsite(site.id, cleanReason);
       }
 
       recordAdminSessionEvent({
@@ -720,8 +721,8 @@ export const AdminDashboardPage: React.FC = () => {
         action: `website_${action}`,
         targetType: 'website',
         targetId: site.id,
-        outcome: 'success',
-        summary: `Website ${action} dispatched (${site.subdomain}.amaas.xyz).`,
+        outcome: res.success ? 'success' : 'failed',
+        summary: res.message || `Website ${action} completed (${site.subdomain}.amaas.xyz).`,
       });
     } finally {
       setIsLifecycleSubmitting(false);
@@ -1839,12 +1840,16 @@ export const AdminDashboardPage: React.FC = () => {
               {/* Mobile Website Cards (< 1024px) */}
               <div className="lg:hidden space-y-3">
                 {filteredWebsites.map((site) => {
-                  const isSuspended = site.subscriptionStatus === 'suspended';
+                  const isSuspended =
+                    site.subscriptionStatus === 'suspended' ||
+                    site.deploymentStatus === 'suspended';
                   const trulyLive = isWebsiteTrulyLive(site);
                   const hasPaymentHistory = paymentRequests.some(
                     (r) =>
                       isWebsitePaymentService(r.serviceType) && r.serviceId === site.id
                   );
+                  const latestAudit = websiteLifecycleAuditLogs.find((l) => l.websiteId === site.id);
+                  const suspendReason = site.notes || (latestAudit?.action === 'suspend' ? latestAudit.reason : undefined);
 
                   return (
                     <div
@@ -1884,6 +1889,14 @@ export const AdminDashboardPage: React.FC = () => {
                               ? 'Paid · Unpublished'
                               : 'Unpaid Draft'}
                           </span>
+                          {isSuspended && suspendReason && (
+                            <span
+                              className="text-[10px] text-rose-500 dark:text-rose-400 italic block mt-0.5 max-w-[150px] truncate text-right"
+                              title={suspendReason}
+                            >
+                              Reason: {suspendReason}
+                            </span>
+                          )}
                           <span className="text-[11px] font-mono text-slate-400 tabular-nums block mt-0.5">
                             Expiry:{' '}
                             {formatSubscriptionDateDisplay(
@@ -1974,12 +1987,16 @@ export const AdminDashboardPage: React.FC = () => {
                   </thead>
                   <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-slate-700 dark:text-slate-300">
                     {filteredWebsites.map((site) => {
-                      const isSuspended = site.subscriptionStatus === 'suspended';
+                      const isSuspended =
+                        site.subscriptionStatus === 'suspended' ||
+                        site.deploymentStatus === 'suspended';
                       const trulyLive = isWebsiteTrulyLive(site);
                       const hasPaymentHistory = paymentRequests.some(
                         (r) =>
                           isWebsitePaymentService(r.serviceType) && r.serviceId === site.id
                       );
+                      const latestAudit = websiteLifecycleAuditLogs.find((l) => l.websiteId === site.id);
+                      const suspendReason = site.notes || (latestAudit?.action === 'suspend' ? latestAudit.reason : undefined);
 
                       return (
                         <tr
@@ -2042,6 +2059,14 @@ export const AdminDashboardPage: React.FC = () => {
                                 ? 'Expired (30d) · Offline (Saved)'
                                 : `${site.subscriptionStatus.replace('_', ' ')} · ${site.paymentStatus}`}
                             </span>
+                            {isSuspended && suspendReason && (
+                              <span
+                                className="text-[10px] text-rose-500 dark:text-rose-400 italic block mt-0.5 max-w-[200px] truncate"
+                                title={suspendReason}
+                              >
+                                Reason: {suspendReason}
+                              </span>
+                            )}
                           </td>
 
                           <td className="py-3.5 px-4 font-mono text-[11px] tabular-nums">

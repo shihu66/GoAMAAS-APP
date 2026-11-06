@@ -39,6 +39,7 @@ export interface Product {
   websiteId?: string;
   isVisible?: boolean;
   sortOrder?: number;
+  isFeatured?: boolean;
 }
 
 export interface OrderItemMetadata {
@@ -281,7 +282,8 @@ export type WebsiteSectionType =
   | 'products'
   | 'testimonials'
   | 'faq'
-  | 'contact';
+  | 'contact'
+  | 'location';
 
 export interface WebsiteSectionItem {
   id: string;
@@ -307,6 +309,26 @@ export interface WebsiteSectionConfig {
   items?: WebsiteSectionItem[];
 }
 
+export interface WebsiteAnimationSettings {
+  enabled?: boolean;
+  intensity?: 'subtle' | 'normal' | 'expressive';
+  transitionSpeed?: 'fast' | 'normal' | 'relaxed';
+  reducedMotion?: boolean;
+  sectionReveal?: 'fade-up' | 'fade-in' | 'slide-left' | 'slide-right' | 'zoom-in' | 'none';
+  hoverEffect?: 'lift' | 'scale' | 'glow' | 'none';
+  smoothScroll?: boolean;
+}
+
+export interface WebsiteLocationSettings {
+  address?: string;
+  mapsShareUrl?: string;
+  latitude?: number;
+  longitude?: number;
+  placeName?: string;
+  zoomLevel?: number;
+  showMap?: boolean;
+}
+
 export interface WebsiteThemeSettings {
   paletteId?: string;
   primaryColor?: string;
@@ -317,6 +339,21 @@ export interface WebsiteThemeSettings {
   fontStyle?: 'modern' | 'editorial' | 'bold' | 'minimal';
   buttonStyle?: 'rounded' | 'pill' | 'sharp';
   heroLayout?: 'split' | 'centered' | 'cover';
+  // Hero Cover Image Controls
+  heroImagePosition?: 'center' | 'top' | 'bottom' | 'left' | 'right' | 'custom';
+  heroOverlayOpacity?: number; // 0 to 100
+  heroBrightness?: number; // 50 to 150 (percentage)
+  heroHeight?: 'compact' | 'medium' | 'tall' | 'full';
+  // Promotional Banner Controls
+  bannerLayout?: 'full' | 'split' | 'strip' | 'minimal';
+  bannerBgColor?: string;
+  bannerTextColor?: string;
+  bannerAlignment?: 'left' | 'center' | 'right';
+  bannerImagePosition?: 'left' | 'right' | 'background';
+  bannerCtaStyle?: 'solid' | 'outline' | 'ghost';
+  // Animation & Location Embeds
+  animations?: WebsiteAnimationSettings;
+  location?: WebsiteLocationSettings;
 }
 
 export interface WebsiteCustomLink {
@@ -350,6 +387,7 @@ export interface WebsiteProductItem {
   inStock?: boolean;
   isVisible?: boolean;
   sortOrder?: number;
+  isFeatured?: boolean;
   publishedAt?: string;
 }
 

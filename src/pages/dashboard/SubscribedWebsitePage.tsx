@@ -19,7 +19,11 @@ import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { ManualPaymentModal } from '../../components/payment/ManualPaymentModal';
 import { PaymentReceiptModal } from '../../components/payment/PaymentReceiptModal';
 import { CATEGORY_SPECS, THEME_PALETTES } from '../../data/websiteBuilderConfig';
-import { buildWebsiteProductItemFromProduct } from '../../lib/storefrontSync';
+import {
+  buildWebsiteProductItemFromProduct,
+  buildGoogleMapsDirectionsUrl,
+  validateAndNormalizeGoogleMapsUrl,
+} from '../../lib/storefrontSync';
 import {
   Globe,
   CreditCard,
@@ -60,6 +64,11 @@ import {
   XCircle,
   RefreshCw,
   Receipt,
+  Megaphone,
+  MapPin,
+  Navigation,
+  Sliders,
+  Star,
 } from 'lucide-react';
 import {
   formatSubscriptionDateDisplay,
@@ -146,7 +155,8 @@ const SECTION_TYPE_LABELS: Record<WebsiteSectionType, string> = {
   products: 'Products Catalog',
   testimonials: 'Customer Testimonials',
   faq: 'FAQ Accordion',
-  contact: 'Contact & Location',
+  contact: 'Contact & Details',
+  location: 'Google Maps & Location',
 };
 
 export const SubscribedWebsitePage: React.FC = () => {
@@ -184,8 +194,10 @@ export const SubscribedWebsitePage: React.FC = () => {
     subscribedWebsites.find((s) => s.storeId === activeStore?.id) ||
     subscribedWebsites[0];
 
-  // Visual Editor Tab State
-  const [editorTab, setEditorTab] = useState<'hero' | 'sections' | 'products' | 'theme' | 'business'>('hero');
+  // Visual Editor Tab State (8 Structured Tabs)
+  const [editorTab, setEditorTab] = useState<
+    'business' | 'hero' | 'banner' | 'sections' | 'products' | 'location' | 'animations' | 'publish'
+  >('business');
   const [previewDevice, setPreviewDevice] = useState<'desktop' | 'mobile'>('desktop');
   const [expandedSectionId, setExpandedSectionId] = useState<string | null>(null);
 
@@ -325,7 +337,33 @@ export const SubscribedWebsitePage: React.FC = () => {
       textColor: srcTheme.textColor || '#0F172A',
       fontStyle: srcTheme.fontStyle || 'modern',
       buttonStyle: srcTheme.buttonStyle || 'rounded',
-      heroLayout: srcTheme.heroLayout || (site.heroImageUrl ? 'split' : 'centered'),
+      heroLayout: srcTheme.heroLayout || (site.heroImageUrl ? 'cover' : 'split'),
+      heroImagePosition: srcTheme.heroImagePosition || 'center',
+      heroOverlayOpacity:
+        typeof srcTheme.heroOverlayOpacity === 'number' ? srcTheme.heroOverlayOpacity : 40,
+      heroBrightness:
+        typeof srcTheme.heroBrightness === 'number' ? srcTheme.heroBrightness : 100,
+      heroHeight: srcTheme.heroHeight || 'medium',
+      bannerLayout: srcTheme.bannerLayout || 'split',
+      bannerBgColor: srcTheme.bannerBgColor || '#F8FAFC',
+      bannerTextColor: srcTheme.bannerTextColor || '#0F172A',
+      bannerAlignment: srcTheme.bannerAlignment || 'left',
+      bannerImagePosition: srcTheme.bannerImagePosition || 'left',
+      bannerCtaStyle: srcTheme.bannerCtaStyle || 'solid',
+      animations: srcTheme.animations || {
+        enabled: true,
+        intensity: 'normal',
+        transitionSpeed: 'normal',
+        reducedMotion: false,
+        sectionReveal: 'fade-up',
+        hoverEffect: 'lift',
+        smoothScroll: true,
+      },
+      location: srcTheme.location || {
+        address: site.address || '',
+        mapsShareUrl: '',
+        showMap: true,
+      },
     });
 
     setEditSections(createInitialSections(site, draft));
@@ -786,6 +824,9 @@ export const SubscribedWebsitePage: React.FC = () => {
       defaultSub = editBannerSubtitle || 'Explore our newest arrivals and featured bundles.';
       if (!editBannerTitle) setEditBannerTitle(defaultTitle);
       if (!editBannerSubtitle) setEditBannerSubtitle(defaultSub);
+    } else if (type === 'location') {
+      defaultTitle = 'Store & Office Location';
+      defaultSub = 'Visit us during our regular business hours or get directions.';
     }
 
     setEditSections((prev) => [
@@ -990,6 +1031,13 @@ export const SubscribedWebsitePage: React.FC = () => {
     await updateProduct(p.id, {
       isVisible: nextVisible,
       status: nextVisible ? 'active' : 'draft',
+    });
+  };
+
+  const handleToggleDbProductFeatured = async (p: Product) => {
+    const nextFeatured = !p.isFeatured;
+    await updateProduct(p.id, {
+      isFeatured: nextFeatured,
     });
   };
 
@@ -1719,14 +1767,25 @@ export const SubscribedWebsitePage: React.FC = () => {
       <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
         {/* Builder Top Toolbar: Tabs + Save Draft + Publish Updates */}
         <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex flex-col xl:flex-row xl:items-center justify-between gap-4 bg-slate-50/70 dark:bg-slate-900">
-          {/* 5 Structured Builder Tabs */}
+          {/* 8 Structured Builder Tabs */}
           <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-200/70 dark:bg-slate-800 overflow-x-auto text-xs">
             {[
-              { id: 'hero', label: 'Hero & Banner', icon: Sparkles },
-              { id: 'sections', label: `Sections (${editSections.filter((s) => s.enabled).length})`, icon: Layers },
-              { id: 'products', label: `Products (${unifiedWebsiteProducts.length})`, icon: ShoppingBag },
-              { id: 'theme', label: 'Theme & Logo', icon: Palette },
-              { id: 'business', label: 'Business, Footer & Domain', icon: Building },
+              { id: 'business', label: '1. Business Info', icon: Building },
+              { id: 'hero', label: '2. Hero & Branding', icon: Sparkles },
+              { id: 'banner', label: '3. Promo Banner', icon: Megaphone },
+              {
+                id: 'sections',
+                label: `4. Sections (${editSections.filter((s) => s.enabled).length})`,
+                icon: Layers,
+              },
+              {
+                id: 'products',
+                label: `5. Products (${unifiedWebsiteProducts.length})`,
+                icon: ShoppingBag,
+              },
+              { id: 'location', label: '6. Location & Contact', icon: MapPin },
+              { id: 'animations', label: '7. Animation & Effects', icon: Activity },
+              { id: 'publish', label: '8. Preview & Publish', icon: Globe },
             ].map((t) => {
               const Icon = t.icon;
               const active = editorTab === t.id;
@@ -2077,153 +2136,464 @@ export const SubscribedWebsitePage: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Promotional Banner Configuration */}
-                <div className="pt-5 border-t border-slate-200 dark:border-slate-800 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <h4 className="text-sm font-bold text-slate-900 dark:text-white">
-                      Promotional Banner
+                  {/* Hero Cover Image Advanced Controls */}
+                  <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-3.5">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300">
+                      Cover Image Styling &amp; Dimensions
                     </h4>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const existingBanner = editSections.find((s) => s.type === 'banner');
-                        if (existingBanner) {
-                          handleToggleSection(existingBanner.id);
-                        } else {
-                          handleAddSection('banner');
-                        }
-                      }}
-                      className="text-blue-600 dark:text-blue-400 font-semibold hover:underline cursor-pointer"
-                    >
-                      {editSections.some((s) => s.type === 'banner' && s.enabled)
-                        ? 'Hide Banner'
-                        : 'Show Banner on Site'}
-                    </button>
-                  </div>
 
-                  {editBannerImageUrl ? (
-                    <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 space-y-2">
-                      <img
-                        src={editBannerImageUrl}
-                        alt="Promotional banner"
-                        className="w-full h-28 rounded-lg object-cover"
-                      />
-                      <div className="flex items-center justify-between">
-                        <label className="text-blue-600 font-semibold hover:underline cursor-pointer">
-                          <span>Replace Banner Image</span>
-                          <input
-                            type="file"
-                            accept="image/*"
-                            className="hidden"
-                            onChange={(e) =>
-                              void handleUploadImage(
-                                e.target.files?.[0],
-                                'banners',
-                                'banner',
-                                (url) => {
-                                  setEditBannerImageUrl(url);
-                                  setEditSections((prev) =>
-                                    prev.map((s) =>
-                                      s.type === 'banner' ? { ...s, enabled: true, imageUrl: url } : s
-                                    )
-                                  );
-                                }
-                              )
-                            }
-                          />
-                        </label>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setEditBannerImageUrl('');
-                            markDirty();
-                          }}
-                          className="text-rose-600 font-semibold hover:underline cursor-pointer"
-                        >
-                          Remove
-                        </button>
+                    {/* Image Positioning */}
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                        Image Focal Point / Positioning
+                      </label>
+                      <div className="grid grid-cols-5 gap-1.5 text-xs">
+                        {(['center', 'top', 'bottom', 'left', 'right'] as const).map((pos) => (
+                          <button
+                            key={pos}
+                            type="button"
+                            onClick={() => {
+                              setEditThemeSettings((prev) => ({ ...prev, heroImagePosition: pos }));
+                              markDirty();
+                            }}
+                            className={`py-1.5 px-2 rounded-lg border capitalize font-semibold transition-colors cursor-pointer ${
+                              (editThemeSettings.heroImagePosition || 'center') === pos
+                                ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300'
+                                : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+                            }`}
+                          >
+                            {pos}
+                          </button>
+                        ))}
                       </div>
                     </div>
-                  ) : (
-                    <label className="flex items-center justify-center gap-2 p-3 rounded-xl border border-dashed border-slate-300 dark:border-slate-700 hover:border-blue-500 cursor-pointer text-slate-600 dark:text-slate-300 font-semibold">
-                      {uploadingKey === 'banner' ? (
-                        <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
-                      ) : (
-                        <Upload className="w-4 h-4 text-blue-600" />
-                      )}
-                      <span>Upload Promotional Banner Image</span>
+
+                    {/* Overlay Opacity */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                          Dark Overlay Opacity
+                        </label>
+                        <span className="font-mono text-xs font-bold text-slate-700 dark:text-slate-300">
+                          {editThemeSettings.heroOverlayOpacity ?? 40}%
+                        </span>
+                      </div>
                       <input
-                        type="file"
-                        accept="image/*"
-                        className="hidden"
-                        onChange={(e) =>
-                          void handleUploadImage(
-                            e.target.files?.[0],
-                            'banners',
-                            'banner',
-                            (url) => {
-                              setEditBannerImageUrl(url);
-                              setEditSections((prev) =>
-                                prev.map((s) =>
-                                  s.type === 'banner' ? { ...s, enabled: true, imageUrl: url } : s
-                                )
-                              );
-                            }
-                          )
-                        }
+                        type="range"
+                        min="0"
+                        max="100"
+                        step="5"
+                        value={editThemeSettings.heroOverlayOpacity ?? 40}
+                        onChange={(e) => {
+                          setEditThemeSettings((prev) => ({
+                            ...prev,
+                            heroOverlayOpacity: Number(e.target.value),
+                          }));
+                          markDirty();
+                        }}
+                        className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer"
                       />
-                    </label>
-                  )}
+                      <div className="flex justify-between text-[10px] text-slate-400 mt-0.5">
+                        <span>Transparent (0%)</span>
+                        <span>Balanced (40%)</span>
+                        <span>Solid Dark (100%)</span>
+                      </div>
+                    </div>
 
-                  <input
-                    type="text"
-                    value={editBannerTitle}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setEditBannerTitle(val);
-                      if (val.trim()) {
-                        setEditSections((prev) =>
-                          prev.map((s) => (s.type === 'banner' ? { ...s, enabled: true } : s))
-                        );
+                    {/* Image Brightness */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                          Image Brightness
+                        </label>
+                        <span className="font-mono text-xs font-bold text-slate-700 dark:text-slate-300">
+                          {editThemeSettings.heroBrightness ?? 100}%
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min="50"
+                        max="150"
+                        step="5"
+                        value={editThemeSettings.heroBrightness ?? 100}
+                        onChange={(e) => {
+                          setEditThemeSettings((prev) => ({
+                            ...prev,
+                            heroBrightness: Number(e.target.value),
+                          }));
+                          markDirty();
+                        }}
+                        className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer"
+                      />
+                      <div className="flex justify-between text-[10px] text-slate-400 mt-0.5">
+                        <span>Dim (50%)</span>
+                        <span>Normal (100%)</span>
+                        <span>High (150%)</span>
+                      </div>
+                    </div>
+
+                    {/* Hero Height */}
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                        Hero Height Dimension
+                      </label>
+                      <div className="grid grid-cols-4 gap-1.5 text-xs">
+                        {([
+                          { id: 'compact', label: 'Compact' },
+                          { id: 'medium', label: 'Medium' },
+                          { id: 'tall', label: 'Tall' },
+                          { id: 'full', label: 'Full Screen' },
+                        ] as const).map((h) => (
+                          <button
+                            key={h.id}
+                            type="button"
+                            onClick={() => {
+                              setEditThemeSettings((prev) => ({ ...prev, heroHeight: h.id }));
+                              markDirty();
+                            }}
+                            className={`py-1.5 px-2 rounded-lg border font-semibold transition-colors cursor-pointer ${
+                              (editThemeSettings.heroHeight || 'medium') === h.id
+                                ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300'
+                                : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+                            }`}
+                          >
+                            {h.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+            )}
+
+            {/* TAB 3: PROMOTIONAL BANNER */}
+            {editorTab === 'banner' && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                      Promotional Banner
+                    </h3>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Configure high-converting announcements, seasonal sales, or coupon offers.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const existingBanner = editSections.find((s) => s.type === 'banner');
+                      if (existingBanner) {
+                        handleToggleSection(existingBanner.id);
+                      } else {
+                        handleAddSection('banner');
                       }
-                      markDirty();
                     }}
-                    placeholder="Banner Heading (e.g. Eid Collection — Free Delivery Inside Dhaka)"
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
-                  />
+                    className={`px-3 py-1.5 rounded-lg font-semibold text-xs transition-colors cursor-pointer ${
+                      editSections.some((s) => s.type === 'banner' && s.enabled)
+                        ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-300'
+                        : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border border-slate-200'
+                    }`}
+                  >
+                    {editSections.some((s) => s.type === 'banner' && s.enabled)
+                      ? '✓ Banner Enabled'
+                      : 'Enable Banner'}
+                  </button>
+                </div>
 
-                  <input
-                    type="text"
-                    value={editBannerSubtitle}
-                    onChange={(e) => {
-                      setEditBannerSubtitle(e.target.value);
-                      markDirty();
-                    }}
-                    placeholder="Banner Subtitle / Details"
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
-                  />
+                {/* Banner 4 Layouts */}
+                <div className="space-y-1.5">
+                  <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                    Banner Layout Style
+                  </label>
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    {[
+                      { id: 'full', label: 'Full-Width Image', desc: 'Background cover with text overlay' },
+                      { id: 'split', label: 'Split Image + Text', desc: 'Side-by-side card structure' },
+                      { id: 'strip', label: 'Compact Strip', desc: 'Clean single-row highlight' },
+                      { id: 'minimal', label: 'Minimal Text', desc: 'Announcement bar without image' },
+                    ].map((lay) => (
+                      <button
+                        key={lay.id}
+                        type="button"
+                        onClick={() => {
+                          setEditThemeSettings((prev) => ({ ...prev, bannerLayout: lay.id as any }));
+                          markDirty();
+                        }}
+                        className={`p-2.5 rounded-xl border text-left cursor-pointer transition-colors ${
+                          (editThemeSettings.bannerLayout || 'split') === lay.id
+                            ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/60 text-blue-900 dark:text-blue-100 ring-1 ring-blue-500'
+                            : 'border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300'
+                        }`}
+                      >
+                        <span className="font-bold block text-xs">{lay.label}</span>
+                        <span className="text-[10px] text-slate-500 dark:text-slate-400 block mt-0.5">
+                          {lay.desc}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Banner Image Upload (shown for layouts that support images) */}
+                {editThemeSettings.bannerLayout !== 'minimal' && (
+                  <div className="space-y-2">
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                      Banner Image
+                    </label>
+                    {editBannerImageUrl ? (
+                      <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 space-y-2">
+                        <img
+                          src={editBannerImageUrl}
+                          alt="Promotional banner"
+                          className="w-full h-28 rounded-lg object-cover"
+                        />
+                        <div className="flex items-center justify-between">
+                          <label className="text-blue-600 font-semibold hover:underline cursor-pointer">
+                            <span>Replace Banner Image</span>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="hidden"
+                              onChange={(e) =>
+                                void handleUploadImage(
+                                  e.target.files?.[0],
+                                  'banners',
+                                  'banner',
+                                  (url) => {
+                                    setEditBannerImageUrl(url);
+                                    setEditSections((prev) =>
+                                      prev.map((s) =>
+                                        s.type === 'banner' ? { ...s, enabled: true, imageUrl: url } : s
+                                      )
+                                    );
+                                  }
+                                )
+                              }
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditBannerImageUrl('');
+                              markDirty();
+                            }}
+                            className="text-rose-600 font-semibold hover:underline cursor-pointer"
+                          >
+                            Remove Image
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <label className="flex items-center justify-center gap-2 p-3 rounded-xl border border-dashed border-slate-300 dark:border-slate-700 hover:border-blue-500 cursor-pointer text-slate-600 dark:text-slate-300 font-semibold">
+                        {uploadingKey === 'banner' ? (
+                          <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
+                        ) : (
+                          <Upload className="w-4 h-4 text-blue-600" />
+                        )}
+                        <span>Upload Banner Image</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={(e) =>
+                            void handleUploadImage(
+                              e.target.files?.[0],
+                              'banners',
+                              'banner',
+                              (url) => {
+                                setEditBannerImageUrl(url);
+                                setEditSections((prev) =>
+                                  prev.map((s) =>
+                                    s.type === 'banner' ? { ...s, enabled: true, imageUrl: url } : s
+                                  )
+                                );
+                              }
+                            )
+                          }
+                        />
+                      </label>
+                    )}
+                  </div>
+                )}
+
+                {/* Banner Colors & Alignment */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      Background Color
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="color"
+                        value={editThemeSettings.bannerBgColor || '#F8FAFC'}
+                        onChange={(e) => {
+                          setEditThemeSettings((prev) => ({ ...prev, bannerBgColor: e.target.value }));
+                          markDirty();
+                        }}
+                        className="w-7 h-7 rounded cursor-pointer border-0 p-0"
+                      />
+                      <input
+                        type="text"
+                        value={editThemeSettings.bannerBgColor || '#F8FAFC'}
+                        onChange={(e) => {
+                          setEditThemeSettings((prev) => ({ ...prev, bannerBgColor: e.target.value }));
+                          markDirty();
+                        }}
+                        className="flex-1 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono text-xs"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      Text Color
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="color"
+                        value={editThemeSettings.bannerTextColor || '#0F172A'}
+                        onChange={(e) => {
+                          setEditThemeSettings((prev) => ({ ...prev, bannerTextColor: e.target.value }));
+                          markDirty();
+                        }}
+                        className="w-7 h-7 rounded cursor-pointer border-0 p-0"
+                      />
+                      <input
+                        type="text"
+                        value={editThemeSettings.bannerTextColor || '#0F172A'}
+                        onChange={(e) => {
+                          setEditThemeSettings((prev) => ({ ...prev, bannerTextColor: e.target.value }));
+                          markDirty();
+                        }}
+                        className="flex-1 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono text-xs"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      Text Alignment
+                    </label>
+                    <div className="grid grid-cols-3 gap-1 text-xs">
+                      {(['left', 'center', 'right'] as const).map((al) => (
+                        <button
+                          key={al}
+                          type="button"
+                          onClick={() => {
+                            setEditThemeSettings((prev) => ({ ...prev, bannerAlignment: al }));
+                            markDirty();
+                          }}
+                          className={`py-1 rounded-lg border capitalize font-semibold transition-colors cursor-pointer ${
+                            (editThemeSettings.bannerAlignment || 'left') === al
+                              ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300'
+                              : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                          }`}
+                        >
+                          {al}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      CTA Button Style
+                    </label>
+                    <div className="grid grid-cols-3 gap-1 text-xs">
+                      {(['solid', 'outline', 'ghost'] as const).map((st) => (
+                        <button
+                          key={st}
+                          type="button"
+                          onClick={() => {
+                            setEditThemeSettings((prev) => ({ ...prev, bannerCtaStyle: st }));
+                            markDirty();
+                          }}
+                          className={`py-1 rounded-lg border capitalize font-semibold transition-colors cursor-pointer ${
+                            (editThemeSettings.bannerCtaStyle || 'solid') === st
+                              ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300'
+                              : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                          }`}
+                        >
+                          {st}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Banner Content Inputs */}
+                <div className="space-y-2">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      Banner Heading
+                    </label>
+                    <input
+                      type="text"
+                      value={editBannerTitle}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setEditBannerTitle(val);
+                        if (val.trim()) {
+                          setEditSections((prev) =>
+                            prev.map((s) => (s.type === 'banner' ? { ...s, enabled: true } : s))
+                          );
+                        }
+                        markDirty();
+                      }}
+                      placeholder="e.g. Seasonal Clearance — Up to 30% Off on Selected Styles"
+                      className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      Subtitle / Promo Terms
+                    </label>
+                    <input
+                      type="text"
+                      value={editBannerSubtitle}
+                      onChange={(e) => {
+                        setEditBannerSubtitle(e.target.value);
+                        markDirty();
+                      }}
+                      placeholder="e.g. Valid until stocks last. Free delivery inside Dhaka."
+                      className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
+                    />
+                  </div>
 
                   <div className="grid grid-cols-2 gap-2">
-                    <input
-                      type="text"
-                      value={editBannerCtaText}
-                      onChange={(e) => {
-                        setEditBannerCtaText(e.target.value);
-                        markDirty();
-                      }}
-                      placeholder="Banner Button Text"
-                      className="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
-                    />
-                    <input
-                      type="text"
-                      value={editBannerCtaLink}
-                      onChange={(e) => {
-                        setEditBannerCtaLink(e.target.value);
-                        markDirty();
-                      }}
-                      placeholder="#services or whatsapp"
-                      className="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-mono"
-                    />
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                        CTA Button Label
+                      </label>
+                      <input
+                        type="text"
+                        value={editBannerCtaText}
+                        onChange={(e) => {
+                          setEditBannerCtaText(e.target.value);
+                          markDirty();
+                        }}
+                        placeholder="Shop Now"
+                        className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                        CTA Destination (#anchor / link)
+                      </label>
+                      <input
+                        type="text"
+                        value={editBannerCtaLink}
+                        onChange={(e) => {
+                          setEditBannerCtaLink(e.target.value);
+                          markDirty();
+                        }}
+                        placeholder="#services or whatsapp"
+                        className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-mono"
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
@@ -2243,7 +2613,7 @@ export const SubscribedWebsitePage: React.FC = () => {
 
                 {/* Add Section Buttons */}
                 <div className="flex flex-wrap gap-1.5">
-                  {(['highlights', 'testimonials', 'faq', 'banner', 'about'] as WebsiteSectionType[]).map(
+                  {(['highlights', 'testimonials', 'faq', 'banner', 'about', 'location'] as WebsiteSectionType[]).map(
                     (type) => (
                       <button
                         key={type}
@@ -2673,6 +3043,25 @@ export const SubscribedWebsitePage: React.FC = () => {
                             </button>
                             <button
                               type="button"
+                              onClick={() => {
+                                const nextFeatured = !p.isFeatured;
+                                void updateProduct(p.id, { isFeatured: nextFeatured });
+                              }}
+                              className={`p-1.5 rounded-lg cursor-pointer ${
+                                p.isFeatured
+                                  ? 'text-amber-500 hover:bg-amber-50 dark:hover:bg-amber-950/40'
+                                  : 'text-slate-300 hover:text-amber-500 hover:bg-slate-100 dark:hover:bg-slate-800'
+                              }`}
+                              title={
+                                p.isFeatured
+                                  ? 'Featured on storefront (click to unfeature)'
+                                  : 'Mark as Featured on storefront'
+                              }
+                            >
+                              <Star className={`w-4 h-4 ${p.isFeatured ? 'fill-amber-400' : ''}`} />
+                            </button>
+                            <button
+                              type="button"
                               onClick={() => openEditDbProductModal(p)}
                               className="p-1.5 rounded-lg text-slate-500 hover:text-blue-600 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
                               title="Edit product"
@@ -2797,13 +3186,54 @@ export const SubscribedWebsitePage: React.FC = () => {
               </div>
             )}
 
-            {/* TAB 4: THEME, COLORS, FONTS & LOGO */}
-            {editorTab === 'theme' && (
+            {/* TAB 1: BUSINESS INFO, BRANDING, THEME & DOMAIN */}
+            {editorTab === 'business' && (
               <div className="space-y-5">
+                <div className="space-y-3">
+                  <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                    Business Profile &amp; Core Identity
+                  </h3>
+
+                  <div>
+                    <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                      Business Name *
+                    </label>
+                    <input
+                      type="text"
+                      value={editBusinessName}
+                      onChange={(e) => {
+                        setEditBusinessName(e.target.value);
+                        markDirty();
+                      }}
+                      className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-semibold text-slate-900 dark:text-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                      Business Industry Category
+                    </label>
+                    <select
+                      value={editNiche}
+                      onChange={(e) => {
+                        setEditNiche(e.target.value as BusinessNiche);
+                        markDirty();
+                      }}
+                      className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
+                    >
+                      {CATEGORY_SPECS.map((cat) => (
+                        <option key={cat.id} value={cat.id}>
+                          {cat.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
                 {/* Business Logo Upload */}
-                <div className="space-y-2">
-                  <label className="block font-bold text-slate-900 dark:text-white text-sm">
-                    Business Logo
+                <div className="pt-4 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                  <label className="block font-bold text-slate-900 dark:text-white text-xs uppercase tracking-wider">
+                    Business Logo (Separate from Hero Cover)
                   </label>
                   {editLogoUrl ? (
                     <div className="flex items-center gap-4 p-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
@@ -2868,10 +3298,10 @@ export const SubscribedWebsitePage: React.FC = () => {
                   )}
                 </div>
 
-                {/* Palette Presets */}
-                <div className="space-y-2">
-                  <label className="block font-bold text-slate-900 dark:text-white text-sm">
-                    Theme Color Palette
+                {/* Theme Palette & Custom Colors */}
+                <div className="pt-4 border-t border-slate-200 dark:border-slate-800 space-y-3">
+                  <label className="block font-bold text-slate-900 dark:text-white text-xs uppercase tracking-wider">
+                    Storefront Color Palette &amp; Accents
                   </label>
                   <div className="grid grid-cols-2 gap-2">
                     {THEME_PALETTES.map((pal) => (
@@ -2904,78 +3334,77 @@ export const SubscribedWebsitePage: React.FC = () => {
                       </button>
                     ))}
                   </div>
-                </div>
 
-                {/* Custom Color Pickers */}
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block font-semibold text-slate-600 dark:text-slate-300 mb-1">
-                      Primary Accent Color
-                    </label>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="color"
-                        value={editBrandColor}
-                        onChange={(e) => {
-                          setEditBrandColor(e.target.value);
-                          setEditThemeSettings((prev) => ({
-                            ...prev,
-                            primaryColor: e.target.value,
-                          }));
-                          markDirty();
-                        }}
-                        className="w-8 h-8 rounded cursor-pointer border-0 p-0"
-                      />
-                      <input
-                        type="text"
-                        value={editBrandColor}
-                        onChange={(e) => {
-                          setEditBrandColor(e.target.value);
-                          markDirty();
-                        }}
-                        className="flex-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
-                      />
+                  <div className="grid grid-cols-2 gap-3 pt-2">
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                        Brand Primary Color
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="color"
+                          value={editBrandColor}
+                          onChange={(e) => {
+                            setEditBrandColor(e.target.value);
+                            setEditThemeSettings((prev) => ({
+                              ...prev,
+                              primaryColor: e.target.value,
+                            }));
+                            markDirty();
+                          }}
+                          className="w-8 h-8 rounded cursor-pointer border-0 p-0"
+                        />
+                        <input
+                          type="text"
+                          value={editBrandColor}
+                          onChange={(e) => {
+                            setEditBrandColor(e.target.value);
+                            markDirty();
+                          }}
+                          className="flex-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono text-xs"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                        Store Background
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="color"
+                          value={editThemeSettings.backgroundColor || '#FFFFFF'}
+                          onChange={(e) => {
+                            setEditThemeSettings((prev) => ({
+                              ...prev,
+                              backgroundColor: e.target.value,
+                            }));
+                            markDirty();
+                          }}
+                          className="w-8 h-8 rounded cursor-pointer border-0 p-0"
+                        />
+                        <input
+                          type="text"
+                          value={editThemeSettings.backgroundColor || '#FFFFFF'}
+                          onChange={(e) => {
+                            setEditThemeSettings((prev) => ({
+                              ...prev,
+                              backgroundColor: e.target.value,
+                            }));
+                            markDirty();
+                          }}
+                          className="flex-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono text-xs"
+                        />
+                      </div>
                     </div>
                   </div>
-
-                  <div>
-                    <label className="block font-semibold text-slate-600 dark:text-slate-300 mb-1">
-                      Page Background
-                    </label>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="color"
-                        value={editThemeSettings.backgroundColor || '#FFFFFF'}
-                        onChange={(e) => {
-                          setEditThemeSettings((prev) => ({
-                            ...prev,
-                            backgroundColor: e.target.value,
-                          }));
-                          markDirty();
-                        }}
-                        className="w-8 h-8 rounded cursor-pointer border-0 p-0"
-                      />
-                      <input
-                        type="text"
-                        value={editThemeSettings.backgroundColor || '#FFFFFF'}
-                        onChange={(e) => {
-                          setEditThemeSettings((prev) => ({
-                            ...prev,
-                            backgroundColor: e.target.value,
-                          }));
-                          markDirty();
-                        }}
-                        className="flex-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
-                      />
-                    </div>
-                  </div>
                 </div>
 
-                {/* Font Style & Button Radius */}
-                <div className="grid grid-cols-2 gap-3">
+                {/* Typography & Button Style */}
+                <div className="pt-4 border-t border-slate-200 dark:border-slate-800 grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                      Typography Style
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      Typography Font Family
                     </label>
                     <select
                       value={editThemeSettings.fontStyle || 'modern'}
@@ -2986,18 +3415,18 @@ export const SubscribedWebsitePage: React.FC = () => {
                         }));
                         markDirty();
                       }}
-                      className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
                     >
-                      <option value="modern">Modern Sans</option>
-                      <option value="editorial">Editorial Serif</option>
+                      <option value="modern">Modern Sans (Clean)</option>
+                      <option value="editorial">Editorial Serif (Luxury)</option>
                       <option value="bold">Bold Geometric</option>
                       <option value="minimal">Clean Minimal</option>
                     </select>
                   </div>
 
                   <div>
-                    <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                      Button Shape
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      Button Corner Shape
                     </label>
                     <select
                       value={editThemeSettings.buttonStyle || 'rounded'}
@@ -3008,133 +3437,18 @@ export const SubscribedWebsitePage: React.FC = () => {
                         }));
                         markDirty();
                       }}
-                      className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
                     >
-                      <option value="rounded">Rounded</option>
+                      <option value="rounded">Rounded Corners (8px)</option>
                       <option value="pill">Pill Capsule</option>
-                      <option value="sharp">Sharp Square</option>
+                      <option value="sharp">Sharp Square (0px)</option>
                     </select>
                   </div>
                 </div>
 
-                {/* Business Category */}
-                <div>
-                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                    Business Industry Category
-                  </label>
-                  <select
-                    value={editNiche}
-                    onChange={(e) => {
-                      setEditNiche(e.target.value as BusinessNiche);
-                      markDirty();
-                    }}
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
-                  >
-                    {CATEGORY_SPECS.map((cat) => (
-                      <option key={cat.id} value={cat.id}>
-                        {cat.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-            )}
-
-            {/* TAB 5: BUSINESS INFO, FOOTER LINKS & CUSTOM DOMAIN */}
-            {editorTab === 'business' && (
-              <div className="space-y-5">
-                <div className="space-y-3">
-                  <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                    Business Contact &amp; Footer Details
-                  </h3>
-                  <p className="text-[11px] text-slate-500">
-                    Optional fields left blank are automatically hidden from your website and footer.
-                  </p>
-
-                  <div>
-                    <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                      Business Name *
-                    </label>
-                    <input
-                      type="text"
-                      value={editBusinessName}
-                      onChange={(e) => {
-                        setEditBusinessName(e.target.value);
-                        markDirty();
-                      }}
-                      className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-semibold"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Phone Number
-                      </label>
-                      <input
-                        type="text"
-                        value={editPhone}
-                        onChange={(e) => {
-                          setEditPhone(e.target.value);
-                          markDirty();
-                        }}
-                        placeholder="+880 1..."
-                        className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
-                      />
-                    </div>
-                    <div>
-                      <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        WhatsApp Number
-                      </label>
-                      <input
-                        type="text"
-                        value={editWhatsapp}
-                        onChange={(e) => {
-                          setEditWhatsapp(e.target.value);
-                          markDirty();
-                        }}
-                        placeholder="+880 1..."
-                        className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                      Business Email
-                    </label>
-                    <input
-                      type="email"
-                      value={editEmail}
-                      onChange={(e) => {
-                        setEditEmail(e.target.value);
-                        markDirty();
-                      }}
-                      placeholder="contact@yourbusiness.com"
-                      className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                      Physical Address / Location
-                    </label>
-                    <input
-                      type="text"
-                      value={editAddress}
-                      onChange={(e) => {
-                        setEditAddress(e.target.value);
-                        markDirty();
-                      }}
-                      placeholder="e.g. House 14, Road 7, Dhanmondi, Dhaka"
-                      className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
-                    />
-                  </div>
-                </div>
-
-                {/* Social Media Links */}
+                {/* Social Profiles */}
                 <div className="pt-4 border-t border-slate-200 dark:border-slate-800 space-y-2.5">
-                  <h4 className="font-bold text-slate-900 dark:text-white">
+                  <h4 className="font-bold text-slate-900 dark:text-white text-xs uppercase tracking-wider">
                     Social Media Profiles
                   </h4>
                   <input
@@ -3145,7 +3459,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                       markDirty();
                     }}
                     placeholder="Facebook URL (https://facebook.com/...)"
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
+                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
                   />
                   <input
                     type="url"
@@ -3155,7 +3469,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                       markDirty();
                     }}
                     placeholder="Instagram URL (https://instagram.com/...)"
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
+                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
                   />
                   <input
                     type="url"
@@ -3165,7 +3479,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                       markDirty();
                     }}
                     placeholder="Twitter / X URL (https://x.com/...)"
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
+                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
                   />
                   <input
                     type="url"
@@ -3175,7 +3489,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                       markDirty();
                     }}
                     placeholder="LinkedIn URL (https://linkedin.com/...)"
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
+                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
                   />
                   <input
                     type="url"
@@ -3185,16 +3499,16 @@ export const SubscribedWebsitePage: React.FC = () => {
                       markDirty();
                     }}
                     placeholder="YouTube URL (https://youtube.com/...)"
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
+                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
                   />
                 </div>
 
-                {/* Custom Footer/Header Business Links */}
+                {/* Custom Business Links */}
                 <div className="pt-4 border-t border-slate-200 dark:border-slate-800 space-y-2.5">
                   <div className="flex items-center justify-between">
-                    <h4 className="font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
+                    <h4 className="font-bold text-slate-900 dark:text-white flex items-center gap-1.5 text-xs uppercase tracking-wider">
                       <Link2 className="w-3.5 h-3.5 text-blue-600" />
-                      <span>Custom Business Links</span>
+                      <span>Footer Policy &amp; Custom Links</span>
                     </h4>
                     <button
                       type="button"
@@ -3205,7 +3519,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                         ]);
                         markDirty();
                       }}
-                      className="text-blue-600 font-semibold hover:underline cursor-pointer"
+                      className="text-blue-600 font-semibold hover:underline cursor-pointer text-xs"
                     >
                       + Add Link
                     </button>
@@ -3224,7 +3538,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                           markDirty();
                         }}
                         placeholder="Label (e.g. Return Policy)"
-                        className="w-2/5 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
+                        className="w-2/5 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
                       />
                       <input
                         type="text"
@@ -3237,7 +3551,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                           markDirty();
                         }}
                         placeholder="https://..."
-                        className="flex-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
+                        className="flex-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono text-xs"
                       />
                       <button
                         type="button"
@@ -3245,7 +3559,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                           setEditCustomLinks((prev) => prev.filter((_, i) => i !== idx));
                           markDirty();
                         }}
-                        className="text-slate-400 hover:text-rose-600 cursor-pointer"
+                        className="text-slate-400 hover:text-rose-600 cursor-pointer p-1"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
@@ -3253,9 +3567,9 @@ export const SubscribedWebsitePage: React.FC = () => {
                   ))}
                 </div>
 
-                {/* Custom Domain Configuration */}
+                {/* Custom Domain */}
                 <div className="pt-4 border-t border-slate-200 dark:border-slate-800 space-y-2">
-                  <h4 className="font-bold text-slate-900 dark:text-white">
+                  <h4 className="font-bold text-slate-900 dark:text-white text-xs uppercase tracking-wider">
                     Optional Custom Domain
                   </h4>
                   <input
@@ -3266,7 +3580,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                       markDirty();
                     }}
                     placeholder="e.g. www.yourbusiness.com"
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
+                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono text-xs"
                   />
                   <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 text-[11px] text-slate-600 dark:text-slate-400 space-y-1">
                     <p>
@@ -3274,9 +3588,640 @@ export const SubscribedWebsitePage: React.FC = () => {
                       <code className="font-mono text-blue-600">{activeWebsite.fullDomainUrl}</code> + GoAMAAS Hosting.
                     </p>
                     <p>
-                      <strong>Custom Domain DNS:</strong> Point a <code className="font-mono">CNAME</code> record for <code className="font-mono">www</code> to <code className="font-mono">cname.amaas.xyz</code>. Domain registration is paid separately to your domain registrar.
+                      <strong>Custom Domain DNS:</strong> Point a <code className="font-mono">CNAME</code> record for <code className="font-mono">www</code> to <code className="font-mono">cname.amaas.xyz</code>.
                     </p>
                   </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 6: LOCATION & CONTACT */}
+            {editorTab === 'location' && (
+              <div className="space-y-5">
+                <div className="space-y-1">
+                  <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                    Location &amp; Direct Contact
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Connect your physical store or office with Google Maps so customers can easily find and navigate to you.
+                  </p>
+                </div>
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                      Physical Store / Office Address
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={editAddress}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setEditAddress(val);
+                        setEditThemeSettings((prev) => ({
+                          ...prev,
+                          location: {
+                            ...(prev.location || { mapsShareUrl: '', showMap: true }),
+                            address: val,
+                          },
+                        }));
+                        markDirty();
+                      }}
+                      placeholder="e.g. Level 4, Plot 12, Road 5, Block C, Banani, Dhaka 1213"
+                      className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white text-xs"
+                    />
+                  </div>
+
+                  {/* Google Maps Integration */}
+                  <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5">
+                        <MapPin className="w-4 h-4 text-rose-600" />
+                        <span className="font-bold text-slate-900 dark:text-white text-xs">
+                          Google Maps Location Link
+                        </span>
+                      </div>
+                      <label className="flex items-center gap-1.5 cursor-pointer text-[11px] text-slate-600 dark:text-slate-400 font-medium">
+                        <input
+                          type="checkbox"
+                          checked={editThemeSettings.location?.showMap !== false}
+                          onChange={(e) => {
+                            const checked = e.target.checked;
+                            setEditThemeSettings((prev) => ({
+                              ...prev,
+                              location: {
+                                ...(prev.location || { address: editAddress, mapsShareUrl: '' }),
+                                showMap: checked,
+                              },
+                            }));
+                            markDirty();
+                          }}
+                          className="rounded text-blue-600 focus:ring-blue-500"
+                        />
+                        <span>Show Map Card on Site</span>
+                      </label>
+                    </div>
+
+                    <div>
+                      <input
+                        type="url"
+                        value={editThemeSettings.location?.mapsShareUrl || ''}
+                        onChange={(e) => {
+                          const rawVal = e.target.value;
+                          const norm = validateAndNormalizeGoogleMapsUrl(rawVal);
+                          setEditThemeSettings((prev) => ({
+                            ...prev,
+                            location: {
+                              ...(prev.location || { address: editAddress, showMap: true }),
+                              mapsShareUrl: rawVal,
+                              latitude: norm.valid ? norm.latitude : undefined,
+                              longitude: norm.valid ? norm.longitude : undefined,
+                            },
+                          }));
+                          markDirty();
+                        }}
+                        placeholder="Paste Google Maps link (e.g. https://maps.app.goo.gl/...)"
+                        className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white font-mono text-xs"
+                      />
+                      <p className="text-[10px] text-slate-400 mt-1">
+                        Open Google Maps on phone or desktop, search your business location, tap Share, and copy the link.
+                      </p>
+                    </div>
+
+                    {/* Maps Validation Feedback */}
+                    {Boolean(editThemeSettings.location?.mapsShareUrl) && (() => {
+                      const res = validateAndNormalizeGoogleMapsUrl(editThemeSettings.location?.mapsShareUrl || '');
+                      const dirUrl = buildGoogleMapsDirectionsUrl({
+                        address: editAddress,
+                        mapsShareUrl: editThemeSettings.location?.mapsShareUrl,
+                        businessName: editBusinessName,
+                        latitude: editThemeSettings.location?.latitude,
+                        longitude: editThemeSettings.location?.longitude,
+                      });
+                      return (
+                        <div className="pt-2 border-t border-slate-200 dark:border-slate-700 flex flex-wrap items-center justify-between gap-2 text-xs">
+                          {res.valid ? (
+                            <div className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 font-medium">
+                              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                              <span>Valid Google Maps link detected</span>
+                              {res.latitude && res.longitude && (
+                                <span className="font-mono text-[10px] bg-emerald-50 dark:bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-200">
+                                  ({res.latitude.toFixed(4)}, {res.longitude.toFixed(4)})
+                                </span>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-1 text-amber-600 dark:text-amber-400 text-[11px]">
+                              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                              <span>{res.error || 'Enter a valid Google Maps URL'}</span>
+                            </div>
+                          )}
+
+                          <a
+                            href={dirUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 font-semibold hover:underline text-[11px]"
+                          >
+                            <Navigation className="w-3 h-3" />
+                            <span>Test Directions Link</span>
+                            <ExternalLink className="w-2.5 h-2.5" />
+                          </a>
+                        </div>
+                      );
+                    })()}
+                  </div>
+
+                  {/* Direct Contact Numbers & Email */}
+                  <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-3">
+                    <h4 className="font-bold text-slate-900 dark:text-white text-xs uppercase tracking-wider">
+                      Direct Customer Contact Channels
+                    </h4>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                          Phone Number
+                        </label>
+                        <input
+                          type="text"
+                          value={editPhone}
+                          onChange={(e) => {
+                            setEditPhone(e.target.value);
+                            markDirty();
+                          }}
+                          placeholder="+880 1..."
+                          className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono text-xs"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                          WhatsApp Number
+                        </label>
+                        <input
+                          type="text"
+                          value={editWhatsapp}
+                          onChange={(e) => {
+                            setEditWhatsapp(e.target.value);
+                            markDirty();
+                          }}
+                          placeholder="+880 1..."
+                          className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono text-xs"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                        Business Email Address
+                      </label>
+                      <input
+                        type="email"
+                        value={editEmail}
+                        onChange={(e) => {
+                          setEditEmail(e.target.value);
+                          markDirty();
+                        }}
+                        placeholder="contact@yourbusiness.com"
+                        className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 7: ANIMATION & EFFECTS */}
+            {editorTab === 'animations' && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                      Animation &amp; Interactive Effects
+                    </h3>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Tailor transition speeds, scroll reveals, and micro-interactions for a premium feel.
+                    </p>
+                  </div>
+                  <label className="flex items-center gap-1.5 cursor-pointer text-xs font-semibold text-slate-700 dark:text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={editThemeSettings.animations?.enabled !== false}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setEditThemeSettings((prev) => ({
+                          ...prev,
+                          animations: {
+                            ...(prev.animations || {
+                              intensity: 'normal',
+                              transitionSpeed: 'normal',
+                              reducedMotion: false,
+                              sectionReveal: 'fade-up',
+                              hoverEffect: 'lift',
+                              smoothScroll: true,
+                            }),
+                            enabled: checked,
+                          },
+                        }));
+                        markDirty();
+                      }}
+                      className="rounded text-blue-600 focus:ring-blue-500"
+                    />
+                    <span>{editThemeSettings.animations?.enabled !== false ? 'Animations On' : 'Animations Off'}</span>
+                  </label>
+                </div>
+
+                <div className="space-y-3.5">
+                  {/* Animation Intensity */}
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      Visual Intensity
+                    </label>
+                    <div className="grid grid-cols-3 gap-1.5 text-xs">
+                      {([
+                        { id: 'subtle', label: 'Subtle', desc: 'Gentle transitions' },
+                        { id: 'normal', label: 'Normal', desc: 'Balanced & modern' },
+                        { id: 'expressive', label: 'Expressive', desc: 'Prominent motion' },
+                      ] as const).map((it) => (
+                        <button
+                          key={it.id}
+                          type="button"
+                          onClick={() => {
+                            setEditThemeSettings((prev) => ({
+                              ...prev,
+                              animations: {
+                                ...(prev.animations || {
+                                  enabled: true,
+                                  transitionSpeed: 'normal',
+                                  reducedMotion: false,
+                                  sectionReveal: 'fade-up',
+                                  hoverEffect: 'lift',
+                                  smoothScroll: true,
+                                }),
+                                intensity: it.id,
+                              },
+                            }));
+                            markDirty();
+                          }}
+                          className={`p-2 rounded-lg border text-left cursor-pointer transition-colors ${
+                            (editThemeSettings.animations?.intensity || 'normal') === it.id
+                              ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/60 text-blue-900 dark:text-blue-100 font-bold'
+                              : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:bg-slate-50'
+                          }`}
+                        >
+                          <span className="block">{it.label}</span>
+                          <span className="text-[10px] text-slate-400 block font-normal">{it.desc}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Transition Speed */}
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      Global Transition Speed
+                    </label>
+                    <div className="grid grid-cols-3 gap-1.5 text-xs">
+                      {([
+                        { id: 'fast', label: 'Fast (0.3s)' },
+                        { id: 'normal', label: 'Normal (0.45s)' },
+                        { id: 'relaxed', label: 'Relaxed (0.75s)' },
+                      ] as const).map((sp) => (
+                        <button
+                          key={sp.id}
+                          type="button"
+                          onClick={() => {
+                            setEditThemeSettings((prev) => ({
+                              ...prev,
+                              animations: {
+                                ...(prev.animations || {
+                                  enabled: true,
+                                  intensity: 'normal',
+                                  reducedMotion: false,
+                                  sectionReveal: 'fade-up',
+                                  hoverEffect: 'lift',
+                                  smoothScroll: true,
+                                }),
+                                transitionSpeed: sp.id,
+                              },
+                            }));
+                            markDirty();
+                          }}
+                          className={`py-1.5 px-2 rounded-lg border font-semibold transition-colors cursor-pointer ${
+                            (editThemeSettings.animations?.transitionSpeed || 'normal') === sp.id
+                              ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300'
+                              : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                          }`}
+                        >
+                          {sp.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Section Reveal Style */}
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      Section Scroll Reveal Style
+                    </label>
+                    <div className="grid grid-cols-3 gap-1.5 text-xs">
+                      {([
+                        { id: 'fade-up', label: 'Fade Up' },
+                        { id: 'fade-in', label: 'Fade In' },
+                        { id: 'zoom-in', label: 'Zoom In' },
+                        { id: 'slide-left', label: 'Slide Left' },
+                        { id: 'slide-right', label: 'Slide Right' },
+                        { id: 'none', label: 'No Animation' },
+                      ] as const).map((rev) => (
+                        <button
+                          key={rev.id}
+                          type="button"
+                          onClick={() => {
+                            setEditThemeSettings((prev) => ({
+                              ...prev,
+                              animations: {
+                                ...(prev.animations || {
+                                  enabled: true,
+                                  intensity: 'normal',
+                                  transitionSpeed: 'normal',
+                                  reducedMotion: false,
+                                  hoverEffect: 'lift',
+                                  smoothScroll: true,
+                                }),
+                                sectionReveal: rev.id,
+                              },
+                            }));
+                            markDirty();
+                          }}
+                          className={`py-1.5 px-2 rounded-lg border capitalize font-semibold transition-colors cursor-pointer ${
+                            (editThemeSettings.animations?.sectionReveal || 'fade-up') === rev.id
+                              ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300'
+                              : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                          }`}
+                        >
+                          {rev.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Card & Button Hover Effect */}
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      Product Card &amp; Button Hover Effect
+                    </label>
+                    <div className="grid grid-cols-4 gap-1.5 text-xs">
+                      {([
+                        { id: 'lift', label: 'Smooth Lift' },
+                        { id: 'scale', label: 'Subtle Scale' },
+                        { id: 'glow', label: 'Ring Glow' },
+                        { id: 'none', label: 'Static' },
+                      ] as const).map((hov) => (
+                        <button
+                          key={hov.id}
+                          type="button"
+                          onClick={() => {
+                            setEditThemeSettings((prev) => ({
+                              ...prev,
+                              animations: {
+                                ...(prev.animations || {
+                                  enabled: true,
+                                  intensity: 'normal',
+                                  transitionSpeed: 'normal',
+                                  reducedMotion: false,
+                                  sectionReveal: 'fade-up',
+                                  smoothScroll: true,
+                                }),
+                                hoverEffect: hov.id,
+                              },
+                            }));
+                            markDirty();
+                          }}
+                          className={`py-1.5 px-2 rounded-lg border font-semibold transition-colors cursor-pointer ${
+                            (editThemeSettings.animations?.hoverEffect || 'lift') === hov.id
+                              ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300'
+                              : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                          }`}
+                        >
+                          {hov.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Smooth Scroll & Reduced Motion */}
+                  <div className="pt-2 border-t border-slate-200 dark:border-slate-700 space-y-2">
+                    <label className="flex items-center justify-between p-2.5 rounded-lg border border-slate-200 dark:border-slate-700 cursor-pointer">
+                      <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                        Smooth Page Scrolling
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={editThemeSettings.animations?.smoothScroll !== false}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setEditThemeSettings((prev) => ({
+                            ...prev,
+                            animations: {
+                              ...(prev.animations || {
+                                enabled: true,
+                                intensity: 'normal',
+                                transitionSpeed: 'normal',
+                                reducedMotion: false,
+                                sectionReveal: 'fade-up',
+                                hoverEffect: 'lift',
+                              }),
+                              smoothScroll: checked,
+                            },
+                          }));
+                          markDirty();
+                        }}
+                        className="rounded text-blue-600 focus:ring-blue-500"
+                      />
+                    </label>
+
+                    <label className="flex items-center justify-between p-2.5 rounded-lg border border-slate-200 dark:border-slate-700 cursor-pointer">
+                      <div>
+                        <span className="text-xs font-semibold text-slate-700 dark:text-slate-300 block">
+                          Honor Prefers-Reduced-Motion
+                        </span>
+                        <span className="text-[10px] text-slate-400 block">
+                          Disables animations for users with vestibular motion sensitivity
+                        </span>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={editThemeSettings.animations?.reducedMotion === true}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setEditThemeSettings((prev) => ({
+                            ...prev,
+                            animations: {
+                              ...(prev.animations || {
+                                enabled: true,
+                                intensity: 'normal',
+                                transitionSpeed: 'normal',
+                                sectionReveal: 'fade-up',
+                                hoverEffect: 'lift',
+                                smoothScroll: true,
+                              }),
+                              reducedMotion: checked,
+                            },
+                          }));
+                          markDirty();
+                        }}
+                        className="rounded text-blue-600 focus:ring-blue-500"
+                      />
+                    </label>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 8: PREVIEW & PUBLISH */}
+            {editorTab === 'publish' && (
+              <div className="space-y-4">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                    Preview &amp; Publish Website
+                  </h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Review your live status, test on mobile/desktop, and publish changes to your live storefront.
+                  </p>
+                </div>
+
+                {/* Device Switcher */}
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 flex items-center justify-between">
+                  <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                    Preview Mode:
+                  </span>
+                  <div className="inline-flex p-1 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setPreviewDevice('desktop')}
+                      className={`px-3 py-1 rounded-md flex items-center gap-1.5 cursor-pointer ${
+                        previewDevice === 'desktop'
+                          ? 'bg-blue-50 text-blue-700 font-bold dark:bg-blue-950 dark:text-blue-300'
+                          : 'text-slate-500 hover:text-slate-800 dark:hover:text-white'
+                      }`}
+                    >
+                      <Monitor className="w-3.5 h-3.5" />
+                      <span>Desktop</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPreviewDevice('mobile')}
+                      className={`px-3 py-1 rounded-md flex items-center gap-1.5 cursor-pointer ${
+                        previewDevice === 'mobile'
+                          ? 'bg-blue-50 text-blue-700 font-bold dark:bg-blue-950 dark:text-blue-300'
+                          : 'text-slate-500 hover:text-slate-800 dark:hover:text-white'
+                      }`}
+                    >
+                      <Smartphone className="w-3.5 h-3.5" />
+                      <span>Mobile</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Live Domain Card */}
+                <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 space-y-2.5">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 block">
+                    Public Storefront URL
+                  </span>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 font-mono text-xs font-bold text-slate-900 dark:text-white truncate">
+                      <Globe className="w-4 h-4 text-emerald-500 shrink-0" />
+                      <span className="truncate">https://{activeWebsite.fullDomainUrl}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleCopyLink}
+                      className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 cursor-pointer"
+                      title="Copy link"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px]">
+                    <span
+                      className={`px-2 py-0.5 rounded-full font-bold uppercase tracking-wider text-[10px] ${
+                        isLive
+                          ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
+                          : isSuspended
+                          ? 'bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300'
+                          : 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
+                      }`}
+                    >
+                      {isLive ? '● Live' : isSuspended ? '● Suspended' : '● Unpublished'}
+                    </span>
+                    <span className="text-slate-500">
+                      Payment: <strong className="text-slate-700 dark:text-slate-300 capitalize">{activeWebsite.paymentStatus}</strong>
+                    </span>
+                    <span className="text-slate-500">
+                      Subscription: <strong className="text-slate-700 dark:text-slate-300 capitalize">{activeWebsite.subscriptionStatus.replace('_', ' ')}</strong>
+                    </span>
+                  </div>
+                </div>
+
+                {/* Unsaved Edits Indicator */}
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`w-2.5 h-2.5 rounded-full ${
+                        isDirty
+                          ? 'bg-amber-500 animate-pulse'
+                          : activeWebsite.hasUnpublishedDraft
+                          ? 'bg-blue-500'
+                          : 'bg-emerald-500'
+                      }`}
+                    />
+                    <span className="font-medium text-slate-700 dark:text-slate-300">
+                      {isDirty
+                        ? 'You have unsaved changes in preview'
+                        : activeWebsite.hasUnpublishedDraft
+                        ? 'Staged draft saved (ready to publish)'
+                        : isLive
+                        ? 'All changes are currently live'
+                        : 'Saved to draft'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Primary Action Buttons */}
+                <div className="space-y-2 pt-2">
+                  <button
+                    type="button"
+                    disabled={isPublishing || isSavingDraft}
+                    onClick={() => void handlePublishUpdatesClick()}
+                    className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-sm shadow-md inline-flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                  >
+                    {isPublishing ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Sparkles className="w-4 h-4 text-amber-300" />
+                    )}
+                    <span>
+                      {isLive
+                        ? 'Publish Updates to Live Website'
+                        : isPublishEligible
+                        ? 'Publish Website Live Now'
+                        : 'Save & Publish Website'}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isSavingDraft || isPublishing}
+                    onClick={() => void handleSaveDraftClick()}
+                    className="w-full py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-750 text-slate-800 dark:text-white font-semibold text-xs inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  >
+                    {isSavingDraft ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Save className="w-3.5 h-3.5 text-blue-600" />
+                    )}
+                    <span>Save Changes as Draft</span>
+                  </button>
                 </div>
               </div>
             )}
