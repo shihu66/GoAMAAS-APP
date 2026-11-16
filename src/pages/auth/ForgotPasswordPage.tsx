@@ -3,11 +3,12 @@ import { Link } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
 import { useLanguage, usePageSeo } from '../../context/LanguageContext';
 import { LanguageSwitcher } from '../../components/ui/LanguageSwitcher';
+import { ThemeSelector } from '../../components/ui/ThemeSelector';
 import { isSupabaseConfigured, getSupabaseConfigStatus } from '../../lib/supabase';
-import { Mail, ArrowLeft, CheckCircle2, AlertCircle, Loader2, Info, X, Sun, Moon } from 'lucide-react';
+import { Mail, ArrowLeft, CheckCircle2, AlertCircle, Loader2, Info, X } from 'lucide-react';
 
 export const ForgotPasswordPage: React.FC = () => {
-  const { requestPasswordReset, theme, toggleTheme } = useApp();
+  const { requestPasswordReset } = useApp();
   const { t } = useLanguage();
   const a = t.auth;
   const fg = t.auth.forgot;
@@ -48,7 +49,7 @@ export const ForgotPasswordPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col transition-colors">
+    <div className="min-h-screen bg-[#F8FAFC] dark:bg-[#0B0F17] text-slate-900 dark:text-slate-100 flex flex-col transition-colors">
       {/* Minimal Auth Top Utility Bar */}
       <header className="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
         <Link
@@ -61,15 +62,7 @@ export const ForgotPasswordPage: React.FC = () => {
 
         <div className="flex items-center gap-2">
           <LanguageSwitcher size="sm" />
-          <button
-            type="button"
-            onClick={toggleTheme}
-            aria-label={t.nav.toggleTheme}
-            title={t.nav.toggleTheme}
-            className="min-h-[38px] min-w-[38px] inline-flex items-center justify-center rounded-xl text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors cursor-pointer"
-          >
-            {theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
-          </button>
+          <ThemeSelector compact />
         </div>
       </header>
 
@@ -92,7 +85,7 @@ export const ForgotPasswordPage: React.FC = () => {
         </div>
 
         <div className="mt-7 sm:mx-auto sm:w-full sm:max-w-md">
-          <div className="bg-slate-50/70 dark:bg-slate-900/80 py-8 px-6 sm:px-9 border border-slate-200/90 dark:border-slate-800 rounded-2xl space-y-6">
+          <div className="bg-white dark:bg-[#111827] py-8 px-6 sm:px-9 border border-slate-200/90 dark:border-slate-800 rounded-2xl shadow-sm space-y-6">
             {errorMessage && (
               <div className="p-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 flex items-start gap-2.5 text-xs text-rose-700 dark:text-rose-300">
                 <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />

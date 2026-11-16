@@ -18,6 +18,7 @@ import {
   Mail,
   AlertCircle,
   HelpCircle,
+  Loader2,
 } from 'lucide-react';
 import { Modal } from '../../components/ui/Modal';
 import { TrialStatusBadge } from '../../components/ui/TrialStatusBadge';
@@ -182,8 +183,8 @@ export const AutomationsPage: React.FC = () => {
                   key={auto.id}
                   className={`p-6 rounded-2xl border transition-all flex flex-col justify-between space-y-4 shadow-xs ${
                     isActive
-                      ? 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800'
-                      : 'bg-slate-50 dark:bg-slate-900/40 border-dashed border-slate-300 dark:border-slate-800 opacity-75'
+                      ? 'bg-white dark:bg-[#111827] border-slate-200/90 dark:border-slate-800'
+                      : 'bg-slate-50 dark:bg-[#111827]/40 border-dashed border-slate-300 dark:border-slate-800 opacity-75'
                   }`}
                 >
                   <div className="space-y-3">
@@ -281,7 +282,7 @@ export const AutomationsPage: React.FC = () => {
         </div>
       ) : (
         /* VIEW 2: Interactive Chatbot Simulator */
-        <div className="max-w-2xl mx-auto rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden shadow-xl">
+        <div className="max-w-2xl mx-auto rounded-2xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-[#111827] overflow-hidden shadow-xl">
           {/* Chat Header */}
           <div className="p-4 bg-slate-900 text-white flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -291,7 +292,7 @@ export const AutomationsPage: React.FC = () => {
               <div>
                 <h3 className="font-bold text-sm">GoAMAAS Conversational AI</h3>
                 <span className="text-[10px] text-emerald-400 font-mono">
-                  Online · Demo Sandbox Simulation
+                  Online · Interactive Simulator
                 </span>
               </div>
             </div>
@@ -305,7 +306,7 @@ export const AutomationsPage: React.FC = () => {
                   },
                 ]);
               }}
-              className="text-xs text-slate-400 hover:text-white"
+              className="text-xs text-slate-400 hover:text-white cursor-pointer"
             >
               Reset Chat
             </button>
@@ -334,29 +335,29 @@ export const AutomationsPage: React.FC = () => {
             ))}
             {isBotTyping && (
               <div className="flex items-center gap-1.5 text-xs text-slate-400 italic">
-                <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
-                <span>AI Bot is typing smart response...</span>
+                <Loader2 className="w-3.5 h-3.5 text-blue-500 animate-spin" />
+                <span>AI Bot is typing response...</span>
               </div>
             )}
           </div>
 
           {/* Quick Question Prompts */}
-          <div className="p-2 border-t border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-center gap-1.5 overflow-x-auto text-[11px]">
+          <div className="p-2 border-t border-slate-100 dark:border-slate-800 bg-white dark:bg-[#111827] flex items-center gap-1.5 overflow-x-auto text-[11px]">
             <button
               onClick={() => setUserInput('How much for the Oxford shirt?')}
-              className="px-2.5 py-1 rounded-full bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 whitespace-nowrap"
+              className="px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 whitespace-nowrap cursor-pointer"
             >
               "How much for the shirt?"
             </button>
             <button
               onClick={() => setUserInput('What is your delivery fee in Dhaka?')}
-              className="px-2.5 py-1 rounded-full bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 whitespace-nowrap"
+              className="px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 whitespace-nowrap cursor-pointer"
             >
               "Delivery charge in Dhaka?"
             </button>
             <button
               onClick={() => setUserInput('Can I return if the size does not fit?')}
-              className="px-2.5 py-1 rounded-full bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 whitespace-nowrap"
+              className="px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 whitespace-nowrap cursor-pointer"
             >
               "Return policy?"
             </button>

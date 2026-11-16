@@ -19,6 +19,8 @@ import {
 } from 'lucide-react';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
+import { EmptyState } from '../../components/ui/EmptyState';
+import { StatusBadge } from '../../components/ui/StatusBadge';
 
 export const CustomersPage: React.FC = () => {
   const { customers, addCustomer, updateCustomer, deleteCustomer, addCustomerNote } = useApp();
@@ -146,9 +148,9 @@ export const CustomersPage: React.FC = () => {
       </div>
 
       {/* Search and Filters */}
-      <div className="p-4 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col md:flex-row items-center justify-between gap-3 text-xs">
+      <div className="p-4 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs flex flex-col md:flex-row items-center justify-between gap-3 text-xs">
         <div className="relative w-full md:w-80">
-          <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5 pointer-events-none" />
+          <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-3 pointer-events-none" />
           <input
             type="text"
             value={search}
@@ -157,7 +159,7 @@ export const CustomersPage: React.FC = () => {
               setCurrentPage(1);
             }}
             placeholder="Search by name, phone, email, or city..."
-            className="w-full pl-9 pr-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-hidden focus:ring-1 focus:ring-blue-500"
+            className="w-full min-h-[38px] pl-9 pr-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-hidden focus:ring-1 focus:ring-blue-500"
           />
         </div>
 
@@ -169,7 +171,7 @@ export const CustomersPage: React.FC = () => {
               setSelectedTag(e.target.value);
               setCurrentPage(1);
             }}
-            className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-hidden"
+            className="min-h-[36px] px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-hidden"
           >
             <option value="all">All Shoppers</option>
             <option value="vip">VIP High Spenders</option>
@@ -182,32 +184,31 @@ export const CustomersPage: React.FC = () => {
 
       {/* Customers Table */}
       {customers.length === 0 ? (
-        <div className="p-12 text-center rounded-xl bg-white dark:bg-slate-900 border border-dashed border-slate-200 dark:border-slate-800 space-y-3">
-          <Users className="w-10 h-10 text-slate-400 mx-auto" />
-          <h3 className="text-base font-bold text-slate-900 dark:text-white">No customer records yet</h3>
-          <p className="text-xs text-slate-500 max-w-sm mx-auto">
-            Your customer CRM will populate automatically as shoppers place orders, or you can manually add a customer profile now.
-          </p>
-          <div className="pt-2">
-            <button
-              onClick={handleOpenAdd}
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-xs transition-colors"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Add First Customer</span>
-            </button>
-          </div>
-        </div>
+        <EmptyState
+          icon={Users}
+          title="No customer records yet"
+          description="Your customer directory fills automatically as shoppers place orders, or you can add a customer manually."
+          primaryAction={{
+            label: 'Add First Customer',
+            onClick: handleOpenAdd,
+            icon: Plus,
+          }}
+        />
       ) : paginatedCustomers.length === 0 ? (
-        <div className="p-12 text-center rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3">
-          <Search className="w-10 h-10 text-slate-400 mx-auto" />
-          <h3 className="text-base font-bold text-slate-900 dark:text-white">No matching customer profiles</h3>
-          <p className="text-xs text-slate-500 max-w-sm mx-auto">
-            No customers match your active search "{search}" or tag filter. Try resetting your filters.
-          </p>
-        </div>
+        <EmptyState
+          icon={Search}
+          title="No matching customers"
+          description={`No customers match "${search}" or your selected filter.`}
+          primaryAction={{
+            label: 'Reset Filters',
+            onClick: () => {
+              setSearch('');
+              setSelectedTag('all');
+            },
+          }}
+        />
       ) : (
-        <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
+        <div className="rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
               <thead className="bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 font-semibold">
@@ -246,24 +247,14 @@ export const CustomersPage: React.FC = () => {
                       ৳{c.totalSpent.toLocaleString()}
                     </td>
                     <td className="py-3.5 px-4">
-                      <div className="flex flex-wrap gap-1">
-                        <span
-                          className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${
-                            c.status === 'vip'
-                              ? 'bg-purple-100 text-purple-800 dark:bg-purple-950/60 dark:text-purple-400'
-                              : c.status === 'active'
-                              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400'
-                              : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-400'
-                          }`}
-                        >
-                          {c.status}
-                        </span>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <StatusBadge
+                          tone={c.status === 'vip' ? 'info' : c.status === 'active' ? 'approved' : 'neutral'}
+                          label={c.status.toUpperCase()}
+                        />
                         {c.tags.slice(0, 2).map((t, idx) => (
-                          <span
-                            key={idx}
-                            className="inline-block px-1.5 py-0.5 rounded text-[10px] bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300"
-                          >
-                            {t}
+                          <span key={idx} className="text-[11px] text-slate-500 dark:text-slate-400">
+                            · {t}
                           </span>
                         ))}
                       </div>

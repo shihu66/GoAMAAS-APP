@@ -28,6 +28,7 @@ import {
 } from '../../lib/adminSecurity';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
+import { EmptyState } from '../../components/ui/EmptyState';
 import { WebsitePreviewRenderer } from '../../components/website/WebsitePreviewRenderer';
 import { PaymentReceiptModal } from '../../components/payment/PaymentReceiptModal';
 import {
@@ -1387,15 +1388,11 @@ export const AdminDashboardPage: React.FC = () => {
             </div>
 
             {urgentOverviewPayments.length === 0 ? (
-              <div className="p-8 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-center space-y-1.5">
-                <CheckCircle2 className="w-6 h-6 text-emerald-600 dark:text-emerald-400 mx-auto" />
-                <p className="text-sm font-semibold text-slate-900 dark:text-white">
-                  All payment requests are verified
-                </p>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  New bKash, Nagad, and Bank Transfer submissions will appear here immediately.
-                </p>
-              </div>
+              <EmptyState
+                icon={CheckCircle2}
+                title="All payment requests are verified"
+                description="New bKash, Nagad, and Bank Transfer submissions will appear here immediately."
+              />
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 {urgentOverviewPayments.map((req) => renderMobilePaymentCard(req))}
@@ -1490,19 +1487,19 @@ export const AdminDashboardPage: React.FC = () => {
           </div>
 
           {filteredPaymentRequests.length === 0 ? (
-            <div className="p-10 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-center space-y-2">
-              <CreditCard className="w-7 h-7 text-slate-400 mx-auto" />
-              <p className="text-sm font-semibold text-slate-900 dark:text-white">
-                {paymentSearch.trim()
+            <EmptyState
+              icon={CreditCard}
+              title={
+                paymentSearch.trim()
                   ? `No payment requests match "${paymentSearch.trim()}"`
-                  : `No ${paymentFilter.replace('_', ' ')} payment requests`}
-              </p>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                {paymentSearch.trim()
+                  : `No ${paymentFilter.replace('_', ' ')} payment requests`
+              }
+              description={
+                paymentSearch.trim()
                   ? 'Clear your search query or select All to view every submission.'
-                  : 'Incoming bKash, Nagad, and Bank Transfer submissions appear here automatically.'}
-              </p>
-            </div>
+                  : 'Incoming bKash, Nagad, and Bank Transfer submissions appear here automatically.'
+              }
+            />
           ) : (
             <>
               {/* Mobile Cards (< 1024px) */}
@@ -1511,7 +1508,7 @@ export const AdminDashboardPage: React.FC = () => {
               </div>
 
               {/* Desktop Table (>= 1024px) */}
-              <div className="hidden lg:block bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden">
+              <div className="hidden lg:block bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden">
                 <div className="overflow-x-auto">
                   <table className="w-full text-left text-xs">
                     <thead className="bg-slate-50 dark:bg-slate-950 text-slate-500 dark:text-slate-400 font-semibold border-b border-slate-200 dark:border-slate-800">
@@ -1829,12 +1826,11 @@ export const AdminDashboardPage: React.FC = () => {
           </div>
 
           {filteredWebsites.length === 0 ? (
-            <div className="p-10 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-center space-y-2">
-              <Globe className="w-7 h-7 text-slate-400 mx-auto" />
-              <p className="text-sm font-semibold text-slate-900 dark:text-white">
-                No websites match your filter
-              </p>
-            </div>
+            <EmptyState
+              icon={Globe}
+              title="No websites match your filter"
+              description="Try clearing the search query or create a new client website."
+            />
           ) : (
             <>
               {/* Mobile Website Cards (< 1024px) */}
@@ -1973,7 +1969,7 @@ export const AdminDashboardPage: React.FC = () => {
               </div>
 
               {/* Desktop Websites Table (>= 1024px) */}
-              <div className="hidden lg:block rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 overflow-hidden text-xs">
+              <div className="hidden lg:block rounded-2xl bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 overflow-hidden text-xs">
                 <table className="w-full text-left">
                   <thead className="bg-slate-50 dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 font-semibold">
                     <tr>
@@ -2221,11 +2217,14 @@ export const AdminDashboardPage: React.FC = () => {
           </div>
 
           {customerSubTab === 'stores' && (
-            <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 overflow-hidden text-xs">
+            <div className="rounded-2xl bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 overflow-hidden text-xs">
               {filteredStores.length === 0 ? (
-                <div className="p-8 text-center text-slate-500 dark:text-slate-400">
-                  <Store className="w-6 h-6 mx-auto mb-2 text-slate-400" />
-                  No registered merchant stores found.
+                <div className="p-4">
+                  <EmptyState
+                    icon={Store}
+                    title="No registered merchant stores found"
+                    description="Merchant stores appear automatically when users complete onboarding."
+                  />
                 </div>
               ) : (
                 <div className="overflow-x-auto">
@@ -2270,10 +2269,14 @@ export const AdminDashboardPage: React.FC = () => {
           )}
 
           {customerSubTab === 'requests' && (
-            <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 overflow-hidden text-xs">
+            <div className="rounded-2xl bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 overflow-hidden text-xs">
               {filteredBespokeRequests.length === 0 ? (
-                <div className="p-8 text-center text-slate-500 dark:text-slate-400">
-                  No bespoke website development inquiries recorded.
+                <div className="p-4">
+                  <EmptyState
+                    icon={Globe}
+                    title="No bespoke website inquiries"
+                    description="Custom website development briefs submitted by clients will appear here."
+                  />
                 </div>
               ) : (
                 <div className="overflow-x-auto">
@@ -2339,10 +2342,14 @@ export const AdminDashboardPage: React.FC = () => {
           )}
 
           {customerSubTab === 'invoices' && (
-            <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 overflow-hidden text-xs">
+            <div className="rounded-2xl bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 overflow-hidden text-xs">
               {invoices.length === 0 ? (
-                <div className="p-8 text-center text-slate-500 dark:text-slate-400">
-                  No subscription invoices recorded in this session.
+                <div className="p-4">
+                  <EmptyState
+                    icon={FileText}
+                    title="No subscription invoices recorded"
+                    description="Invoices generated during this session will appear here."
+                  />
                 </div>
               ) : (
                 <div className="overflow-x-auto">

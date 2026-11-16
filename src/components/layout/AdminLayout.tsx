@@ -7,8 +7,6 @@ import {
   Users,
   Sliders,
   ShieldCheck,
-  Sun,
-  Moon,
   LogOut,
   WifiOff,
 } from 'lucide-react';
@@ -19,10 +17,11 @@ import {
   AdminPWAInstallPrompt,
 } from '../admin/AdminPWAInstallBanner';
 import { ToastContainer } from '../ui/Toast';
+import { ThemeSelector } from '../ui/ThemeSelector';
 
 export const AdminLayout: React.FC = () => {
   const location = useLocation();
-  const { theme, toggleTheme, paymentRequests } = useApp();
+  const { theme, paymentRequests } = useApp();
   const { verifiedAdmin, isOnline, secureSignOut } = useAdminSecurity();
 
   const pendingCount = useMemo(
@@ -101,12 +100,12 @@ export const AdminLayout: React.FC = () => {
     navItems.find((item) => isPathActive(item.path, item.exact)) || navItems[0];
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex antialiased">
+    <div className="min-h-screen bg-slate-50 dark:bg-[#0B0F17] text-slate-900 dark:text-slate-100 flex antialiased">
       <ToastContainer />
       <AdminPWAInstallPrompt theme={theme} />
 
       {/* Desktop Left Sidebar (256px, hidden on mobile/tablet) */}
-      <aside className="hidden lg:flex lg:w-64 lg:flex-col lg:fixed lg:inset-y-0 border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 z-30">
+      <aside className="hidden lg:flex lg:w-64 lg:flex-col lg:fixed lg:inset-y-0 border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-[#111827] z-30">
         {/* Single-line Brand Wordmark */}
         <div className="h-14 px-5 border-b border-slate-200 dark:border-slate-800 flex items-center gap-2.5 shrink-0">
           <img
@@ -225,14 +224,7 @@ export const AdminLayout: React.FC = () => {
 
             <AdminPWAInstallButton theme={theme} variant="compact" />
 
-            <button
-              type="button"
-              onClick={toggleTheme}
-              className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-xl text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
-              aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`}
-            >
-              {theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
-            </button>
+            <ThemeSelector compact />
 
             <button
               type="button"

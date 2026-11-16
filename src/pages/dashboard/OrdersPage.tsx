@@ -22,6 +22,9 @@ import {
   Loader2,
 } from 'lucide-react';
 import { Modal } from '../../components/ui/Modal';
+import { EmptyState } from '../../components/ui/EmptyState';
+import { StatusBadge } from '../../components/ui/StatusBadge';
+import { TableSkeleton } from '../../components/ui/Skeleton';
 
 const DELIVERY_METHOD_LABELS: Record<string, string> = {
   inside_dhaka: 'Inside Dhaka Courier',
@@ -42,7 +45,7 @@ export const OrdersPage: React.FC = () => {
     products,
     showToast,
   } = useApp();
-  const { lang } = useLanguage();
+  const { lang, t } = useLanguage();
 
   const [search, setSearch] = useState('');
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
@@ -403,9 +406,9 @@ export const OrdersPage: React.FC = () => {
       </div>
 
       {/* Filter and Search Bar */}
-      <div className="p-4 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3 text-xs">
+      <div className="p-4 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3 text-xs">
         <div className="relative w-full lg:w-80">
-          <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5 pointer-events-none" />
+          <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-3 pointer-events-none" />
           <input
             type="text"
             value={search}
@@ -414,7 +417,7 @@ export const OrdersPage: React.FC = () => {
               setCurrentPage(1);
             }}
             placeholder="Search Order ID, phone, customer, or city..."
-            className="w-full pl-9 pr-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-hidden focus:ring-1 focus:ring-blue-500"
+            className="w-full min-h-[38px] pl-9 pr-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-hidden focus:ring-1 focus:ring-blue-500"
           />
         </div>
 
@@ -427,7 +430,7 @@ export const OrdersPage: React.FC = () => {
                 setSelectedDateRange(e.target.value as any);
                 setCurrentPage(1);
               }}
-              className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-hidden"
+              className="min-h-[36px] px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-hidden"
             >
               <option value="all">All Dates</option>
               <option value="today">Today</option>
@@ -444,7 +447,7 @@ export const OrdersPage: React.FC = () => {
                 setSelectedSource(e.target.value as any);
                 setCurrentPage(1);
               }}
-              className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-hidden"
+              className="min-h-[36px] px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-hidden"
             >
               <option value="all">All Channels</option>
               <option value="website">Public Website</option>
@@ -460,7 +463,7 @@ export const OrdersPage: React.FC = () => {
                 setSelectedPaymentStatus(e.target.value);
                 setCurrentPage(1);
               }}
-              className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-hidden"
+              className="min-h-[36px] px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-hidden"
             >
               <option value="all">All Payments</option>
               <option value="paid">Paid</option>
@@ -473,40 +476,151 @@ export const OrdersPage: React.FC = () => {
 
       {/* Orders Table / Loading / Empty */}
       {isOrdersLoading && orders.length === 0 ? (
-        <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-8 flex flex-col items-center justify-center gap-2 text-xs text-slate-500">
-          <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
-          <span>Loading store orders from server...</span>
-        </div>
+        <TableSkeleton rows={5} />
       ) : orders.length === 0 ? (
-        <div className="p-12 text-center rounded-xl bg-white dark:bg-slate-900 border border-dashed border-slate-200 dark:border-slate-800 space-y-3">
-          <ShoppingCart className="w-10 h-10 text-slate-400 mx-auto" />
-          <h3 className="text-base font-bold text-slate-900 dark:text-white">No orders yet</h3>
-          <p className="text-xs text-slate-500 max-w-sm mx-auto">
-            Customer orders placed on your published GoAMAAS Website appear here automatically, or you can record phone/DM orders manually.
-          </p>
-          <div className="pt-2">
-            <button
-              onClick={() => setIsCreateModalOpen(true)}
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Create Manual Order</span>
-            </button>
-          </div>
-        </div>
+        <EmptyState
+          icon={ShoppingCart}
+          title={t.workspace.orders.emptyTitle}
+          description={t.workspace.orders.emptyDesc}
+          primaryAction={{
+            label: t.workspace.orders.emptyCta,
+            onClick: () => {
+              if (orderableProducts[0] && !newOrderProduct) {
+                setNewOrderProduct(orderableProducts[0].id);
+              }
+              setIsCreateModalOpen(true);
+            },
+            icon: Plus,
+          }}
+        />
       ) : paginatedOrders.length === 0 ? (
-        <div className="p-12 text-center rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3">
-          <ShoppingCart className="w-10 h-10 text-slate-400 mx-auto" />
-          <h3 className="text-base font-bold text-slate-900 dark:text-white">
-            No orders matching filter
-          </h3>
-          <p className="text-xs text-slate-500 max-w-sm mx-auto">
-            Try resetting your status tab, date range, or search query.
-          </p>
-        </div>
+        <EmptyState
+          icon={Search}
+          title={lang === 'bn' ? 'কোনো অর্ডার পাওয়া যায়নি' : 'No matching orders found'}
+          description={
+            lang === 'bn'
+              ? 'ফিল্টার বা সার্চ পরিবর্তন করে আবার চেষ্টা করুন।'
+              : 'Try resetting your status tab, date range, or search query.'
+          }
+          primaryAction={{
+            label: lang === 'bn' ? 'সব অর্ডার দেখুন' : 'Reset Filters',
+            onClick: () => {
+              setSearch('');
+              setSelectedStatus('all');
+              setSelectedPaymentStatus('all');
+              setSelectedSource('all');
+              setSelectedDateRange('all');
+            },
+          }}
+        />
       ) : (
-        <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
-          <div className="overflow-x-auto">
+        <div className="rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs overflow-hidden">
+          {/* Mobile Order Cards */}
+          <div className="md:hidden divide-y divide-slate-100 dark:divide-slate-800">
+            {paginatedOrders.map((o) => {
+              const meta = extractOrderMetadataFromItems(o.items);
+              const siteSubdomain = o.websiteSubdomain || meta.websiteSubdomain;
+              const isWebsiteOrder =
+                meta.orderSource === 'public_website' || Boolean(siteSubdomain);
+
+              return (
+                <div key={`mob-${o.id}`} className="p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedOrderId(o.id);
+                          setIsDetailModalOpen(true);
+                        }}
+                        className="font-mono font-bold text-sm text-blue-600 dark:text-blue-400 hover:underline text-left cursor-pointer"
+                      >
+                        {o.orderNumber}
+                      </button>
+                      <p className="text-xs font-semibold text-slate-900 dark:text-white mt-0.5">
+                        {o.customerName} · <span className="font-mono">{o.customerPhone}</span>
+                      </p>
+                      <p className="text-[11px] text-slate-500 truncate max-w-[230px]">
+                        {o.items[0]?.name || 'Order Item'}
+                        {o.items.length > 1 ? ` +${o.items.length - 1} more` : ''} ·{' '}
+                        {isWebsiteOrder ? siteSubdomain || 'Website' : 'Manual'}
+                      </p>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <span className="font-mono font-bold text-sm tabular-nums text-slate-900 dark:text-white block">
+                        ৳{o.total.toLocaleString()}
+                      </span>
+                      <StatusBadge
+                        tone={
+                          o.paymentStatus === 'paid'
+                            ? 'approved'
+                            : o.paymentStatus === 'pending'
+                            ? 'pending'
+                            : 'rejected'
+                        }
+                        label={o.paymentStatus}
+                        className="mt-1"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+                    <select
+                      value={o.status}
+                      onChange={(e) => updateOrderStatus(o.id, e.target.value as OrderStatus)}
+                      className="min-h-[36px] px-2.5 py-1 rounded-lg text-xs font-semibold border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-800 dark:text-slate-100"
+                    >
+                      <option value="pending">Pending</option>
+                      <option value="confirmed">Confirmed</option>
+                      <option value="processing">Processing</option>
+                      <option value="shipped">Shipped</option>
+                      <option value="delivered">Delivered</option>
+                      <option value="cancelled">Cancelled</option>
+                    </select>
+
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedOrderId(o.id);
+                          setIsDetailModalOpen(true);
+                        }}
+                        className="min-h-[36px] px-3 py-1 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 cursor-pointer"
+                      >
+                        {t.workspace.orders.viewDetailsBtn}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedOrderId(o.id);
+                          setTrackingCourier(o.courierName || 'Steadfast Courier');
+                          setTrackingCode(o.trackingCode || '');
+                          setIsTrackingModalOpen(true);
+                        }}
+                        className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg border border-slate-200 dark:border-slate-700 text-blue-600 cursor-pointer"
+                        title="Tracking"
+                      >
+                        <Truck className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedOrderId(o.id);
+                          setIsInvoiceModalOpen(true);
+                        }}
+                        className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg border border-slate-200 dark:border-slate-700 text-emerald-600 cursor-pointer"
+                        title="Invoice"
+                      >
+                        <Printer className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="hidden md:block overflow-x-auto">
             <table className="w-full text-left text-xs">
               <thead className="bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 font-semibold">
                 <tr>
@@ -598,18 +712,17 @@ export const OrdersPage: React.FC = () => {
 
                       {/* Payment */}
                       <td className="py-3.5 px-4">
-                        <span
-                          className={`text-[11px] font-semibold uppercase block ${
+                        <StatusBadge
+                          tone={
                             o.paymentStatus === 'paid'
-                              ? 'text-emerald-600 dark:text-emerald-400'
+                              ? 'approved'
                               : o.paymentStatus === 'pending'
-                              ? 'text-amber-600 dark:text-amber-400'
-                              : 'text-rose-600 dark:text-rose-400'
-                          }`}
-                        >
-                          {o.paymentStatus}
-                        </span>
-                        <span className="block text-[10px] text-slate-400 truncate max-w-[120px]">
+                              ? 'pending'
+                              : 'rejected'
+                          }
+                          label={o.paymentStatus.toUpperCase()}
+                        />
+                        <span className="block text-[10px] text-slate-400 truncate max-w-[120px] mt-1">
                           {o.paymentMethod}
                         </span>
                       </td>

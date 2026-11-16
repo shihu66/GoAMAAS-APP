@@ -13,6 +13,8 @@ import {
   Plus,
 } from 'lucide-react';
 import { Modal } from '../../components/ui/Modal';
+import { EmptyState } from '../../components/ui/EmptyState';
+import { StatusBadge } from '../../components/ui/StatusBadge';
 
 export const WebsiteRequestPage: React.FC = () => {
   const { websiteRequests, addWebsiteRequest, user, activeStore } = useApp();
@@ -128,7 +130,7 @@ export const WebsiteRequestPage: React.FC = () => {
 
       {/* VIEW 1: Requirements Submission Form */}
       {activeTab === 'requestForm' ? (
-        <div className="max-w-3xl mx-auto rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 sm:p-8 shadow-xs">
+        <div className="max-w-3xl mx-auto rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 p-6 sm:p-8 shadow-xs">
           <form onSubmit={handleSubmit} className="space-y-6 text-xs">
             <div>
               <h2 className="text-base font-bold text-slate-900 dark:text-white mb-1">
@@ -301,76 +303,132 @@ export const WebsiteRequestPage: React.FC = () => {
       ) : (
         /* VIEW 2: My Submitted Requests */
         <div className="space-y-4">
-          <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
-            <div className="p-4 border-b border-slate-200 dark:border-slate-800">
-              <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                Tracked Website Projects
-              </h3>
-              <p className="text-xs text-slate-500">Live progress tracking from AMAAS engineering team</p>
-            </div>
+          {websiteRequests.length === 0 ? (
+            <EmptyState
+              icon={Globe2}
+              title="No custom website requests submitted yet"
+              description="Need our studio team to craft a custom store for your business? Submit a project brief anytime."
+              primaryAction={{
+                label: 'Submit New Request',
+                onClick: () => setActiveTab('requestForm'),
+              }}
+            />
+          ) : (
+            <div className="rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs overflow-hidden">
+              <div className="p-4 border-b border-slate-200 dark:border-slate-800">
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                  Tracked Website Projects
+                </h3>
+                <p className="text-xs text-slate-500">Live progress tracking from AMAAS engineering team</p>
+              </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 font-semibold">
-                  <tr>
-                    <th className="py-3 px-4">Business / Category</th>
-                    <th className="py-3 px-4">Architecture</th>
-                    <th className="py-3 px-4">Package</th>
-                    <th className="py-3 px-4">Submitted</th>
-                    <th className="py-3 px-4">Status</th>
-                    <th className="py-3 px-4 text-right">View Scope</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {websiteRequests.map((req) => (
-                    <tr key={req.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
-                      <td className="py-3.5 px-4">
+              {/* Mobile Request Cards */}
+              <div className="md:hidden divide-y divide-slate-100 dark:divide-slate-800">
+                {websiteRequests.map((req) => (
+                  <div key={req.id} className="p-4 space-y-2.5 text-xs">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
                         <span className="font-semibold text-slate-900 dark:text-white block">
                           {req.businessName}
                         </span>
-                        <span className="text-[10px] text-slate-400">{req.businessCategory}</span>
-                      </td>
-                      <td className="py-3.5 px-4 text-slate-700 dark:text-slate-300 font-medium">
-                        {req.desiredType}
-                      </td>
-                      <td className="py-3.5 px-4 font-mono text-blue-600 dark:text-blue-400 font-semibold">
-                        {req.budgetTier}
-                      </td>
-                      <td className="py-3.5 px-4 font-mono text-slate-400 text-[11px]">
-                        {req.createdAt}
-                      </td>
-                      <td className="py-3.5 px-4">
-                        <span
-                          className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
-                            req.status === 'Completed'
-                              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
-                              : req.status === 'In Progress'
-                              ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300'
-                              : req.status === 'Reviewing'
-                              ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
-                              : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-400'
-                          }`}
-                        >
-                          {req.status}
+                        <span className="text-[11px] text-slate-500">
+                          {req.businessCategory} · {req.desiredType}
                         </span>
-                      </td>
-                      <td className="py-3.5 px-4 text-right">
-                        <button
-                          onClick={() => {
-                            setSelectedRequest(req);
-                            setIsDetailModalOpen(true);
-                          }}
-                          className="p-1 text-slate-400 hover:text-blue-600"
-                        >
-                          <Eye className="w-4 h-4" />
-                        </button>
-                      </td>
+                      </div>
+                      <StatusBadge
+                        tone={
+                          req.status === 'Completed'
+                            ? 'approved'
+                            : req.status === 'In Progress'
+                            ? 'info'
+                            : req.status === 'Reviewing'
+                            ? 'pending'
+                            : 'neutral'
+                        }
+                        label={req.status}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between pt-1">
+                      <span className="font-mono text-blue-600 dark:text-blue-400 font-semibold">
+                        {req.budgetTier}
+                      </span>
+                      <button
+                        onClick={() => {
+                          setSelectedRequest(req);
+                          setIsDetailModalOpen(true);
+                        }}
+                        className="min-h-[38px] px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 font-semibold inline-flex items-center gap-1 cursor-pointer"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>View Scope</span>
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="hidden md:block overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 font-semibold">
+                    <tr>
+                      <th className="py-3 px-4">Business / Category</th>
+                      <th className="py-3 px-4">Architecture</th>
+                      <th className="py-3 px-4">Package</th>
+                      <th className="py-3 px-4">Submitted</th>
+                      <th className="py-3 px-4">Status</th>
+                      <th className="py-3 px-4 text-right">View Scope</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {websiteRequests.map((req) => (
+                      <tr key={req.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
+                        <td className="py-3.5 px-4">
+                          <span className="font-semibold text-slate-900 dark:text-white block">
+                            {req.businessName}
+                          </span>
+                          <span className="text-[10px] text-slate-400">{req.businessCategory}</span>
+                        </td>
+                        <td className="py-3.5 px-4 text-slate-700 dark:text-slate-300 font-medium">
+                          {req.desiredType}
+                        </td>
+                        <td className="py-3.5 px-4 font-mono text-blue-600 dark:text-blue-400 font-semibold">
+                          {req.budgetTier}
+                        </td>
+                        <td className="py-3.5 px-4 font-mono text-slate-400 text-[11px]">
+                          {req.createdAt}
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <StatusBadge
+                            tone={
+                              req.status === 'Completed'
+                                ? 'approved'
+                                : req.status === 'In Progress'
+                                ? 'info'
+                                : req.status === 'Reviewing'
+                                ? 'pending'
+                                : 'neutral'
+                            }
+                            label={req.status}
+                          />
+                        </td>
+                        <td className="py-3.5 px-4 text-right">
+                          <button
+                            onClick={() => {
+                              setSelectedRequest(req);
+                              setIsDetailModalOpen(true);
+                            }}
+                            className="p-1.5 text-slate-400 hover:text-blue-600 cursor-pointer"
+                          >
+                            <Eye className="w-4 h-4" />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
-          </div>
+          )}
         </div>
       )}
 

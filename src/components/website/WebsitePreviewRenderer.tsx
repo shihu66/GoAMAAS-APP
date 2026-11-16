@@ -70,11 +70,20 @@ interface CartLineItem {
   category?: string;
 }
 
+export type WebsitePreviewEditorSectionTarget =
+  | 'business'
+  | 'hero'
+  | 'banner'
+  | 'sections'
+  | 'products'
+  | 'location';
+
 interface WebsitePreviewRendererProps {
   site: Partial<SubscribedWebsite>;
   viewMode?: 'desktop' | 'mobile';
   showGraceBanner?: boolean;
   isPublicView?: boolean;
+  onSelectSection?: (section: WebsitePreviewEditorSectionTarget) => void;
   onSubmitOrder?: (
     input: PublicCustomerOrderInput
   ) => Promise<{ success: boolean; message: string; order?: Order; code?: string }>;
@@ -185,6 +194,7 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
   viewMode = 'desktop',
   showGraceBanner = false,
   isPublicView = false,
+  onSelectSection,
   onSubmitOrder,
   onOrderPlaced,
 }) => {
@@ -2412,9 +2422,24 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
       ) : (
         <div className="antialiased" style={{ color: textColor }}>
           {/* Top Navigation Bar */}
-          <header className="border-b border-slate-100 bg-white/95 backdrop-blur-xs sticky top-0 z-20">
+          <header
+            onClick={
+              !isPublicView && onSelectSection
+                ? () => onSelectSection('business')
+                : undefined
+            }
+            className={`border-b border-slate-100 bg-white/95 backdrop-blur-xs sticky top-0 z-20 ${
+              !isPublicView && onSelectSection
+                ? 'cursor-pointer hover:outline-2 hover:outline-dashed hover:outline-blue-500/60 hover:-outline-offset-2'
+                : ''
+            }`}
+          >
             <div className="max-w-5xl mx-auto px-4 sm:px-6 py-3.5 flex items-center justify-between gap-3">
-              <a href="#" className="flex items-center gap-2.5 min-w-0">
+              <a
+                href="#"
+                onClick={!isPublicView && onSelectSection ? (e) => e.preventDefault() : undefined}
+                className="flex items-center gap-2.5 min-w-0"
+              >
                 {site.logoUrl && !brokenLogoImg ? (
                   <img
                     src={site.logoUrl}
@@ -2519,7 +2544,34 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
           </header>
 
           {/* Dynamic Ordered Website Sections */}
-          <main>{activeSections.map((sec) => renderSection(sec))}</main>
+          <main>
+            {activeSections.map((sec) => {
+              const rendered = renderSection(sec);
+              if (!rendered) return null;
+              if (isPublicView || !onSelectSection) return rendered;
+              const targetMap: Record<WebsiteSectionConfig['type'], WebsitePreviewEditorSectionTarget> = {
+                hero: 'hero',
+                banner: 'banner',
+                products: 'products',
+                contact: 'location',
+                location: 'location',
+                about: 'sections',
+                highlights: 'sections',
+                testimonials: 'sections',
+                faq: 'sections',
+              };
+              return (
+                <div
+                  key={`editor-wrap-${sec.id}`}
+                  onClick={() => onSelectSection(targetMap[sec.type])}
+                  className="relative group/sec cursor-pointer hover:outline-2 hover:outline-dashed hover:outline-blue-500/60 hover:-outline-offset-2 transition-all"
+                  title="Click to customize this section"
+                >
+                  {rendered}
+                </div>
+              );
+            })}
+          </main>
 
           {/* Product Details Modal */}
           {detailProduct && (

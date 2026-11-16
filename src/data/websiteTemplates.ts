@@ -1,0 +1,181 @@
+import { WebsiteThemeSettings } from '../types';
+
+export interface CuratedWebsiteTemplate {
+  id: string;
+  name: string;
+  nameBn: string;
+  categoryTag: string;
+  categoryTagBn: string;
+  description: string;
+  descriptionBn: string;
+  brandColor: string;
+  accentColor: string;
+  bgColor: string;
+  textColor: string;
+  themeSettings: WebsiteThemeSettings;
+}
+
+export const CURATED_WEBSITE_TEMPLATES: CuratedWebsiteTemplate[] = [
+  {
+    id: 'minimal-clean',
+    name: 'Minimal Daylight',
+    nameBn: 'মিনিমাল ডেলাইট',
+    categoryTag: 'Retail & Lifestyle',
+    categoryTagBn: 'রিটেইল ও লাইফস্টাইল',
+    description: 'Airy white canvas, crisp blue accents, and balanced product cards.',
+    descriptionBn: 'পরিষ্কার সাদা ব্যাকগ্রাউন্ড, নীল অ্যাকসেন্ট ও সহজ প্রোডাক্ট কার্ড।',
+    brandColor: '#2563EB',
+    accentColor: '#1E40AF',
+    bgColor: '#FFFFFF',
+    textColor: '#0F172A',
+    themeSettings: {
+      paletteId: 'minimal-clean',
+      primaryColor: '#2563EB',
+      accentColor: '#1E40AF',
+      backgroundColor: '#FFFFFF',
+      surfaceColor: '#F8FAFC',
+      textColor: '#0F172A',
+      fontStyle: 'modern',
+      buttonStyle: 'rounded',
+      heroLayout: 'split',
+      heroHeight: 'medium',
+      bannerLayout: 'split',
+    },
+  },
+  {
+    id: 'modern-commerce',
+    name: 'Modern Flagship',
+    nameBn: 'মডার্ন ফ্ল্যাগশিপ',
+    categoryTag: 'Online Store',
+    categoryTagBn: 'অনলাইন স্টোর',
+    description: 'Bold full-bleed cover hero built for high-converting stores.',
+    descriptionBn: 'আকর্ষণীয় কভার ব্যানারসহ আধুনিক ই-কমার্স স্টোর লেআউট।',
+    brandColor: '#0F172A',
+    accentColor: '#2563EB',
+    bgColor: '#F8FAFC',
+    textColor: '#0F172A',
+    themeSettings: {
+      paletteId: 'modern-commerce',
+      primaryColor: '#0F172A',
+      accentColor: '#2563EB',
+      backgroundColor: '#F8FAFC',
+      surfaceColor: '#FFFFFF',
+      textColor: '#0F172A',
+      fontStyle: 'bold',
+      buttonStyle: 'rounded',
+      heroLayout: 'cover',
+      heroHeight: 'tall',
+      heroOverlayOpacity: 42,
+      bannerLayout: 'full',
+    },
+  },
+  {
+    id: 'artisan-emerald',
+    name: 'Artisan Green',
+    nameBn: 'আর্টিজান গ্রিন',
+    categoryTag: 'Organic & Crafts',
+    categoryTagBn: 'অর্গানিক ও হ্যান্ডিক্রাফট',
+    description: 'Fresh natural emerald tones for organic foods, crafts, and wellness.',
+    descriptionBn: 'অর্গানিক পণ্য ও হ্যান্ডিক্রাফটের জন্য সতেজ সবুজ ডিজাইন।',
+    brandColor: '#059669',
+    accentColor: '#047857',
+    bgColor: '#FAFAFA',
+    textColor: '#064E3B',
+    themeSettings: {
+      paletteId: 'artisan-emerald',
+      primaryColor: '#059669',
+      accentColor: '#047857',
+      backgroundColor: '#FAFAFA',
+      surfaceColor: '#FFFFFF',
+      textColor: '#064E3B',
+      fontStyle: 'editorial',
+      buttonStyle: 'pill',
+      heroLayout: 'split',
+      heroHeight: 'medium',
+      bannerLayout: 'split',
+    },
+  },
+  {
+    id: 'boutique-velvet',
+    name: 'Boutique Editorial',
+    nameBn: 'বুটিক এডিটোরিয়াল',
+    categoryTag: 'Fashion & Apparel',
+    categoryTagBn: 'ফ্যাশন ও পোশাক',
+    description: 'Editorial elegance tailored for clothing brands and curated drops.',
+    descriptionBn: 'ফ্যাশন ও লাইফস্টাইল ব্র্যান্ডের জন্য মার্জিত এডিটোরিয়াল স্টাইল।',
+    brandColor: '#7C3AED',
+    accentColor: '#6D28D9',
+    bgColor: '#FAF5FF',
+    textColor: '#2E1065',
+    themeSettings: {
+      paletteId: 'boutique-velvet',
+      primaryColor: '#7C3AED',
+      accentColor: '#6D28D9',
+      backgroundColor: '#FAF5FF',
+      surfaceColor: '#FFFFFF',
+      textColor: '#2E1065',
+      fontStyle: 'editorial',
+      buttonStyle: 'pill',
+      heroLayout: 'centered',
+      heroHeight: 'tall',
+      bannerLayout: 'minimal',
+    },
+  },
+  {
+    id: 'warm-culinary',
+    name: 'Warm Bistro',
+    nameBn: 'ওয়ার্ম বিস্ট্রো',
+    categoryTag: 'Cafe & Dining',
+    categoryTagBn: 'ক্যাফে ও রেস্তোরাঁ',
+    description: 'Inviting amber warmth ideal for restaurants, bakeries, and food delivery.',
+    descriptionBn: 'রেস্তোরাঁ, ক্যাফে ও বেকারির জন্য আকর্ষণীয় উষ্ণ রঙের লেআউট।',
+    brandColor: '#D97706',
+    accentColor: '#B45309',
+    bgColor: '#FFFBEB',
+    textColor: '#451A03',
+    themeSettings: {
+      paletteId: 'warm-culinary',
+      primaryColor: '#D97706',
+      accentColor: '#B45309',
+      backgroundColor: '#FFFBEB',
+      surfaceColor: '#FFFFFF',
+      textColor: '#451A03',
+      fontStyle: 'modern',
+      buttonStyle: 'rounded',
+      heroLayout: 'cover',
+      heroHeight: 'medium',
+      heroOverlayOpacity: 48,
+      bannerLayout: 'strip',
+    },
+  },
+  {
+    id: 'rose-studio',
+    name: 'Blush Studio',
+    nameBn: 'ব্লাশ স্টুডিও',
+    categoryTag: 'Salon & Beauty',
+    categoryTagBn: 'স্যালন ও বিউটি',
+    description: 'Soft rose aesthetic crafted for beauty salons, skincare, and bridal services.',
+    descriptionBn: 'বিউটি কেয়ার, স্যালন ও স্কিনকেয়ার ব্র্যান্ডের জন্য কোমল ও পরিচ্ছন্ন ডিজাইন।',
+    brandColor: '#E11D48',
+    accentColor: '#BE123C',
+    bgColor: '#FFF1F2',
+    textColor: '#4C0519',
+    themeSettings: {
+      paletteId: 'rose-studio',
+      primaryColor: '#E11D48',
+      accentColor: '#BE123C',
+      backgroundColor: '#FFF1F2',
+      surfaceColor: '#FFFFFF',
+      textColor: '#4C0519',
+      fontStyle: 'minimal',
+      buttonStyle: 'pill',
+      heroLayout: 'centered',
+      heroHeight: 'medium',
+      bannerLayout: 'split',
+    },
+  },
+];
+
+export function findCuratedTemplateById(id: string): CuratedWebsiteTemplate {
+  return CURATED_WEBSITE_TEMPLATES.find((t) => t.id === id) || CURATED_WEBSITE_TEMPLATES[0];
+}

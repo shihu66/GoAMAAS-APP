@@ -160,6 +160,15 @@ import {
   verifyServerAdminSession,
 } from '../lib/adminSecurity';
 import { emitPaymentDiagnostic } from '../lib/paymentDiagnostics';
+import {
+  ThemePreference,
+  ResolvedTheme,
+  THEME_STORAGE_KEY,
+  readStoredThemePreference,
+  getSystemPrefersDark,
+  resolveEffectiveTheme,
+  applyResolvedThemeToDocument,
+} from '../lib/theme';
 
 export interface ToastMessage {
   id: string;
@@ -169,7 +178,9 @@ export interface ToastMessage {
 
 interface AppContextType {
   // Theme
-  theme: 'light' | 'dark';
+  theme: ResolvedTheme;
+  themePreference: ThemePreference;
+  setThemePreference: (preference: ThemePreference) => void;
   toggleTheme: () => void;
 
   // Real Supabase Auth & User
@@ -386,26 +397,43 @@ function setStored<T>(key: string, value: T): void {
 }
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Theme
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    const saved = localStorage.getItem('goamaas_theme');
-    if (saved === 'dark' || saved === 'light') return saved;
-    return 'light';
-  });
+  // Theme (Light, Dark, System)
+  const [themePreference, setThemePreferenceState] = useState<ThemePreference>(() =>
+    readStoredThemePreference()
+  );
+  const [systemPrefersDark, setSystemPrefersDark] = useState<boolean>(() => getSystemPrefersDark());
 
   useEffect(() => {
-    const root = document.documentElement;
-    if (theme === 'dark') {
-      root.classList.add('dark');
-    } else {
-      root.classList.remove('dark');
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    const handleChange = (event: MediaQueryListEvent) => {
+      setSystemPrefersDark(event.matches);
+    };
+    setSystemPrefersDark(mediaQuery.matches);
+    if (typeof mediaQuery.addEventListener === 'function') {
+      mediaQuery.addEventListener('change', handleChange);
+      return () => mediaQuery.removeEventListener('change', handleChange);
     }
-    localStorage.setItem('goamaas_theme', theme);
+    mediaQuery.addListener(handleChange);
+    return () => mediaQuery.removeListener(handleChange);
+  }, []);
+
+  const theme: ResolvedTheme = resolveEffectiveTheme(themePreference, systemPrefersDark);
+
+  useEffect(() => {
+    applyResolvedThemeToDocument(theme);
   }, [theme]);
 
-  const toggleTheme = () => {
-    setTheme((prev) => (prev === 'light' ? 'dark' : 'light'));
-  };
+  const setThemePreference = useCallback((preference: ThemePreference) => {
+    setThemePreferenceState(preference);
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, preference);
+    } catch {}
+  }, []);
+
+  const toggleTheme = useCallback(() => {
+    setThemePreference(theme === 'light' ? 'dark' : 'light');
+  }, [theme, setThemePreference]);
 
   // Toast System
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -5236,6 +5264,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     <AppContext.Provider
       value={{
         theme,
+        themePreference,
+        setThemePreference,
         toggleTheme,
         user,
         role,

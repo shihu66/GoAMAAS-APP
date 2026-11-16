@@ -44,41 +44,40 @@ export const Modal: React.FC<ModalProps> = ({
   }[maxWidth];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 overflow-y-auto">
-      {/* Backdrop */}
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-6 overflow-y-auto">
       <div
         className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs transition-opacity"
         onClick={onClose}
       />
 
-      {/* Dialog */}
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="modal-headline"
-        className={`relative w-full ${widthClasses} bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-2xl p-6 transition-all z-10 my-8`}
+        className={`relative w-full ${widthClasses} bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 rounded-t-2xl sm:rounded-2xl shadow-2xl p-5 sm:p-6 transition-all z-10 sm:my-8`}
       >
-        <div className="flex items-start justify-between pb-4 border-b border-slate-100 dark:border-slate-800">
-          <div>
-            <h3 id="modal-headline" className="text-base font-semibold text-slate-900 dark:text-white">
+        <div className="flex items-start justify-between gap-3 pb-4 border-b border-slate-100 dark:border-slate-800">
+          <div className="min-w-0">
+            <h3 id="modal-headline" className="text-base font-semibold text-slate-900 dark:text-white leading-snug">
               {title}
             </h3>
             {description && (
-              <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+              <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1">
                 {description}
               </p>
             )}
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors p-1 rounded-lg"
+            className="min-h-[40px] min-w-[40px] flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors rounded-xl shrink-0"
             aria-label="Close dialog"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        <div className="pt-4 max-h-[75vh] overflow-y-auto pr-1">
+        <div className="pt-4 max-h-[78vh] overflow-y-auto scrollbar-thin pr-1">
           {children}
         </div>
       </div>

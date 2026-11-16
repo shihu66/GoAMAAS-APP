@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
 import { useLanguage, usePageSeo } from '../../context/LanguageContext';
 import { LanguageSwitcher } from '../../components/ui/LanguageSwitcher';
+import { ThemeSelector } from '../../components/ui/ThemeSelector';
 import { isSupabaseConfigured, getSupabaseConfigStatus } from '../../lib/supabase';
 import {
   Lock,
@@ -18,12 +19,10 @@ import {
   Loader2,
   Info,
   X,
-  Sun,
-  Moon,
 } from 'lucide-react';
 
 export const RegisterPage: React.FC = () => {
-  const { registerWithEmail, loginWithGoogle, resendVerification, theme, toggleTheme } = useApp();
+  const { registerWithEmail, loginWithGoogle, resendVerification } = useApp();
   const { t } = useLanguage();
   const a = t.auth;
   const rg = t.auth.register;
@@ -96,7 +95,7 @@ export const RegisterPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col transition-colors">
+    <div className="min-h-screen bg-[#F8FAFC] dark:bg-[#0B0F17] text-slate-900 dark:text-slate-100 flex flex-col transition-colors">
       {/* Minimal Auth Top Utility Bar */}
       <header className="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
         <Link
@@ -109,15 +108,7 @@ export const RegisterPage: React.FC = () => {
 
         <div className="flex items-center gap-2">
           <LanguageSwitcher size="sm" />
-          <button
-            type="button"
-            onClick={toggleTheme}
-            aria-label={t.nav.toggleTheme}
-            title={t.nav.toggleTheme}
-            className="min-h-[38px] min-w-[38px] inline-flex items-center justify-center rounded-xl text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors cursor-pointer"
-          >
-            {theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
-          </button>
+          <ThemeSelector compact />
         </div>
       </header>
 
@@ -141,7 +132,7 @@ export const RegisterPage: React.FC = () => {
         </div>
 
         <div className="mt-7 sm:mx-auto sm:w-full sm:max-w-md">
-          <div className="bg-slate-50/70 dark:bg-slate-900/80 py-8 px-6 sm:px-9 border border-slate-200/90 dark:border-slate-800 rounded-2xl space-y-6">
+          <div className="bg-white dark:bg-[#111827] py-8 px-6 sm:px-9 border border-slate-200/90 dark:border-slate-800 rounded-2xl shadow-sm space-y-6">
             {emailSent ? (
               <div className="text-center space-y-4">
                 <div className="w-12 h-12 rounded-2xl bg-blue-50 dark:bg-blue-950 text-blue-600 dark:text-blue-400 flex items-center justify-center mx-auto">
@@ -227,7 +218,7 @@ export const RegisterPage: React.FC = () => {
 
                 <div className="relative flex items-center justify-center">
                   <div className="border-t border-slate-200 dark:border-slate-800 w-full" />
-                  <span className="bg-slate-50 dark:bg-slate-900 px-3 text-[11px] text-slate-500 dark:text-slate-400 absolute">
+                  <span className="bg-white dark:bg-[#111827] px-3 text-[11px] text-slate-500 dark:text-slate-400 absolute">
                     {rg.orEmail}
                   </span>
                 </div>

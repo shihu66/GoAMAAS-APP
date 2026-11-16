@@ -8,18 +8,22 @@ export const ToastContainer: React.FC = () => {
   if (toasts.length === 0) return null;
 
   return (
-    <div className="fixed bottom-5 right-5 z-50 flex flex-col gap-2 max-w-md w-full px-4 sm:px-0 pointer-events-none">
+    <div
+      aria-live="polite"
+      className="fixed bottom-20 sm:bottom-5 right-4 sm:right-5 z-[60] flex flex-col gap-2 max-w-md w-[calc(100%-2rem)] sm:w-full pointer-events-none"
+    >
       {toasts.map((toast) => (
         <div
           key={toast.id}
-          className={`pointer-events-auto flex items-start gap-3 p-3.5 rounded-lg border shadow-lg transition-all duration-200 ${
+          role="status"
+          className={`pointer-events-auto flex items-start gap-3 p-3.5 rounded-xl border shadow-lg transition-all duration-200 backdrop-blur-md ${
             toast.type === 'success'
-              ? 'bg-slate-900 text-white border-emerald-500/30 dark:bg-slate-900 dark:border-emerald-500/40'
+              ? 'bg-slate-900/95 text-white border-emerald-500/40'
               : toast.type === 'error'
-              ? 'bg-slate-900 text-white border-rose-500/30 dark:bg-slate-900 dark:border-rose-500/40'
+              ? 'bg-slate-900/95 text-white border-rose-500/40'
               : toast.type === 'warning'
-              ? 'bg-slate-900 text-white border-amber-500/30 dark:bg-slate-900 dark:border-amber-500/40'
-              : 'bg-slate-900 text-white border-blue-500/30 dark:bg-slate-900 dark:border-blue-500/40'
+              ? 'bg-slate-900/95 text-white border-amber-500/40'
+              : 'bg-slate-900/95 text-white border-blue-500/40'
           }`}
         >
           <div className="mt-0.5 shrink-0">
@@ -32,8 +36,9 @@ export const ToastContainer: React.FC = () => {
             {toast.message}
           </div>
           <button
+            type="button"
             onClick={() => removeToast(toast.id)}
-            className="text-slate-400 hover:text-white transition-colors shrink-0 p-0.5"
+            className="text-slate-400 hover:text-white transition-colors shrink-0 p-1 rounded-lg"
             aria-label="Dismiss notification"
           >
             <X className="w-4 h-4" />

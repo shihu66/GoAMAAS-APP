@@ -19,6 +19,8 @@ import {
 } from 'lucide-react';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
+import { EmptyState } from '../../components/ui/EmptyState';
+import { StatusBadge } from '../../components/ui/StatusBadge';
 import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 
 interface CourierIntegrationSettings {
@@ -387,7 +389,7 @@ export const TeamSettingsPage: React.FC = () => {
 
       {/* TAB 1: Store & Branding Form */}
       {activeTab === 'store' && (
-        <div className="max-w-2xl bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 shadow-xs">
+        <div className="max-w-2xl bg-white dark:bg-[#111827] rounded-2xl border border-slate-200/90 dark:border-slate-800 p-6 shadow-xs">
           <form onSubmit={handleSaveStore} className="space-y-4 text-xs">
             {/* Branding Logo UI */}
             <div>
@@ -516,7 +518,7 @@ export const TeamSettingsPage: React.FC = () => {
                 courierSettings.steadfast.enabled
               );
               return (
-                <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-4 flex flex-col justify-between">
+                <div className="p-5 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 space-y-4 flex flex-col justify-between">
                   <div className="space-y-3">
                     <div className="flex items-start justify-between gap-2">
                       <div>
@@ -613,7 +615,7 @@ export const TeamSettingsPage: React.FC = () => {
                 courierSettings.pathao.enabled
               );
               return (
-                <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-4 flex flex-col justify-between">
+                <div className="p-5 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 space-y-4 flex flex-col justify-between">
                   <div className="space-y-3">
                     <div className="flex items-start justify-between gap-2">
                       <div>
@@ -708,7 +710,7 @@ export const TeamSettingsPage: React.FC = () => {
                 courierSettings.redx.enabled
               );
               return (
-                <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-4 flex flex-col justify-between">
+                <div className="p-5 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 space-y-4 flex flex-col justify-between">
                   <div className="space-y-3">
                     <div className="flex items-start justify-between gap-2">
                       <div>
@@ -806,7 +808,7 @@ export const TeamSettingsPage: React.FC = () => {
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
             {/* Cash on Delivery */}
-            <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3">
+            <div className="p-5 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 space-y-3">
               <div className="flex items-start justify-between gap-2">
                 <div>
                   <h3 className="text-sm font-bold text-slate-900 dark:text-white">Cash on Delivery (COD)</h3>
@@ -853,7 +855,7 @@ export const TeamSettingsPage: React.FC = () => {
                 gatewaySettings.bkashMerchant.enabled
               );
               return (
-                <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3">
+                <div className="p-5 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 space-y-3">
                   <div className="flex items-start justify-between gap-2">
                     <div>
                       <h3 className="text-sm font-bold text-slate-900 dark:text-white">bKash Merchant Gateway</h3>
@@ -945,7 +947,7 @@ export const TeamSettingsPage: React.FC = () => {
                 gatewaySettings.nagadMerchant.enabled
               );
               return (
-                <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3">
+                <div className="p-5 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 space-y-3">
                   <div className="flex items-start justify-between gap-2">
                     <div>
                       <h3 className="text-sm font-bold text-slate-900 dark:text-white">Nagad Merchant Gateway</h3>
@@ -1022,7 +1024,7 @@ export const TeamSettingsPage: React.FC = () => {
                 gatewaySettings.sslcommerzBank.enabled
               );
               return (
-                <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3">
+                <div className="p-5 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 space-y-3">
                   <div className="flex items-start justify-between gap-2">
                     <div>
                       <h3 className="text-sm font-bold text-slate-900 dark:text-white">SSLCommerz / Bank Transfer</h3>
@@ -1124,74 +1126,77 @@ export const TeamSettingsPage: React.FC = () => {
             </button>
           </div>
 
-          <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 font-semibold">
-                <tr>
-                  <th className="py-3 px-4">Member Name</th>
-                  <th className="py-3 px-4">Email Address</th>
-                  <th className="py-3 px-4">Role</th>
-                  <th className="py-3 px-4">Joined Date</th>
-                  <th className="py-3 px-4 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                {teamMembers.length === 0 ? (
+          <div className="rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 font-semibold">
                   <tr>
-                    <td colSpan={5} className="py-8 text-center text-slate-500">
-                      No additional staff members registered. Click &ldquo;Invite Staff Member&rdquo; to grant team access.
-                    </td>
+                    <th className="py-3 px-4">Member Name</th>
+                    <th className="py-3 px-4">Email Address</th>
+                    <th className="py-3 px-4">Role</th>
+                    <th className="py-3 px-4">Joined Date</th>
+                    <th className="py-3 px-4 text-right">Actions</th>
                   </tr>
-                ) : (
-                  teamMembers.map((m) => (
-                    <tr key={m.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
-                      <td className="py-3.5 px-4 font-semibold text-slate-900 dark:text-white">
-                        {m.name}
-                      </td>
-                      <td className="py-3.5 px-4 text-slate-500 font-mono">
-                        {m.email}
-                      </td>
-                      <td className="py-3.5 px-4">
-                        <span
-                          className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
-                            m.role === 'owner'
-                              ? 'bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300'
-                              : m.role === 'admin'
-                              ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300'
-                              : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
-                          }`}
-                        >
-                          {m.role}
-                        </span>
-                      </td>
-                      <td className="py-3.5 px-4 text-slate-400 font-mono text-[11px]">
-                        {m.joinedAt}
-                      </td>
-                      <td className="py-3.5 px-4 text-right">
-                        {m.role !== 'owner' ? (
-                          <button
-                            onClick={() => setMemberToRemove(m)}
-                            className="p-1 text-rose-500 hover:text-rose-700"
-                            title="Remove Team Member"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        ) : (
-                          <span className="text-[10px] text-slate-400 italic">Primary Owner</span>
-                        )}
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {teamMembers.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="p-4">
+                        <EmptyState
+                          icon={Users}
+                          title="No additional staff members yet"
+                          description="Invite trusted team members to help manage products, orders, and inventory."
+                          primaryAction={{
+                            label: 'Invite Staff Member',
+                            onClick: () => setIsInviteModalOpen(true),
+                          }}
+                        />
                       </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+                  ) : (
+                    teamMembers.map((m) => (
+                      <tr key={m.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
+                        <td className="py-3.5 px-4 font-semibold text-slate-900 dark:text-white">
+                          {m.name}
+                        </td>
+                        <td className="py-3.5 px-4 text-slate-500 font-mono">
+                          {m.email}
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <StatusBadge
+                            tone={m.role === 'owner' ? 'info' : m.role === 'admin' ? 'approved' : 'neutral'}
+                            label={m.role.toUpperCase()}
+                          />
+                        </td>
+                        <td className="py-3.5 px-4 text-slate-400 font-mono text-[11px]">
+                          {m.joinedAt}
+                        </td>
+                        <td className="py-3.5 px-4 text-right">
+                          {m.role !== 'owner' ? (
+                            <button
+                              onClick={() => setMemberToRemove(m)}
+                              className="p-1.5 text-rose-500 hover:text-rose-700 cursor-pointer"
+                              title="Remove Team Member"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          ) : (
+                            <span className="text-[10px] text-slate-400 italic">Primary Owner</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}
 
       {/* TAB 3: Notifications Toggles */}
       {activeTab === 'notifications' && (
-        <div className="max-w-xl bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 shadow-xs space-y-4 text-xs">
+        <div className="max-w-xl bg-white dark:bg-[#111827] rounded-2xl border border-slate-200/90 dark:border-slate-800 p-6 shadow-xs space-y-4 text-xs">
           <h3 className="text-sm font-bold text-slate-900 dark:text-white mb-2">
             Notification Delivery Channels
           </h3>
@@ -1263,7 +1268,7 @@ export const TeamSettingsPage: React.FC = () => {
 
       {/* TAB 4: Security & Passwords */}
       {activeTab === 'security' && (
-        <div className="max-w-md bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 shadow-xs">
+        <div className="max-w-md bg-white dark:bg-[#111827] rounded-2xl border border-slate-200/90 dark:border-slate-800 p-6 shadow-xs">
           <form onSubmit={handleSavePassword} className="space-y-4 text-xs">
             <h3 className="text-sm font-bold text-slate-900 dark:text-white mb-2">
               Update Security Password

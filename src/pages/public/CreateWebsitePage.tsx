@@ -35,6 +35,7 @@ import {
   Upload,
   XCircle,
   Check,
+  ChevronDown,
 } from 'lucide-react';
 
 const GROUP_FILTER_KEYS = [
@@ -696,7 +697,7 @@ export const CreateWebsitePage: React.FC = () => {
   });
 
   return (
-    <div className="min-h-screen bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 py-10 sm:py-14 transition-colors">
+    <div className="min-h-screen bg-white dark:bg-[#0B0F17] text-slate-900 dark:text-slate-100 py-10 sm:py-14 transition-colors">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
         {/* Top Plan Identity Bar (clean unboxed metadata) */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-4 border-b border-slate-200/80 dark:border-slate-800/80 text-xs text-slate-600 dark:text-slate-400">
@@ -736,7 +737,7 @@ export const CreateWebsitePage: React.FC = () => {
         )}
 
         {/* Wizard Progress Stepper */}
-        <div className="p-3 sm:p-4 rounded-2xl bg-slate-50/80 dark:bg-slate-900/80 border border-slate-200/90 dark:border-slate-800">
+        <div className="p-3 sm:p-4 rounded-2xl bg-slate-50/80 dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800">
           <div className="flex items-center justify-between max-w-3xl mx-auto text-xs font-semibold gap-1">
             {[1, 2, 3, 4, 5].map((num) => {
               const label = cw.steps[num - 1];
@@ -881,7 +882,7 @@ export const CreateWebsitePage: React.FC = () => {
               </p>
             </div>
 
-            <div className="p-6 sm:p-8 rounded-2xl bg-slate-50/70 dark:bg-slate-900/70 border border-slate-200/90 dark:border-slate-800 space-y-5">
+            <div className="p-6 sm:p-8 rounded-2xl bg-slate-50/70 dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 space-y-5">
               <div>
                 <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
                   {cw.step2.businessNameLabel}
@@ -892,7 +893,7 @@ export const CreateWebsitePage: React.FC = () => {
                   value={businessName}
                   onChange={(e) => handleNameChange(e.target.value)}
                   placeholder={cw.step2.businessNamePlaceholder}
-                  className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm font-semibold focus:outline-hidden focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500"
+                  className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs sm:text-sm font-semibold focus:outline-hidden focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500"
                 />
               </div>
 
@@ -901,7 +902,7 @@ export const CreateWebsitePage: React.FC = () => {
                 <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
                   {cw.step2.subdomainLabel}
                 </label>
-                <div className="flex items-center min-h-[44px] rounded-xl border border-slate-300 dark:border-slate-700 overflow-hidden bg-white dark:bg-slate-800">
+                <div className="flex items-center min-h-[44px] rounded-xl border border-slate-300 dark:border-slate-700 overflow-hidden bg-white dark:bg-slate-900">
                   <span className="px-3 text-slate-400 font-mono text-xs select-none">https://</span>
                   <input
                     type="text"
@@ -919,7 +920,7 @@ export const CreateWebsitePage: React.FC = () => {
                       createdSiteId ? 'opacity-75 cursor-not-allowed' : ''
                     }`}
                   />
-                  <span className="px-3 py-3 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 font-mono text-xs border-l border-slate-200 dark:border-slate-600 select-none">
+                  <span className="px-3 py-3 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-mono text-xs border-l border-slate-200 dark:border-slate-700 select-none">
                     .amaas.xyz
                   </span>
                 </div>
@@ -946,24 +947,7 @@ export const CreateWebsitePage: React.FC = () => {
                 ) : null}
               </div>
 
-              {/* Optional Custom Domain */}
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
-                  {cw.step2.customDomainLabel}
-                </label>
-                <input
-                  type="text"
-                  value={customDomain}
-                  onChange={(e) => setCustomDomain(e.target.value)}
-                  placeholder={cw.step2.customDomainPlaceholder}
-                  className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm font-mono focus:outline-hidden focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500"
-                />
-                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1.5 leading-relaxed">
-                  {cw.step2.customDomainNote}
-                </p>
-              </div>
-
-              {/* Phone & WhatsApp */}
+              {/* Essential Phone & WhatsApp */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
@@ -974,7 +958,7 @@ export const CreateWebsitePage: React.FC = () => {
                     value={phone}
                     onChange={(e) => setPhone(e.target.value)}
                     placeholder="+880 1XXXXXXXXX"
-                    className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm font-mono"
+                    className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs sm:text-sm font-mono"
                   />
                 </div>
                 <div>
@@ -986,123 +970,149 @@ export const CreateWebsitePage: React.FC = () => {
                     value={whatsappNumber}
                     onChange={(e) => setWhatsappNumber(e.target.value)}
                     placeholder="+880 1XXXXXXXXX"
-                    className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm font-mono"
+                    className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs sm:text-sm font-mono"
                   />
                 </div>
               </div>
 
-              {/* Email & Address */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
-                    {cw.step2.emailLabel}
-                  </label>
-                  <input
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="hello@yourbusiness.com"
-                    className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
-                    {cw.step2.addressLabel}
-                  </label>
-                  <input
-                    type="text"
-                    value={address}
-                    onChange={(e) => setAddress(e.target.value)}
-                    placeholder={cw.step2.addressPlaceholder}
-                    className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm"
-                  />
-                </div>
-              </div>
+              {/* Progressive Disclosure for Optional Setup (Custom Domain, Address, Social Links & Hero Copy) */}
+              <details className="group pt-3 border-t border-slate-200/80 dark:border-slate-800">
+                <summary className="list-none cursor-pointer flex items-center justify-between gap-2 py-2 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 select-none">
+                  <span>Optional Details (Custom Domain, Address, Socials &amp; Hero Text)</span>
+                  <ChevronDown className="w-4 h-4 text-slate-400 transition-transform group-open:rotate-180" />
+                </summary>
 
-              {/* Optional Social Links */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
-                    {cw.step2.facebookLabel}
-                  </label>
-                  <input
-                    type="url"
-                    value={facebookUrl}
-                    onChange={(e) => setFacebookUrl(e.target.value)}
-                    placeholder="https://facebook.com/yourpage"
-                    className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
-                    {cw.step2.instagramLabel}
-                  </label>
-                  <input
-                    type="url"
-                    value={instagramUrl}
-                    onChange={(e) => setInstagramUrl(e.target.value)}
-                    placeholder="https://instagram.com/yourhandle"
-                    className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm"
-                  />
-                </div>
-              </div>
-
-              {/* Hero Copy & CTA */}
-              <div className="pt-4 border-t border-slate-200/80 dark:border-slate-800 space-y-4">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
-                    {cw.step2.heroHeadlineLabel}
-                  </label>
-                  <input
-                    type="text"
-                    value={headline}
-                    onChange={(e) => setHeadline(e.target.value)}
-                    className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm font-medium"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
-                    {cw.step2.heroSubheadlineLabel}
-                  </label>
-                  <textarea
-                    rows={2}
-                    value={subheadline}
-                    onChange={(e) => setSubheadline(e.target.value)}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm leading-relaxed"
-                  />
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="pt-4 space-y-5">
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
-                      {cw.step2.primaryCtaTextLabel}
+                      {cw.step2.customDomainLabel}
                     </label>
                     <input
                       type="text"
-                      value={heroCtaText}
-                      onChange={(e) => setHeroCtaText(e.target.value)}
-                      placeholder="Order on WhatsApp"
-                      className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm font-medium"
+                      value={customDomain}
+                      onChange={(e) => setCustomDomain(e.target.value)}
+                      placeholder={cw.step2.customDomainPlaceholder}
+                      className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs sm:text-sm font-mono focus:outline-hidden focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500"
                     />
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1.5 leading-relaxed">
+                      {cw.step2.customDomainNote}
+                    </p>
                   </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
-                      {cw.step2.primaryCtaDestLabel}
-                    </label>
-                    <select
-                      value={heroCtaLink}
-                      onChange={(e) => setHeroCtaLink(e.target.value)}
-                      className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm"
-                    >
-                      <option value="whatsapp">{cw.step2.destWhatsapp}</option>
-                      <option value="#services">{cw.step2.destCatalog}</option>
-                      <option value="#contact">{cw.step2.destContact}</option>
-                      <option value="#about">{cw.step2.destAbout}</option>
-                    </select>
+
+                  {/* Email & Address */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                        {cw.step2.emailLabel}
+                      </label>
+                      <input
+                        type="email"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        placeholder="hello@yourbusiness.com"
+                        className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs sm:text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                        {cw.step2.addressLabel}
+                      </label>
+                      <input
+                        type="text"
+                        value={address}
+                        onChange={(e) => setAddress(e.target.value)}
+                        placeholder={cw.step2.addressPlaceholder}
+                        className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs sm:text-sm"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Optional Social Links */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                        {cw.step2.facebookLabel}
+                      </label>
+                      <input
+                        type="url"
+                        value={facebookUrl}
+                        onChange={(e) => setFacebookUrl(e.target.value)}
+                        placeholder="https://facebook.com/yourpage"
+                        className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs sm:text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                        {cw.step2.instagramLabel}
+                      </label>
+                      <input
+                        type="url"
+                        value={instagramUrl}
+                        onChange={(e) => setInstagramUrl(e.target.value)}
+                        placeholder="https://instagram.com/yourhandle"
+                        className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs sm:text-sm"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Hero Copy & CTA */}
+                  <div className="pt-4 border-t border-slate-200/80 dark:border-slate-800 space-y-4">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                        {cw.step2.heroHeadlineLabel}
+                      </label>
+                      <input
+                        type="text"
+                        value={headline}
+                        onChange={(e) => setHeadline(e.target.value)}
+                        className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs sm:text-sm font-medium"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                        {cw.step2.heroSubheadlineLabel}
+                      </label>
+                      <textarea
+                        rows={2}
+                        value={subheadline}
+                        onChange={(e) => setSubheadline(e.target.value)}
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs sm:text-sm leading-relaxed"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                          {cw.step2.primaryCtaTextLabel}
+                        </label>
+                        <input
+                          type="text"
+                          value={heroCtaText}
+                          onChange={(e) => setHeroCtaText(e.target.value)}
+                          placeholder="Order on WhatsApp"
+                          className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs sm:text-sm font-medium"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                          {cw.step2.primaryCtaDestLabel}
+                        </label>
+                        <select
+                          value={heroCtaLink}
+                          onChange={(e) => setHeroCtaLink(e.target.value)}
+                          className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs sm:text-sm"
+                        >
+                          <option value="whatsapp">{cw.step2.destWhatsapp}</option>
+                          <option value="#services">{cw.step2.destCatalog}</option>
+                          <option value="#contact">{cw.step2.destContact}</option>
+                          <option value="#about">{cw.step2.destAbout}</option>
+                        </select>
+                      </div>
+                    </div>
                   </div>
                 </div>
-              </div>
+              </details>
             </div>
 
             <div className="flex items-center justify-between gap-3 pt-2">

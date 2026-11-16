@@ -25,10 +25,10 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
 }) => {
   return (
     <Modal isOpen={isOpen} onClose={onClose} title={title} maxWidth="sm">
-      <div className="space-y-4">
+      <div className="space-y-5">
         <div className="flex items-start gap-3">
           {isDestructive && (
-            <div className="p-2 rounded-lg bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 shrink-0">
+            <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200/80 dark:border-rose-900 text-rose-600 dark:text-rose-400 shrink-0">
               <AlertTriangle className="w-5 h-5" />
             </div>
           )}
@@ -37,11 +37,11 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100 dark:border-slate-800">
+        <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-100 dark:border-slate-800">
           <button
             type="button"
             onClick={onClose}
-            className="px-4 py-2 text-xs font-medium text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg transition-colors"
+            className="min-h-[40px] px-4 py-2 text-xs sm:text-sm font-medium text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-xl transition-colors"
           >
             {cancelLabel}
           </button>
@@ -51,7 +51,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
               onConfirm();
               onClose();
             }}
-            className={`px-4 py-2 text-xs font-medium text-white rounded-lg transition-colors shadow-xs ${
+            className={`min-h-[40px] px-4 py-2 text-xs sm:text-sm font-medium text-white rounded-xl transition-colors shadow-xs ${
               isDestructive
                 ? 'bg-rose-600 hover:bg-rose-700'
                 : 'bg-blue-600 hover:bg-blue-700'

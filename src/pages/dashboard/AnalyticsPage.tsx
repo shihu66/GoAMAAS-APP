@@ -340,7 +340,7 @@ export const AnalyticsPage: React.FC = () => {
 
       {/* 4 Financial Metric Cards (Real values) */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
+            <div className="p-5 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs">
               <span className="text-xs font-medium text-slate-500">Gross Sales</span>
               <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white font-mono tabular-nums">
                 ৳{totalGrossSales.toLocaleString()}
@@ -350,7 +350,7 @@ export const AnalyticsPage: React.FC = () => {
               </span>
             </div>
 
-            <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
+            <div className="p-5 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs">
               <span className="text-xs font-medium text-slate-500">Estimated Net Profit</span>
               <p className="mt-2 text-2xl font-bold text-emerald-600 font-mono tabular-nums">
                 ৳{totalNetProfit.toLocaleString()}
@@ -360,7 +360,7 @@ export const AnalyticsPage: React.FC = () => {
               </span>
             </div>
 
-        <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
+        <div className="p-5 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs">
           <span className="text-xs font-medium text-slate-500">Average Order Value (AOV)</span>
           <p className="mt-2 text-2xl font-bold text-blue-600 font-mono tabular-nums">
             ৳{aov.toLocaleString()}
@@ -370,7 +370,7 @@ export const AnalyticsPage: React.FC = () => {
           </span>
         </div>
 
-        <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
+        <div className="p-5 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs">
           <span className="text-xs font-medium text-slate-500">Repeat Customer Rate</span>
           <p className="mt-2 text-2xl font-bold text-purple-600 font-mono tabular-nums">
             {repeatCustomerRate}%
@@ -382,7 +382,7 @@ export const AnalyticsPage: React.FC = () => {
       </div>
 
       {/* Revenue & Profit Area Chart */}
-      <div className="p-5 sm:p-6 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+      <div className="p-5 sm:p-6 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs space-y-4">
         <div className="flex items-center justify-between">
           <div>
             <h3 className="text-sm font-bold text-slate-900 dark:text-white">
@@ -466,7 +466,7 @@ export const AnalyticsPage: React.FC = () => {
       {/* Channel Breakdown & Order Velocity Bar Chart */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Sales by Acquisition Channel */}
-        <div className="p-5 sm:p-6 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+        <div className="p-5 sm:p-6 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs space-y-4">
           <div>
             <h3 className="text-sm font-bold text-slate-900 dark:text-white">
               Revenue by Sales Channel
@@ -517,7 +517,7 @@ export const AnalyticsPage: React.FC = () => {
         </div>
 
         {/* Order Volume per Period */}
-        <div className="p-5 sm:p-6 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+        <div className="p-5 sm:p-6 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs space-y-4">
           <div>
             <h3 className="text-sm font-bold text-slate-900 dark:text-white">
               Order Fulfillment Volume
@@ -558,7 +558,7 @@ export const AnalyticsPage: React.FC = () => {
 
       {/* Previous-Month vs. Current-Month Sales Graph + Business Performance Insights */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 p-5 sm:p-6 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+        <div className="lg:col-span-2 p-5 sm:p-6 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div>
               <h3 className="text-sm font-bold text-slate-900 dark:text-white">
@@ -631,7 +631,7 @@ export const AnalyticsPage: React.FC = () => {
         </div>
 
         {/* Business Performance Insights */}
-        <div className="p-5 sm:p-6 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col justify-between space-y-4">
+        <div className="p-5 sm:p-6 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs flex flex-col justify-between space-y-4">
           <div>
             <h3 className="text-sm font-bold text-slate-900 dark:text-white">
               Business Performance Insights

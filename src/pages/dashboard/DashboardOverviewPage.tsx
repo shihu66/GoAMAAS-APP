@@ -4,6 +4,8 @@ import { useApp } from '../../context/AppContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { isWebsiteTrulyLive } from '../../lib/paymentWorkflow';
 import { extractOrderMetadataFromItems } from '../../lib/storefrontSync';
+import { StatusBadge } from '../../components/ui/StatusBadge';
+import { EmptyState } from '../../components/ui/EmptyState';
 import {
   TrendingUp,
   ShoppingCart,
@@ -11,14 +13,16 @@ import {
   AlertTriangle,
   ArrowRight,
   Plus,
-  Bot,
-  Layers,
   Calendar,
   CheckCircle2,
   Clock,
-  Truck,
   ExternalLink,
   Globe,
+  Paintbrush,
+  Copy,
+  Eye,
+  Circle,
+  Sparkles,
 } from 'lucide-react';
 import {
   AreaChart,
@@ -30,20 +34,20 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell,
 } from 'recharts';
 
 export const DashboardOverviewPage: React.FC = () => {
   const {
+    user,
     activeStore,
     products,
     orders,
     customers,
     subscribedWebsites,
+    showToast,
   } = useApp();
-  const { lang } = useLanguage();
+  const { t, lang } = useLanguage();
+  const ov = t.workspace.overview;
   const navigate = useNavigate();
 
   const [dateRange, setDateRange] = useState<'7d' | '30d' | '90d'>('30d');
@@ -59,7 +63,6 @@ export const DashboardOverviewPage: React.FC = () => {
 
   const isWebsiteLive = connectedWebsite ? isWebsiteTrulyLive(connectedWebsite) : false;
 
-  // Computed metrics strictly calculated from actual database/context records
   const totalSales = useMemo(
     () => orders.reduce((acc, o) => (o.status !== 'cancelled' ? acc + o.total : acc), 0),
     [orders]
@@ -67,17 +70,45 @@ export const DashboardOverviewPage: React.FC = () => {
   const totalOrders = orders.length;
   const pendingOrdersCount = useMemo(
     () =>
-      orders.filter((o) => o.status === 'pending' || o.status === 'confirmed' || o.status === 'processing')
-        .length,
-    [orders]
-  );
-  const completedOrdersCount = useMemo(
-    () => orders.filter((o) => o.status === 'delivered').length,
+      orders.filter(
+        (o) => o.status === 'pending' || o.status === 'confirmed' || o.status === 'processing'
+      ).length,
     [orders]
   );
   const lowStockCount = products.filter((p) => p.stock <= p.lowStockThreshold).length;
 
-  // Real chart data computed from authenticated user's actual orders
+  // Interactive 5-Step Getting Started Checklist computed from real workspace state
+  const checklistItems = useMemo(() => {
+    const hasDesign = Boolean(connectedWebsite);
+    const hasLogo = Boolean(connectedWebsite?.logoUrl);
+    const hasProduct =
+      products.length > 0 || (connectedWebsite?.servicesOrProducts?.length ?? 0) > 0;
+    const hasContact = Boolean(
+      connectedWebsite?.phone ||
+        connectedWebsite?.whatsappNumber ||
+        activeStore?.phone
+    );
+    const isLive = isWebsiteLive;
+
+    const specs = [
+      { done: hasDesign, path: connectedWebsite ? '/dashboard/subscribed-website' : '/create-website' },
+      { done: hasLogo, path: connectedWebsite ? '/dashboard/subscribed-website?tab=design' : '/create-website' },
+      { done: hasProduct, path: '/dashboard/products?action=add' },
+      { done: hasContact, path: connectedWebsite ? '/dashboard/subscribed-website?tab=settings' : '/dashboard/settings' },
+      { done: isLive, path: connectedWebsite ? '/dashboard/subscribed-website?tab=settings' : '/create-website' },
+    ];
+
+    return ov.checklistSteps.map((stepMeta, idx) => ({
+      ...stepMeta,
+      done: specs[idx]?.done ?? false,
+      path: specs[idx]?.path ?? '/dashboard',
+    }));
+  }, [connectedWebsite, products.length, activeStore?.phone, isWebsiteLive, ov.checklistSteps]);
+
+  const completedChecklistCount = checklistItems.filter((item) => item.done).length;
+  const allChecklistDone = completedChecklistCount === checklistItems.length;
+
+  // Sales trend chart data
   const salesTrendData = useMemo(() => {
     const now = new Date();
     const buckets: { date: string; revenue: number; orders: number }[] = [];
@@ -88,7 +119,6 @@ export const DashboardOverviewPage: React.FC = () => {
         d.setDate(d.getDate() - i);
         const dateStr = d.toISOString().split('T')[0];
         const dayLabel = d.toLocaleDateString(undefined, { weekday: 'short' });
-
         const dayOrders = orders.filter(
           (o) => o.createdAt.startsWith(dateStr) && o.status !== 'cancelled'
         );
@@ -102,7 +132,6 @@ export const DashboardOverviewPage: React.FC = () => {
         end.setDate(end.getDate() - i * 7);
         const start = new Date(end);
         start.setDate(start.getDate() - 7);
-
         const weekOrders = orders.filter((o) => {
           const orderDate = new Date(o.createdAt);
           return orderDate >= start && orderDate <= end && o.status !== 'cancelled';
@@ -116,7 +145,6 @@ export const DashboardOverviewPage: React.FC = () => {
         const monthLabel = d.toLocaleDateString(undefined, { month: 'short' });
         const year = d.getFullYear();
         const month = d.getMonth();
-
         const monthOrders = orders.filter((o) => {
           const od = new Date(o.createdAt);
           return od.getFullYear() === year && od.getMonth() === month && o.status !== 'cancelled';
@@ -128,35 +156,7 @@ export const DashboardOverviewPage: React.FC = () => {
     return buckets;
   }, [orders, dateRange]);
 
-  // Order status breakdown for pie chart (only includes existing counts)
-  const statusCounts = useMemo(() => {
-    return orders.reduce<Record<string, number>>((acc, o) => {
-      acc[o.status] = (acc[o.status] || 0) + 1;
-      return acc;
-    }, {});
-  }, [orders]);
-
-  const statusPieData = useMemo(() => {
-    return [
-      { name: 'Delivered', value: statusCounts['delivered'] || 0, color: '#10B981' },
-      { name: 'Shipped', value: statusCounts['shipped'] || 0, color: '#3B82F6' },
-      { name: 'Processing', value: statusCounts['processing'] || 0, color: '#F59E0B' },
-      { name: 'Confirmed', value: statusCounts['confirmed'] || 0, color: '#8B5CF6' },
-      { name: 'Pending', value: statusCounts['pending'] || 0, color: '#64748B' },
-    ].filter((s) => s.value > 0);
-  }, [statusCounts]);
-
-  // Recent orders
-  const recentOrders = useMemo(() => [...orders].slice(0, 5), [orders]);
-
-  // Top products by sales
-  const topProducts = useMemo(() => {
-    return [...products]
-      .sort((a, b) => b.salesCount - a.salesCount)
-      .slice(0, 4);
-  }, [products]);
-
-  // Previous-Month vs. Current-Month Sales Comparison (authentic non-cancelled orders only)
+  // Previous-Month vs. Current-Month Sales Comparison (preserved contract)
   const monthlyComparison = useMemo(() => {
     const now = new Date();
     const currYear = now.getFullYear();
@@ -166,7 +166,10 @@ export const DashboardOverviewPage: React.FC = () => {
     const prevMonth = prevDate.getMonth();
 
     const currentMonthLabel = now.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
-    const previousMonthLabel = prevDate.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+    const previousMonthLabel = prevDate.toLocaleDateString(undefined, {
+      month: 'short',
+      year: 'numeric',
+    });
 
     const ranges = [
       { bucket: 'Days 1–7', min: 1, max: 7 },
@@ -237,7 +240,7 @@ export const DashboardOverviewPage: React.FC = () => {
     };
   }, [orders]);
 
-  // Business Performance Insights derived strictly from real store records
+  // Business Performance Insights (preserved contract)
   const performanceInsights = useMemo(() => {
     const validOrders = orders.filter((o) => o.status !== 'cancelled');
     const deliveredOrders = validOrders.filter((o) => o.status === 'delivered');
@@ -258,405 +261,433 @@ export const DashboardOverviewPage: React.FC = () => {
       repeatRate,
       repeatBuyers,
       healthyStockPct,
-      validOrderCount: validOrders.length,
     };
   }, [orders, totalSales, customers, products.length, lowStockCount]);
 
+  const recentOrders = useMemo(() => [...orders].slice(0, 5), [orders]);
+  const topProducts = useMemo(
+    () => [...products].sort((a, b) => b.salesCount - a.salesCount).slice(0, 4),
+    [products]
+  );
+
   const hasSalesData = orders.length > 0 && totalSales > 0;
+  const greetingName = user?.name || activeStore?.name || 'Merchant';
+
+  const handleCopyWebsiteLink = async () => {
+    if (!connectedWebsite) return;
+    const url = `https://${connectedWebsite.fullDomainUrl}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      showToast(ov.linkCopiedToast, 'success');
+    } catch {
+      showToast(url, 'info');
+    }
+  };
+
+  const quickActions = [
+    {
+      title: ov.actionEditSite,
+      desc: ov.actionEditSiteDesc,
+      icon: Paintbrush,
+      to: connectedWebsite ? '/dashboard/subscribed-website' : '/create-website',
+      color: 'text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/60',
+    },
+    {
+      title: ov.actionAddProduct,
+      desc: ov.actionAddProductDesc,
+      icon: Plus,
+      to: '/dashboard/products?action=add',
+      color: 'text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60',
+    },
+    {
+      title: ov.actionViewOrders,
+      desc: ov.actionViewOrdersDesc,
+      icon: ShoppingCart,
+      to: '/dashboard/orders',
+      color: 'text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/60',
+    },
+    {
+      title: ov.actionViewSite,
+      desc: ov.actionViewSiteDesc,
+      icon: Eye,
+      to: connectedWebsite ? `/s/${connectedWebsite.subdomain}` : '/create-website',
+      external: Boolean(connectedWebsite),
+      color: 'text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60',
+    },
+  ];
 
   return (
-    <div className="space-y-8">
-      {/* Welcome & Context Header */}
+    <div className="space-y-6">
+      {/* 1. Welcome & Primary CTA Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
-            {lang === 'bn'
-              ? `স্টোর ওভারভিউ — ${activeStore?.name || 'ওয়ার্কস্পেস'}`
-              : `Store Overview — ${activeStore?.name || 'Workspace'}`}
+            {ov.welcomeHeading(greetingName)}
           </h1>
-          <p className="text-xs text-slate-500 mt-1">
-            {lang === 'bn'
-              ? 'আপনার পাবলিক ওয়েবসাইট, পণ্য ক্যাটালগ এবং গ্রাহক অর্ডারের রিয়েল-টাইম সারাংশ।'
-              : 'Real-time storefront connection, inventory status, and customer order pipeline.'}
+          <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1">
+            {ov.welcomeSubheading}
           </p>
         </div>
 
-        {/* Date Filter & Quick Actions */}
-        <div className="flex items-center gap-2 flex-wrap">
-          <div className="flex items-center p-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs font-medium">
-            <button
-              onClick={() => setDateRange('7d')}
-              className={`px-3 py-1 rounded-md transition-colors ${
-                dateRange === '7d'
-                  ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
-                  : 'text-slate-500 hover:text-slate-900 dark:hover:text-white'
-              }`}
-            >
-              7 Days
-            </button>
-            <button
-              onClick={() => setDateRange('30d')}
-              className={`px-3 py-1 rounded-md transition-colors ${
-                dateRange === '30d'
-                  ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
-                  : 'text-slate-500 hover:text-slate-900 dark:hover:text-white'
-              }`}
-            >
-              30 Days
-            </button>
-            <button
-              onClick={() => setDateRange('90d')}
-              className={`px-3 py-1 rounded-md transition-colors ${
-                dateRange === '90d'
-                  ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
-                  : 'text-slate-500 hover:text-slate-900 dark:hover:text-white'
-              }`}
-            >
-              90 Days
-            </button>
+        <div className="flex items-center gap-2.5 flex-wrap">
+          <div className="inline-flex items-center p-1 rounded-xl bg-slate-100 dark:bg-slate-800/80 border border-slate-200/80 dark:border-slate-700/80 text-xs font-medium">
+            {(['7d', '30d', '90d'] as const).map((range) => (
+              <button
+                key={range}
+                type="button"
+                onClick={() => setDateRange(range)}
+                className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer ${
+                  dateRange === range
+                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
+                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                }`}
+              >
+                {range === '7d' ? '7D' : range === '30d' ? '30D' : '90D'}
+              </button>
+            ))}
           </div>
 
           <Link
             to="/dashboard/products?action=add"
-            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-xs transition-colors whitespace-nowrap shrink-0"
+            className="min-h-[40px] inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs sm:text-sm font-semibold shadow-xs transition-colors whitespace-nowrap"
           >
-            <Plus className="w-3.5 h-3.5" />
-            <span>{lang === 'bn' ? 'নতুন পণ্য যোগ করুন' : 'Add Product'}</span>
+            <Plus className="w-4 h-4" />
+            <span>{ov.actionAddProduct}</span>
           </Link>
         </div>
       </div>
 
-      {/* Connected Public Website & Storefront Quick Actions */}
-      <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2 text-xs text-slate-500">
-              <Globe className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
-              <span className="font-semibold text-slate-900 dark:text-white">
-                {connectedWebsite
-                  ? connectedWebsite.businessName
-                  : lang === 'bn'
-                  ? 'আপনার পাবলিক ওয়েবসাইট সংযুক্ত করুন'
-                  : 'Connect Your Public Storefront'}
-              </span>
-              <span aria-hidden="true">·</span>
-              {connectedWebsite ? (
-                <span
-                  className={
-                    isWebsiteLive
-                      ? 'font-semibold text-emerald-600 dark:text-emerald-400'
-                      : 'font-semibold text-amber-600 dark:text-amber-400'
-                  }
+      {/* 2. Website Overview Card + Interactive Getting Started Checklist */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+        {/* Website Card (7 cols) */}
+        <div className="lg:col-span-7 rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-[#111827] overflow-hidden flex flex-col justify-between">
+          {connectedWebsite ? (
+            <>
+              <div>
+                {/* Subtle Brand Accent Header Preview Strip */}
+                <div
+                  className="h-2.5 w-full"
+                  style={{ backgroundColor: connectedWebsite.brandColor || '#2563EB' }}
+                />
+                <div className="p-5 sm:p-6 space-y-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="flex items-center gap-3.5 min-w-0">
+                      <div className="w-12 h-12 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 flex items-center justify-center overflow-hidden shrink-0">
+                        {connectedWebsite.logoUrl ? (
+                          <img
+                            src={connectedWebsite.logoUrl}
+                            alt={connectedWebsite.businessName}
+                            className="w-full h-full object-contain p-1"
+                          />
+                        ) : (
+                          <Globe className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white truncate">
+                            {connectedWebsite.businessName}
+                          </h2>
+                          <StatusBadge
+                            tone={
+                              isWebsiteLive
+                                ? 'live'
+                                : connectedWebsite.subscriptionStatus === 'suspended'
+                                ? 'suspended'
+                                : 'draft'
+                            }
+                            label={
+                              isWebsiteLive
+                                ? t.workspace.nav.websiteStatusLive
+                                : connectedWebsite.subscriptionStatus === 'suspended'
+                                ? 'Suspended'
+                                : t.workspace.nav.websiteStatusDraft
+                            }
+                          />
+                        </div>
+                        <p className="text-xs font-mono text-blue-600 dark:text-blue-400 mt-0.5 truncate">
+                          https://{connectedWebsite.fullDomainUrl}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-3 p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900/70 border border-slate-100 dark:border-slate-800 text-xs">
+                    <div>
+                      <span className="text-slate-500 dark:text-slate-400 block">Template</span>
+                      <span className="font-semibold text-slate-900 dark:text-white truncate block mt-0.5">
+                        {connectedWebsite.templateName || 'Modern'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 dark:text-slate-400 block">Products</span>
+                      <span className="font-semibold text-slate-900 dark:text-white tabular-nums block mt-0.5">
+                        {(connectedWebsite.servicesOrProducts || []).length}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 dark:text-slate-400 block">Updated</span>
+                      <span className="font-semibold text-slate-900 dark:text-white tabular-nums block mt-0.5">
+                        {connectedWebsite.createdAt?.slice(0, 10) || 'Today'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="px-5 sm:px-6 pb-5 flex flex-wrap items-center gap-2.5">
+                <Link
+                  to="/dashboard/subscribed-website"
+                  className="min-h-[42px] inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs sm:text-sm font-semibold transition-colors"
                 >
-                  {isWebsiteLive ? 'Live Public Website' : 'Draft / Pending Activation'}
-                </span>
-              ) : (
-                <span>No website created yet</span>
-              )}
+                  <Paintbrush className="w-3.5 h-3.5" />
+                  <span>{ov.editWebsiteBtn}</span>
+                </Link>
+                <a
+                  href={`/s/${connectedWebsite.subdomain}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="min-h-[42px] inline-flex items-center gap-1.5 px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700/80 text-slate-700 dark:text-slate-200 text-xs sm:text-sm font-semibold transition-colors"
+                >
+                  <span>{isWebsiteLive ? ov.openLiveSiteBtn : ov.previewSiteBtn}</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+                <button
+                  type="button"
+                  onClick={() => void handleCopyWebsiteLink()}
+                  className="min-h-[42px] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700/80 text-slate-700 dark:text-slate-200 text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>{ov.copyLinkBtn}</span>
+                </button>
+              </div>
+            </>
+          ) : (
+            <EmptyState
+              icon={Globe}
+              title={ov.websiteCardEmptyTitle}
+              description={ov.websiteCardEmptyDesc}
+              primaryAction={{
+                label: ov.websiteCardCreateBtn,
+                onClick: () => navigate('/create-website'),
+                icon: Sparkles,
+              }}
+              className="border-0 h-full"
+            />
+          )}
+        </div>
+
+        {/* Interactive Getting Started Checklist (5 cols) */}
+        <div className="lg:col-span-5 rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-[#111827] p-5 sm:p-6 flex flex-col justify-between space-y-4">
+          <div className="space-y-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-sm sm:text-base font-bold text-slate-900 dark:text-white">
+                  {allChecklistDone ? ov.checklistDoneTitle : ov.checklistTitle}
+                </h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                  {allChecklistDone ? ov.checklistDoneSubtitle : ov.checklistSubtitle}
+                </p>
+              </div>
+              <span className="text-xs font-mono font-semibold text-blue-600 dark:text-blue-400 tabular-nums shrink-0">
+                {completedChecklistCount}/{checklistItems.length}
+              </span>
             </div>
 
-            {connectedWebsite ? (
-              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                <span className="font-mono text-blue-600 dark:text-blue-400">
-                  https://{connectedWebsite.fullDomainUrl}
-                </span>
-                <span aria-hidden="true">·</span>
-                <span className="font-mono tabular-nums">
-                  {(connectedWebsite.servicesOrProducts || []).filter((i) => i.isVisible !== false).length}{' '}
-                  published product(s)
-                </span>
+            <div className="w-full h-1.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+              <div
+                className="h-full bg-blue-600 rounded-full transition-all duration-300"
+                style={{
+                  width: `${Math.round((completedChecklistCount / checklistItems.length) * 100)}%`,
+                }}
+              />
+            </div>
+
+            {!allChecklistDone ? (
+              <div className="space-y-2 pt-1">
+                {checklistItems.map((item, idx) => (
+                  <Link
+                    key={idx}
+                    to={item.path}
+                    className={`flex items-center justify-between gap-3 p-2.5 rounded-xl border text-xs transition-colors ${
+                      item.done
+                        ? 'border-emerald-200/70 dark:border-emerald-900/50 bg-emerald-50/40 dark:bg-emerald-950/20'
+                        : 'border-slate-200/80 dark:border-slate-800 hover:border-blue-400 dark:hover:border-blue-700'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      {item.done ? (
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                      ) : (
+                        <Circle className="w-4 h-4 text-slate-300 dark:text-slate-600 shrink-0" />
+                      )}
+                      <div className="min-w-0">
+                        <p
+                          className={`font-semibold truncate ${
+                            item.done
+                              ? 'text-slate-500 dark:text-slate-400 line-through'
+                              : 'text-slate-900 dark:text-white'
+                          }`}
+                        >
+                          {item.title}
+                        </p>
+                      </div>
+                    </div>
+                    {!item.done && (
+                      <span className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 shrink-0">
+                        {item.cta} →
+                      </span>
+                    )}
+                  </Link>
+                ))}
               </div>
             ) : (
-              <p className="text-xs text-slate-500">
-                Launch your GoAMAAS Website so customers can browse your catalog and place orders online.
-              </p>
+              <div className="space-y-2.5 pt-1 text-xs">
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/70 border border-slate-100 dark:border-slate-800 text-slate-700 dark:text-slate-300">
+                  1. {ov.nextActionShare}
+                </div>
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/70 border border-slate-100 dark:border-slate-800 text-slate-700 dark:text-slate-300">
+                  2. {ov.nextActionCatalog}
+                </div>
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/70 border border-slate-100 dark:border-slate-800 text-slate-700 dark:text-slate-300">
+                  3. {ov.nextActionOrders}
+                </div>
+              </div>
             )}
           </div>
+        </div>
+      </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <Link
-              to="/dashboard/products?action=add"
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Add Product</span>
-            </Link>
-            <Link
-              to="/dashboard/products"
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
-            >
-              <Package className="w-3.5 h-3.5 text-slate-500" />
-              <span>Manage Products</span>
-            </Link>
-            <Link
-              to="/dashboard/orders"
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
-            >
-              <ShoppingCart className="w-3.5 h-3.5 text-slate-500" />
-              <span>Manage Orders</span>
-            </Link>
-            <Link
-              to={connectedWebsite ? '/dashboard/subscribed-website' : '/create-website'}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
-            >
-              <Globe className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
-              <span>{connectedWebsite ? (isWebsiteLive ? 'Edit & Publish Website' : 'Publish Website') : 'Create Website'}</span>
-            </Link>
-            {connectedWebsite && (
+      {/* 3. 4 Quick Action Cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+        {quickActions.map((qa) => {
+          const Icon = qa.icon;
+          const cardContent = (
+            <div className="h-full p-4 rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-[#111827] hover:border-blue-500/60 dark:hover:border-blue-500/60 transition-colors flex items-start gap-3">
+              <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${qa.color}`}>
+                <Icon className="w-5 h-5" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs sm:text-sm font-semibold text-slate-900 dark:text-white truncate">
+                  {qa.title}
+                </p>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 line-clamp-1">
+                  {qa.desc}
+                </p>
+              </div>
+            </div>
+          );
+
+          if (qa.external) {
+            return (
               <a
-                href={`/s/${connectedWebsite.subdomain}`}
+                key={qa.title}
+                href={qa.to}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:opacity-90 text-xs font-semibold transition-opacity whitespace-nowrap shrink-0"
+                className="block min-h-[44px]"
               >
-                <span>Visit Website</span>
-                <ExternalLink className="w-3.5 h-3.5" />
+                {cardContent}
               </a>
-            )}
-          </div>
-        </div>
+            );
+          }
+
+          return (
+            <Link key={qa.title} to={qa.to} className="block min-h-[44px]">
+              {cardContent}
+            </Link>
+          );
+        })}
       </div>
 
-      {/* Core Merchant Dashboard — 100% Free Forever Workspace Notice */}
-      <div className="p-4 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
-            <CheckCircle2 className="w-5 h-5" />
-          </div>
-          <div>
-            <span className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white block">
-              Core Merchant Dashboard — 100% Free Forever (৳0/month)
-            </span>
-            <span className="text-xs text-slate-500 dark:text-slate-400">
-              Products, inventory, orders, customers, sales graphs, landing pages, website sync, and courier/payment settings are permanently unlocked. External courier, gateway, domain, and optional Website/AI service fees apply separately.
-            </span>
-          </div>
-        </div>
-        <Link
-          to="/dashboard/settings"
-          className="self-start sm:self-auto px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 text-xs font-semibold transition-colors shrink-0 flex items-center gap-1.5 whitespace-nowrap"
-        >
-          <Truck className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
-          <span>Courier &amp; Payment Settings</span>
-        </Link>
-      </div>
-
-      {/* Key Metric Cards (Real values only) */}
+      {/* 4. 4 Clean KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Total Sales */}
-        <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 text-xs font-medium">
+        <div className="p-5 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/80 dark:border-slate-800">
+          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 text-xs font-medium">
             <span>Total Sales</span>
             <TrendingUp className="w-4 h-4 text-emerald-500" />
           </div>
-          <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white font-mono tabular-nums">
+          <p className="mt-2.5 text-2xl font-bold text-slate-900 dark:text-white font-mono tabular-nums">
             ৳{totalSales.toLocaleString()}
           </p>
-          <div className="mt-2 flex items-center gap-1.5 text-[11px] text-slate-500 font-medium">
-            <span>Non-cancelled revenue · {products.length} catalog item(s)</span>
-          </div>
+          <p className="mt-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+            {customers.length} customer(s)
+          </p>
         </div>
 
-        {/* Total Orders */}
-        <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 text-xs font-medium">
-            <span>Total Orders</span>
+        <div className="p-5 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/80 dark:border-slate-800">
+          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 text-xs font-medium">
+            <span>{ov.kpiTotalOrders}</span>
             <ShoppingCart className="w-4 h-4 text-blue-500" />
           </div>
-          <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white font-mono tabular-nums">
+          <p className="mt-2.5 text-2xl font-bold text-slate-900 dark:text-white font-mono tabular-nums">
             {totalOrders}
           </p>
-          <div className="mt-2 flex items-center gap-1.5 text-[11px] text-slate-500 font-medium">
-            <span>{customers.length} unique customer(s)</span>
-          </div>
+          <Link
+            to="/dashboard/orders"
+            className="mt-1.5 inline-block text-[11px] text-blue-600 dark:text-blue-400 hover:underline font-medium"
+          >
+            {ov.actionViewOrders} →
+          </Link>
         </div>
 
-        {/* Pending / Active Fulfillment Orders */}
-        <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 text-xs font-medium">
-            <span>Pending Orders</span>
+        <div className="p-5 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/80 dark:border-slate-800">
+          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 text-xs font-medium">
+            <span>{ov.kpiPendingOrders}</span>
             <Clock className="w-4 h-4 text-amber-500" />
           </div>
-          <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white font-mono tabular-nums">
+          <p className="mt-2.5 text-2xl font-bold text-slate-900 dark:text-white font-mono tabular-nums">
             {pendingOrdersCount}
           </p>
-          <div className="mt-2 flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400 font-medium">
-            <Link to="/dashboard/orders" className="hover:underline">
-              Awaiting confirmation or dispatch →
-            </Link>
-          </div>
+          <p className="mt-1.5 text-[11px] text-amber-600 dark:text-amber-400 font-medium">
+            {pendingOrdersCount > 0 ? 'Needs review' : 'All caught up'}
+          </p>
         </div>
 
-        {/* Completed / Delivered Orders + Stock Health */}
-        <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 text-xs font-medium">
-            <span>Completed / Delivered</span>
-            <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+        <div className="p-5 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/80 dark:border-slate-800">
+          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 text-xs font-medium">
+            <span>{ov.kpiTotalProducts}</span>
+            <Package className="w-4 h-4 text-indigo-500" />
           </div>
-          <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white font-mono tabular-nums">
-            {completedOrdersCount}
+          <p className="mt-2.5 text-2xl font-bold text-slate-900 dark:text-white font-mono tabular-nums">
+            {products.length}
           </p>
-          <div className="mt-2 flex items-center gap-1.5 text-[11px]">
+          <div className="mt-1.5 text-[11px]">
             {lowStockCount > 0 ? (
               <Link
                 to="/dashboard/inventory"
-                className="text-amber-600 dark:text-amber-400 font-semibold flex items-center gap-1 hover:underline"
+                className="text-amber-600 dark:text-amber-400 font-medium inline-flex items-center gap-1 hover:underline"
               >
                 <AlertTriangle className="w-3 h-3" />
-                {lowStockCount} item(s) low in stock
+                <span>{lowStockCount} low stock</span>
               </Link>
             ) : (
               <span className="text-emerald-600 dark:text-emerald-400 font-medium">
-                All stock levels healthy
+                {lang === 'bn' ? 'স্টক স্বাভাবিক' : 'Stock healthy'}
               </span>
             )}
           </div>
         </div>
       </div>
 
-      {/* Charts Section: Revenue Area Chart + Order Status Pie */}
+      {/* 5. Revenue Trend + Previous-Month vs. Current-Month Sales + Business Performance Insights */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Revenue Trends (2 Cols) */}
-        <div className="lg:col-span-2 p-5 sm:p-6 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                Revenue Growth Trend
-              </h3>
-              <p className="text-[11px] text-slate-500">
-                Gross sales figures in BDT (৳) for selected period
-              </p>
-            </div>
-            <span className="text-xs font-mono font-semibold text-blue-600 dark:text-blue-400">
-              {dateRange.toUpperCase()} View
-            </span>
-          </div>
-
-          <div className="h-64 w-full">
-            {!hasSalesData ? (
-              <div className="h-full w-full flex flex-col items-center justify-center p-6 text-center border border-dashed border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50/50 dark:bg-slate-900/40">
-                <TrendingUp className="w-8 h-8 text-slate-300 dark:text-slate-600 mb-2" />
-                <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">No revenue data yet</p>
-                <p className="text-[11px] text-slate-500 max-w-xs mt-0.5">
-                  Revenue graphs will populate automatically as you record customer sales.
-                </p>
-              </div>
-            ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={salesTrendData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="revenueGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#2563EB" stopOpacity={0.4} />
-                      <stop offset="95%" stopColor="#2563EB" stopOpacity={0.0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.2} />
-                  <XAxis dataKey="date" tick={{ fontSize: 11 }} stroke="#64748B" />
-                  <YAxis tick={{ fontSize: 11 }} stroke="#64748B" tickFormatter={(val) => `৳${val}`} />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: '#0F172A',
-                      borderColor: '#1E293B',
-                      borderRadius: '8px',
-                      fontSize: '12px',
-                      color: '#fff',
-                    }}
-                    formatter={(val: any) => [`৳${Number(val).toLocaleString()}`, 'Revenue']}
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="revenue"
-                    stroke="#2563EB"
-                    strokeWidth={2}
-                    fillOpacity={1}
-                    fill="url(#revenueGrad)"
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            )}
-          </div>
-        </div>
-
-        {/* Order Status Breakdown */}
-        <div className="p-5 sm:p-6 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
-          <div>
-            <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-              Order Status Breakdown
-            </h3>
-            <p className="text-[11px] text-slate-500">Distribution across fulfillment stages</p>
-          </div>
-
-          <div className="h-52 w-full flex items-center justify-center">
-            {statusPieData.length === 0 ? (
-              <div className="h-full w-full flex flex-col items-center justify-center p-4 text-center border border-dashed border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50/50 dark:bg-slate-900/40">
-                <ShoppingCart className="w-7 h-7 text-slate-300 dark:text-slate-600 mb-2" />
-                <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">No active orders</p>
-                <p className="text-[11px] text-slate-500 max-w-xs mt-0.5">
-                  Order status distribution will display here once orders are created.
-                </p>
-              </div>
-            ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={statusPieData}
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={50}
-                    outerRadius={75}
-                    paddingAngle={3}
-                    dataKey="value"
-                  >
-                    {statusPieData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={entry.color} />
-                    ))}
-                  </Pie>
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: '#0F172A',
-                      borderColor: '#1E293B',
-                      borderRadius: '8px',
-                      fontSize: '11px',
-                      color: '#fff',
-                    }}
-                  />
-                </PieChart>
-              </ResponsiveContainer>
-            )}
-          </div>
-
-          {statusPieData.length > 0 && (
-            <div className="grid grid-cols-2 gap-2 text-[11px] pt-1 border-t border-slate-100 dark:border-slate-800">
-              {statusPieData.map((s) => (
-                <div key={s.name} className="flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: s.color }} />
-                  <span className="text-slate-600 dark:text-slate-400">{s.name}:</span>
-                  <span className="font-bold text-slate-900 dark:text-white font-mono tabular-nums">{s.value}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Previous-Month vs. Current-Month Sales Graph + Business Performance Insights */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 p-5 sm:p-6 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+        <div className="lg:col-span-2 p-5 sm:p-6 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/80 dark:border-slate-800 space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div>
               <h3 className="text-sm font-bold text-slate-900 dark:text-white">
                 Previous-Month vs. Current-Month Sales
               </h3>
-              <p className="text-[11px] text-slate-500">
-                Calendar comparison: {monthlyComparison.previousMonthLabel} vs. {monthlyComparison.currentMonthLabel}
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                {monthlyComparison.previousMonthLabel} vs. {monthlyComparison.currentMonthLabel}
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-4 text-xs font-mono tabular-nums">
-              <span className="text-slate-500">
-                Prev: <strong className="text-slate-900 dark:text-white">৳{monthlyComparison.previousTotal.toLocaleString()}</strong> ({monthlyComparison.previousOrderCount})
+              <span className="text-slate-500 dark:text-slate-400">
+                Prev: <strong className="text-slate-900 dark:text-white">৳{monthlyComparison.previousTotal.toLocaleString()}</strong>
               </span>
               <span className="text-blue-600 dark:text-blue-400">
-                Curr: <strong>৳{monthlyComparison.currentTotal.toLocaleString()}</strong> ({monthlyComparison.currentOrderCount})
+                Curr: <strong>৳{monthlyComparison.currentTotal.toLocaleString()}</strong>
               </span>
             </div>
           </div>
@@ -666,29 +697,34 @@ export const DashboardOverviewPage: React.FC = () => {
               <div className="h-full w-full flex flex-col items-center justify-center p-6 text-center border border-dashed border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50/50 dark:bg-slate-900/40">
                 <Calendar className="w-8 h-8 text-slate-300 dark:text-slate-600 mb-2" />
                 <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                  No current or previous month sales recorded yet
+                  No monthly sales recorded yet
                 </p>
-                <p className="text-[11px] text-slate-500 max-w-xs mt-0.5">
-                  Weekly previous-month and current-month sales bars appear automatically once orders are placed.
+                <p className="text-xs text-slate-500 max-w-xs mt-0.5">
+                  Sales comparison bars appear automatically once orders are placed.
                 </p>
               </div>
             ) : (
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={monthlyComparison.series} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.2} />
+                <BarChart
+                  data={monthlyComparison.series}
+                  margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.18} />
                   <XAxis dataKey="bucket" tick={{ fontSize: 11 }} stroke="#64748B" />
                   <YAxis tick={{ fontSize: 11 }} stroke="#64748B" tickFormatter={(val) => `৳${val}`} />
                   <Tooltip
                     contentStyle={{
                       backgroundColor: '#0F172A',
                       borderColor: '#1E293B',
-                      borderRadius: '8px',
+                      borderRadius: '10px',
                       fontSize: '12px',
                       color: '#fff',
                     }}
                     formatter={(val: any, name: any) => [
                       `৳${Number(val).toLocaleString()}`,
-                      name === 'previousMonth' ? monthlyComparison.previousMonthLabel : monthlyComparison.currentMonthLabel,
+                      name === 'previousMonth'
+                        ? monthlyComparison.previousMonthLabel
+                        : monthlyComparison.currentMonthLabel,
                     ]}
                   />
                   <Bar
@@ -710,13 +746,13 @@ export const DashboardOverviewPage: React.FC = () => {
         </div>
 
         {/* Business Performance Insights */}
-        <div className="p-5 sm:p-6 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col justify-between space-y-4">
+        <div className="p-5 sm:p-6 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/80 dark:border-slate-800 flex flex-col justify-between space-y-4">
           <div>
             <h3 className="text-sm font-bold text-slate-900 dark:text-white">
               Business Performance Insights
             </h3>
-            <p className="text-[11px] text-slate-500">
-              Live operational benchmarks from your store activity
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Live store activity benchmarks
             </p>
           </div>
 
@@ -770,49 +806,107 @@ export const DashboardOverviewPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Lower Grids: Recent Orders & Best Sellers */}
+      {/* Revenue Trend Graph */}
+      <div className="p-5 sm:p-6 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/80 dark:border-slate-800 space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+              Revenue Growth Trend
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Gross revenue in BDT (৳)
+            </p>
+          </div>
+          <span className="text-xs font-mono font-semibold text-blue-600 dark:text-blue-400">
+            {dateRange.toUpperCase()}
+          </span>
+        </div>
+
+        <div className="h-56 w-full">
+          {!hasSalesData ? (
+            <div className="h-full w-full flex flex-col items-center justify-center p-6 text-center border border-dashed border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50/50 dark:bg-slate-900/40">
+              <TrendingUp className="w-7 h-7 text-slate-300 dark:text-slate-600 mb-2" />
+              <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                No revenue data yet
+              </p>
+              <p className="text-xs text-slate-500 max-w-xs mt-0.5">
+                Revenue graphs populate automatically as orders come in.
+              </p>
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={salesTrendData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="revenueGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#2563EB" stopOpacity={0.35} />
+                    <stop offset="95%" stopColor="#2563EB" stopOpacity={0.0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.18} />
+                <XAxis dataKey="date" tick={{ fontSize: 11 }} stroke="#64748B" />
+                <YAxis tick={{ fontSize: 11 }} stroke="#64748B" tickFormatter={(val) => `৳${val}`} />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: '#0F172A',
+                    borderColor: '#1E293B',
+                    borderRadius: '10px',
+                    fontSize: '12px',
+                    color: '#fff',
+                  }}
+                  formatter={(val: any) => [`৳${Number(val).toLocaleString()}`, 'Revenue']}
+                />
+                <Area
+                  type="monotone"
+                  dataKey="revenue"
+                  stroke="#2563EB"
+                  strokeWidth={2}
+                  fillOpacity={1}
+                  fill="url(#revenueGrad)"
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+      </div>
+
+      {/* 6. Recent Orders & Top Products */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Recent Orders (2 cols) */}
-        <div className="lg:col-span-2 p-5 sm:p-6 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+        <div className="lg:col-span-2 p-5 sm:p-6 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/80 dark:border-slate-800 space-y-4">
           <div className="flex items-center justify-between">
             <div>
               <h3 className="text-sm font-bold text-slate-900 dark:text-white">Recent Orders</h3>
-              <p className="text-[11px] text-slate-500">Latest customer transactions</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Latest customer orders</p>
             </div>
             <Link
               to="/dashboard/orders"
               className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1"
             >
-              <span>View All Orders</span>
+              <span>View All</span>
               <ArrowRight className="w-3.5 h-3.5" />
             </Link>
           </div>
 
           {recentOrders.length === 0 ? (
-            <div className="p-8 text-center border border-dashed border-slate-200 dark:border-slate-800 rounded-xl space-y-2">
-              <ShoppingCart className="w-8 h-8 text-slate-300 dark:text-slate-600 mx-auto" />
-              <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">No orders yet</p>
-              <p className="text-[11px] text-slate-500 max-w-sm mx-auto">
-                Create a manual order or connect your storefront to start receiving purchases.
-              </p>
-              <Link
-                to="/dashboard/orders"
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold mt-2"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>Create Order</span>
-              </Link>
-            </div>
+            <EmptyState
+              icon={ShoppingCart}
+              title={t.workspace.orders.emptyTitle}
+              description={t.workspace.orders.emptyDesc}
+              primaryAction={{
+                label: t.workspace.orders.emptyCta,
+                onClick: () => navigate('/dashboard/orders'),
+                icon: Plus,
+              }}
+              className="border border-dashed py-8"
+            />
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
                 <thead>
                   <tr className="border-b border-slate-200 dark:border-slate-800 text-slate-400 font-semibold">
-                    <th className="pb-2">Order ID</th>
-                    <th className="pb-2">Customer</th>
-                    <th className="pb-2">Total</th>
-                    <th className="pb-2">Status</th>
-                    <th className="pb-2">Payment</th>
+                    <th className="pb-2.5">Order ID</th>
+                    <th className="pb-2.5">Customer</th>
+                    <th className="pb-2.5">Total</th>
+                    <th className="pb-2.5">Status</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -820,51 +914,42 @@ export const DashboardOverviewPage: React.FC = () => {
                     const meta = extractOrderMetadataFromItems(ord.items);
                     const sub = ord.websiteSubdomain || meta.websiteSubdomain;
                     return (
-                      <tr key={ord.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
-                        <td className="py-2.5 font-mono font-medium text-blue-600 dark:text-blue-400">
-                          <Link to="/dashboard/orders" className="hover:underline">{ord.orderNumber}</Link>
+                      <tr
+                        key={ord.id}
+                        className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40 transition-colors"
+                      >
+                        <td className="py-3 font-mono font-medium text-blue-600 dark:text-blue-400">
+                          <Link to="/dashboard/orders" className="hover:underline">
+                            {ord.orderNumber}
+                          </Link>
                           <span className="block text-[10px] font-sans text-slate-400">
                             {sub ? `${sub}.amaas.xyz` : 'Dashboard'}
                           </span>
                         </td>
-                        <td className="py-2.5">
-                          <span className="font-medium text-slate-900 dark:text-white block truncate max-w-[130px]">
+                        <td className="py-3">
+                          <span className="font-medium text-slate-900 dark:text-white block truncate max-w-[140px]">
                             {ord.customerName}
                           </span>
-                          <span className="text-[10px] text-slate-400">{ord.city}</span>
+                          <span className="text-[11px] text-slate-400">{ord.city}</span>
                         </td>
-                        <td className="py-2.5 font-mono font-bold tabular-nums">
+                        <td className="py-3 font-mono font-bold tabular-nums text-slate-900 dark:text-white">
                           ৳{ord.total.toLocaleString()}
                         </td>
-                        <td className="py-2.5">
-                          <span
-                            className={`text-[11px] font-semibold uppercase ${
+                        <td className="py-3">
+                          <StatusBadge
+                            tone={
                               ord.status === 'delivered'
-                                ? 'text-emerald-600 dark:text-emerald-400'
+                                ? 'delivered'
                                 : ord.status === 'shipped'
-                                ? 'text-blue-600 dark:text-blue-400'
-                                : ord.status === 'processing' || ord.status === 'pending'
-                                ? 'text-amber-600 dark:text-amber-400'
+                                ? 'shipped'
+                                : ord.status === 'processing' || ord.status === 'confirmed'
+                                ? 'processing'
                                 : ord.status === 'cancelled'
-                                ? 'text-rose-600 dark:text-rose-400'
-                                : 'text-slate-700 dark:text-slate-300'
-                            }`}
-                          >
-                            {ord.status}
-                          </span>
-                        </td>
-                        <td className="py-2.5">
-                          <span
-                            className={`text-[11px] font-medium ${
-                              ord.paymentStatus === 'paid'
-                                ? 'text-emerald-600'
-                                : ord.paymentStatus === 'pending'
-                                ? 'text-amber-600'
-                                : 'text-rose-600'
-                            }`}
-                          >
-                            {ord.paymentStatus.toUpperCase()}
-                          </span>
+                                ? 'cancelled'
+                                : 'pending'
+                            }
+                            label={ord.status}
+                          />
                         </td>
                       </tr>
                     );
@@ -875,53 +960,52 @@ export const DashboardOverviewPage: React.FC = () => {
           )}
         </div>
 
-        {/* Best-Selling Products */}
-        <div className="p-5 sm:p-6 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+        <div className="p-5 sm:p-6 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/80 dark:border-slate-800 space-y-4">
           <div className="flex items-center justify-between">
             <div>
               <h3 className="text-sm font-bold text-slate-900 dark:text-white">Top Products</h3>
-              <p className="text-[11px] text-slate-500">By total sales quantity</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">By units sold</p>
             </div>
-            <Link to="/dashboard/products" className="text-xs text-blue-600 hover:underline">
-              Inventory →
+            <Link
+              to="/dashboard/products"
+              className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline"
+            >
+              Manage →
             </Link>
           </div>
 
           {topProducts.length === 0 ? (
-            <div className="p-8 text-center border border-dashed border-slate-200 dark:border-slate-800 rounded-xl space-y-2">
-              <Package className="w-8 h-8 text-slate-300 dark:text-slate-600 mx-auto" />
-              <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">No products yet</p>
-              <p className="text-[11px] text-slate-500 max-w-xs mx-auto">
-                Add items to your catalog to track inventory and best sellers.
-              </p>
-              <Link
-                to="/dashboard/products"
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold mt-2"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>Add Product</span>
-              </Link>
-            </div>
+            <EmptyState
+              icon={Package}
+              title={t.workspace.products.emptyTitle}
+              description={t.workspace.products.emptyDesc}
+              primaryAction={{
+                label: t.workspace.products.emptyCta,
+                onClick: () => navigate('/dashboard/products?action=add'),
+                icon: Plus,
+              }}
+              className="border border-dashed py-8"
+            />
           ) : (
-            <div className="space-y-3">
+            <div className="space-y-2.5">
               {topProducts.map((p) => (
                 <div
                   key={p.id}
-                  className="flex items-center justify-between p-2.5 rounded-lg bg-slate-50 dark:bg-slate-800/50 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                  className="flex items-center justify-between p-3 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-100 dark:border-slate-800"
                 >
                   <div className="truncate pr-2">
                     <p className="text-xs font-semibold text-slate-900 dark:text-white truncate">
                       {p.name}
                     </p>
-                    <p className="text-[10px] text-slate-400 font-mono">
-                      SKU: {p.sku} · Stock: {p.stock}
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">
+                      Stock: {p.stock}
                     </p>
                   </div>
                   <div className="text-right shrink-0">
                     <span className="text-xs font-bold text-slate-900 dark:text-white font-mono tabular-nums">
                       ৳{p.price.toLocaleString()}
                     </span>
-                    <span className="text-[10px] text-emerald-600 block font-medium">
+                    <span className="text-[11px] text-emerald-600 dark:text-emerald-400 block font-medium">
                       {p.salesCount} sold
                     </span>
                   </div>
@@ -929,66 +1013,6 @@ export const DashboardOverviewPage: React.FC = () => {
               ))}
             </div>
           )}
-        </div>
-      </div>
-
-      {/* Quick Launchpad Strip */}
-      <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
-        <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">
-          Quick Workflows
-        </h3>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-          <button
-            onClick={() => navigate('/dashboard/products')}
-            className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 hover:border-blue-500 text-left flex items-center gap-2.5 transition-colors group cursor-pointer"
-          >
-            <Package className="w-4 h-4 text-blue-600 shrink-0" />
-            <div>
-              <strong className="block font-semibold text-slate-900 dark:text-white group-hover:text-blue-600">
-                Products
-              </strong>
-              <span className="text-[10px] text-slate-400">Add or adjust stock</span>
-            </div>
-          </button>
-
-          <button
-            onClick={() => navigate('/dashboard/orders')}
-            className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 hover:border-blue-500 text-left flex items-center gap-2.5 transition-colors group cursor-pointer"
-          >
-            <ShoppingCart className="w-4 h-4 text-emerald-600 shrink-0" />
-            <div>
-              <strong className="block font-semibold text-slate-900 dark:text-white group-hover:text-emerald-600">
-                Process Orders
-              </strong>
-              <span className="text-[10px] text-slate-400">Couriers & Invoices</span>
-            </div>
-          </button>
-
-          <button
-            onClick={() => navigate('/dashboard/landing-pages')}
-            className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 hover:border-blue-500 text-left flex items-center gap-2.5 transition-colors group cursor-pointer"
-          >
-            <Layers className="w-4 h-4 text-purple-600 shrink-0" />
-            <div>
-              <strong className="block font-semibold text-slate-900 dark:text-white group-hover:text-purple-600">
-                Landing Pages
-              </strong>
-              <span className="text-[10px] text-slate-400">Launch campaign</span>
-            </div>
-          </button>
-
-          <button
-            onClick={() => navigate('/dashboard/automations')}
-            className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 hover:border-blue-500 text-left flex items-center gap-2.5 transition-colors group cursor-pointer"
-          >
-            <Bot className="w-4 h-4 text-amber-600 shrink-0" />
-            <div>
-              <strong className="block font-semibold text-slate-900 dark:text-white group-hover:text-amber-600">
-                AI Automations
-              </strong>
-              <span className="text-[10px] text-slate-400">Bots & Abandoned cart</span>
-            </div>
-          </button>
         </div>
       </div>
     </div>

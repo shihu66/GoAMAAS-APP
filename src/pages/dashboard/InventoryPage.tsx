@@ -16,6 +16,8 @@ import {
   Package,
 } from 'lucide-react';
 import { Modal } from '../../components/ui/Modal';
+import { EmptyState } from '../../components/ui/EmptyState';
+import { StatusBadge } from '../../components/ui/StatusBadge';
 
 export const InventoryPage: React.FC = () => {
   const { products, inventoryLogs, adjustProductStock } = useApp();
@@ -106,7 +108,7 @@ export const InventoryPage: React.FC = () => {
 
       {/* KPI Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
+        <div className="p-5 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs">
           <span className="text-xs font-medium text-slate-500">Total Units in Stock</span>
           <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white font-mono tabular-nums">
             {totalUnits} units
@@ -116,7 +118,7 @@ export const InventoryPage: React.FC = () => {
           </span>
         </div>
 
-        <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
+        <div className="p-5 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs">
           <span className="text-xs font-medium text-amber-600 dark:text-amber-400">Low Stock Warnings</span>
           <p className="mt-2 text-2xl font-bold text-amber-600 font-mono tabular-nums">
             {lowStockItems.length} SKUs
@@ -126,7 +128,7 @@ export const InventoryPage: React.FC = () => {
           </span>
         </div>
 
-        <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
+        <div className="p-5 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs">
           <span className="text-xs font-medium text-rose-600 dark:text-rose-400">Out of Stock</span>
           <p className="mt-2 text-2xl font-bold text-rose-600 font-mono tabular-nums">
             {outOfStockItems.length} SKUs
@@ -136,7 +138,7 @@ export const InventoryPage: React.FC = () => {
           </span>
         </div>
 
-        <div className="p-5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
+        <div className="p-5 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs">
           <span className="text-xs font-medium text-slate-500">Total Asset Cost Value</span>
           <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white font-mono tabular-nums">
             ৳{totalStockAssetValue.toLocaleString()}
@@ -170,15 +172,15 @@ export const InventoryPage: React.FC = () => {
       )}
 
       {/* Search Input */}
-      <div className="p-4 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
+      <div className="p-4 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs">
         <div className="relative w-full max-w-sm">
-          <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5 pointer-events-none" />
+          <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-3 pointer-events-none" />
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder={activeTab === 'inventory' ? 'Filter by product name or SKU...' : 'Filter audit log by operator or reason...'}
-            className="w-full pl-9 pr-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-hidden focus:ring-1 focus:ring-blue-500"
+            className="w-full min-h-[38px] pl-9 pr-3 py-2 text-xs rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-hidden focus:ring-1 focus:ring-blue-500"
           />
         </div>
       </div>
@@ -186,32 +188,23 @@ export const InventoryPage: React.FC = () => {
       {/* View 1: Current Stock Table */}
       {activeTab === 'inventory' ? (
         products.length === 0 ? (
-          <div className="p-12 text-center rounded-xl bg-white dark:bg-slate-900 border border-dashed border-slate-200 dark:border-slate-800 space-y-3">
-            <Boxes className="w-10 h-10 text-slate-400 mx-auto" />
-            <h3 className="text-base font-bold text-slate-900 dark:text-white">No inventory items yet</h3>
-            <p className="text-xs text-slate-500 max-w-sm mx-auto">
-              Add products to your catalog to monitor stock reserves, set low-stock warnings, and record restocks.
-            </p>
-            <div className="pt-2">
-              <Link
-                to="/dashboard/products"
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-xs transition-colors"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>Go to Products Catalog</span>
-              </Link>
-            </div>
-          </div>
+          <EmptyState
+            icon={Boxes}
+            title="No inventory items yet"
+            description="Add products to your catalog to monitor stock reserves, set low-stock warnings, and record restocks."
+          />
         ) : filteredProducts.length === 0 ? (
-          <div className="p-12 text-center rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3">
-            <Search className="w-10 h-10 text-slate-400 mx-auto" />
-            <h3 className="text-base font-bold text-slate-900 dark:text-white">No matching products found</h3>
-            <p className="text-xs text-slate-500 max-w-sm mx-auto">
-              No products match your search query "{search}". Try clearing your search filter.
-            </p>
-          </div>
+          <EmptyState
+            icon={Search}
+            title="No matching products found"
+            description={`No products match "${search}". Try clearing your search filter.`}
+            primaryAction={{
+              label: 'Clear Search',
+              onClick: () => setSearch(''),
+            }}
+          />
         ) : (
-          <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
+          <div className="rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
                 <thead className="bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 font-semibold">
@@ -255,20 +248,11 @@ export const InventoryPage: React.FC = () => {
                         </td>
                         <td className="py-3.5 px-4">
                           {isOut ? (
-                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-rose-600">
-                              <span className="w-2 h-2 rounded-full bg-rose-600" />
-                              <span>Out of Stock</span>
-                            </span>
+                            <StatusBadge tone="rejected" label="Out of Stock" />
                           ) : isLow ? (
-                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-600">
-                              <span className="w-2 h-2 rounded-full bg-amber-500" />
-                              <span>Low Stock (&lt;{p.lowStockThreshold})</span>
-                            </span>
+                            <StatusBadge tone="pending" label={`Low Stock (<${p.lowStockThreshold})`} />
                           ) : (
-                            <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-600">
-                              <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                              <span>Nominal Reserve</span>
-                            </span>
+                            <StatusBadge tone="approved" label="In Stock" />
                           )}
                         </td>
                         <td className="py-3.5 px-4 text-right">
@@ -294,23 +278,23 @@ export const InventoryPage: React.FC = () => {
       ) : (
         /* View 2: Movement Audit Log */
         inventoryLogs.length === 0 ? (
-          <div className="p-12 text-center rounded-xl bg-white dark:bg-slate-900 border border-dashed border-slate-200 dark:border-slate-800 space-y-3">
-            <History className="w-10 h-10 text-slate-400 mx-auto" />
-            <h3 className="text-base font-bold text-slate-900 dark:text-white">No stock movements logged yet</h3>
-            <p className="text-xs text-slate-500 max-w-sm mx-auto">
-              Every restock, sale decrement, or damaged goods write-off will be recorded here with an immutable operator audit trail.
-            </p>
-          </div>
+          <EmptyState
+            icon={History}
+            title="No stock movements logged yet"
+            description="Every restock, order deduction, or stock adjustment is recorded here with an audit trail."
+          />
         ) : filteredLogs.length === 0 ? (
-          <div className="p-12 text-center rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3">
-            <Search className="w-10 h-10 text-slate-400 mx-auto" />
-            <h3 className="text-base font-bold text-slate-900 dark:text-white">No matching audit logs</h3>
-            <p className="text-xs text-slate-500 max-w-sm mx-auto">
-              No inventory movements match your filter query "{search}".
-            </p>
-          </div>
+          <EmptyState
+            icon={Search}
+            title="No matching audit logs"
+            description={`No inventory movements match "${search}".`}
+            primaryAction={{
+              label: 'Clear Search',
+              onClick: () => setSearch(''),
+            }}
+          />
         ) : (
-          <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
+          <div className="rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
                 <thead className="bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 font-semibold">

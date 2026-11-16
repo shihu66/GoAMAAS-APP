@@ -41,6 +41,8 @@ import { PaymentRequest, SubscribedWebsite } from '../../types';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { TrialStatusBadge } from '../../components/ui/TrialStatusBadge';
+import { EmptyState } from '../../components/ui/EmptyState';
+import { StatusBadge } from '../../components/ui/StatusBadge';
 import { ManualPaymentModal } from '../../components/payment/ManualPaymentModal';
 import { PaymentReceiptModal } from '../../components/payment/PaymentReceiptModal';
 
@@ -182,7 +184,7 @@ export const BillingPage: React.FC = () => {
       </div>
 
       {/* Workspace Access & Optional Add-On Services Hub */}
-      <div className="p-6 sm:p-7 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-5">
+      <div className="p-6 sm:p-7 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs space-y-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 dark:border-slate-800 pb-4">
           <div className="space-y-1">
             <div className="flex items-center gap-2">
@@ -381,7 +383,7 @@ export const BillingPage: React.FC = () => {
       {/* TAB 1: Free Merchant Dashboard */}
       {activeTab === 'dashboard' && (
         <div className="space-y-6">
-          <div className="p-6 sm:p-8 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-6">
+          <div className="p-6 sm:p-8 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 dark:border-slate-800 pb-6">
               <div className="space-y-1.5 max-w-2xl">
                 <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400">
@@ -972,7 +974,7 @@ export const BillingPage: React.FC = () => {
       )}
 
       {/* Active Verified Payment Channels */}
-      <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+      <div className="p-6 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <h3 className="text-sm font-bold text-slate-900 dark:text-white">
             Verified Payment Channels
@@ -1004,15 +1006,10 @@ export const BillingPage: React.FC = () => {
                       {isConfigured ? 'Available at checkout' : 'Currently unavailable'}
                     </span>
                   </div>
-                  <span
-                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                      isConfigured
-                        ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300'
-                        : 'bg-slate-100 dark:bg-slate-800 text-slate-500'
-                    }`}
-                  >
-                    {isConfigured ? 'Active' : 'Disabled'}
-                  </span>
+                  <StatusBadge
+                    tone={isConfigured ? 'approved' : 'neutral'}
+                    label={isConfigured ? 'Active' : 'Disabled'}
+                  />
                 </div>
               );
             })}
@@ -1028,7 +1025,7 @@ export const BillingPage: React.FC = () => {
 
       {/* Manual Payment Submissions & Verification Status */}
       {myPaymentRequests.length > 0 && (
-        <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
+        <div className="rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs overflow-hidden">
           <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div>
               <h3 className="text-sm font-bold text-slate-900 dark:text-white">
@@ -1171,7 +1168,7 @@ export const BillingPage: React.FC = () => {
       )}
 
       {/* Official Verified Payment Receipts (strictly approved payments only) */}
-      <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
+      <div className="rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs overflow-hidden">
         <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div>
             <h3 className="text-sm font-bold text-slate-900 dark:text-white">
@@ -1181,20 +1178,18 @@ export const BillingPage: React.FC = () => {
               Verified GoAMAAS / AMAAS Technologies receipts issued after administrator payment approval
             </p>
           </div>
-          <span className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-400">
+          <span className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-400 tabular-nums">
             {verifiedReceiptEntries.length} verified receipt{verifiedReceiptEntries.length === 1 ? '' : 's'}
           </span>
         </div>
 
         {verifiedReceiptEntries.length === 0 ? (
-          <div className="p-8 text-center space-y-1.5 text-xs text-slate-500 dark:text-slate-400">
-            <FileText className="w-6 h-6 text-slate-400 mx-auto" />
-            <p className="font-semibold text-slate-900 dark:text-white">
-              No verified payment receipts yet
-            </p>
-            <p>
-              Official printable receipts are generated automatically once an administrator verifies and approves a submitted payment.
-            </p>
+          <div className="p-4">
+            <EmptyState
+              icon={FileText}
+              title="No verified payment receipts yet"
+              description="Official printable receipts are generated automatically once an administrator verifies and approves a submitted payment."
+            />
           </div>
         ) : (
           <div className="overflow-x-auto">

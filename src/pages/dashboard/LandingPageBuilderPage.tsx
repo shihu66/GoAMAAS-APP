@@ -18,9 +18,12 @@ import {
   Palette,
   Layout,
   Share2,
+  Globe,
 } from 'lucide-react';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
+import { EmptyState } from '../../components/ui/EmptyState';
+import { StatusBadge } from '../../components/ui/StatusBadge';
 
 export const LandingPageBuilderPage: React.FC = () => {
   const {
@@ -151,6 +154,17 @@ export const LandingPageBuilderPage: React.FC = () => {
 
       {activeTab === 'pages' ? (
         <div className="space-y-6">
+          {landingPages.length === 0 ? (
+            <EmptyState
+              icon={Layers}
+              title="No campaign landing pages yet"
+              description="Create a focused 1-click Cash-on-Delivery landing page for your seasonal drop or ad campaign."
+              primaryAction={{
+                label: 'Create New Page',
+                onClick: () => setIsTemplateModalOpen(true),
+              }}
+            />
+          ) : (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {landingPages.map((lp) => {
               const convRate = lp.visitors > 0 ? ((lp.conversions / lp.visitors) * 100).toFixed(1) : '0.0';
@@ -158,19 +172,14 @@ export const LandingPageBuilderPage: React.FC = () => {
               return (
                 <div
                   key={lp.id}
-                  className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col justify-between space-y-4 hover:border-blue-500/50 transition-colors"
+                  className="p-6 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs flex flex-col justify-between space-y-4 hover:border-blue-500/50 transition-colors"
                 >
                   <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <span
-                        className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
-                          lp.status === 'published'
-                            ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400'
-                            : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-400'
-                        }`}
-                      >
-                        {lp.status}
-                      </span>
+                    <div className="flex items-center justify-between gap-2">
+                      <StatusBadge
+                        tone={lp.status === 'published' ? 'approved' : 'neutral'}
+                        label={lp.status === 'published' ? 'Published' : 'Draft'}
+                      />
                       <span className="text-[10px] text-slate-400 font-mono">
                         Updated: {lp.updatedAt}
                       </span>
@@ -243,12 +252,13 @@ export const LandingPageBuilderPage: React.FC = () => {
               );
             })}
           </div>
+          )}
         </div>
       ) : (
         /* VIEW 2: Visual Editor & Live Preview Split */
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           {/* Controls Panel (5 Cols) */}
-          <div className="lg:col-span-5 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-5 space-y-5 shadow-xs text-xs">
+          <div className="lg:col-span-5 bg-white dark:bg-[#111827] rounded-2xl border border-slate-200/90 dark:border-slate-800 p-5 space-y-5 shadow-xs text-xs">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
               <span className="font-bold text-sm text-slate-900 dark:text-white">
                 Editor Controls
@@ -256,13 +266,13 @@ export const LandingPageBuilderPage: React.FC = () => {
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => togglePublishLandingPage(selectedPage.id)}
-                  className={`px-3 py-1 rounded-md text-[11px] font-bold uppercase ${
+                  className={`px-3 py-1 rounded-lg text-[11px] font-bold uppercase cursor-pointer ${
                     selectedPage.status === 'published'
                       ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
                       : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
                   }`}
                 >
-                  {selectedPage.status} (Demo)
+                  {selectedPage.status === 'published' ? 'Published' : 'Draft'}
                 </button>
               </div>
             </div>
@@ -440,15 +450,11 @@ export const LandingPageBuilderPage: React.FC = () => {
                 previewDevice === 'mobile' ? 'max-w-sm min-h-[580px]' : 'w-full min-h-[580px]'
               }`}
             >
-              {/* Fake Browser Top */}
-              <div className="bg-slate-900 px-4 py-2 border-b border-slate-800 flex items-center justify-between text-[11px] text-slate-400">
-                <div className="flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-rose-500" />
-                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500" />
-                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
-                </div>
-                <span className="font-mono text-slate-300">shop.goamaas.com/p/{selectedPage.slug}</span>
-                <span className="text-[10px] text-blue-400 font-semibold">PREVIEW</span>
+              {/* Minimal Preview Domain Bar */}
+              <div className="bg-slate-900 px-4 py-2.5 border-b border-slate-800 flex items-center justify-between text-[11px] text-slate-400">
+                <Globe className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <span className="font-mono text-slate-300 truncate px-2">shop.goamaas.com/p/{selectedPage.slug}</span>
+                <span className="text-[10px] text-blue-400 font-semibold uppercase tracking-wider">Preview</span>
               </div>
 
               {/* Rendered Landing Page Content */}

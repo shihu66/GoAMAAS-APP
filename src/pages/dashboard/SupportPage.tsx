@@ -14,6 +14,8 @@ import {
   ChevronDown,
 } from 'lucide-react';
 import { Modal } from '../../components/ui/Modal';
+import { EmptyState } from '../../components/ui/EmptyState';
+import { StatusBadge } from '../../components/ui/StatusBadge';
 
 export const SupportPage: React.FC = () => {
   const {
@@ -155,74 +157,119 @@ export const SupportPage: React.FC = () => {
         </button>
       </div>
 
-      {/* TAB 1: Support Tickets Table */}
+      {/* TAB 1: Support Tickets */}
       {activeTab === 'tickets' && (
         <div className="space-y-4">
-          <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 font-semibold">
-                  <tr>
-                    <th className="py-3 px-4">Ticket ID</th>
-                    <th className="py-3 px-4">Subject</th>
-                    <th className="py-3 px-4">Category</th>
-                    <th className="py-3 px-4">Priority</th>
-                    <th className="py-3 px-4">Status</th>
-                    <th className="py-3 px-4">Created Date</th>
-                    <th className="py-3 px-4 text-right">Conversation</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {supportTickets.map((t) => (
-                    <tr key={t.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
-                      <td className="py-3.5 px-4 font-mono font-bold text-blue-600 dark:text-blue-400">
-                        {t.ticketNumber}
-                      </td>
-                      <td className="py-3.5 px-4 font-semibold text-slate-900 dark:text-white">
-                        {t.subject}
-                      </td>
-                      <td className="py-3.5 px-4 text-slate-500">
-                        {t.category}
-                      </td>
-                      <td className="py-3.5 px-4">
-                        <span
-                          className={`font-semibold uppercase text-[10px] ${
-                            t.priority === 'high' ? 'text-rose-600' : 'text-slate-500'
-                          }`}
-                        >
-                          {t.priority}
+          {supportTickets.length === 0 ? (
+            <EmptyState
+              icon={MessageSquare}
+              title="No support tickets yet"
+              description="Need help setting up your store, payments, or courier APIs? Open a ticket anytime."
+              primaryAction={{
+                label: 'Open Support Ticket',
+                onClick: () => setIsNewTicketModalOpen(true),
+              }}
+            />
+          ) : (
+            <>
+              {/* Mobile Ticket Cards */}
+              <div className="md:hidden space-y-3">
+                {supportTickets.map((t) => (
+                  <div
+                    key={t.id}
+                    className="p-4 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs space-y-2.5 text-xs"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <span className="font-mono font-bold text-blue-600 dark:text-blue-400 text-[11px]">
+                          {t.ticketNumber}
                         </span>
-                      </td>
-                      <td className="py-3.5 px-4">
-                        <span
-                          className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
-                            t.status === 'resolved'
-                              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
-                              : t.status === 'in_progress'
-                              ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300'
-                              : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
-                          }`}
-                        >
-                          {t.status.replace('_', ' ')}
-                        </span>
-                      </td>
-                      <td className="py-3.5 px-4 font-mono text-slate-400 text-[11px]">
-                        {t.createdAt}
-                      </td>
-                      <td className="py-3.5 px-4 text-right">
-                        <button
-                          onClick={() => setSelectedTicket(t)}
-                          className="px-3 py-1 rounded-lg bg-blue-50 dark:bg-blue-950 text-blue-600 dark:text-blue-400 hover:bg-blue-100 font-semibold"
-                        >
-                          View ({t.messages.length})
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
+                        <h3 className="font-semibold text-slate-900 dark:text-white mt-0.5">
+                          {t.subject}
+                        </h3>
+                        <p className="text-[11px] text-slate-500 mt-0.5">
+                          {t.category} · Priority: {t.priority.toUpperCase()}
+                        </p>
+                      </div>
+                      <StatusBadge
+                        tone={t.status === 'resolved' ? 'approved' : t.status === 'in_progress' ? 'info' : 'pending'}
+                        label={t.status.replace('_', ' ')}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-slate-800">
+                      <span className="font-mono text-[11px] text-slate-400">{t.createdAt}</span>
+                      <button
+                        onClick={() => setSelectedTicket(t)}
+                        className="min-h-[38px] px-3.5 py-1.5 rounded-lg bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 font-semibold cursor-pointer"
+                      >
+                        View ({t.messages.length})
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Desktop Tickets Table */}
+              <div className="hidden md:block rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 font-semibold">
+                      <tr>
+                        <th className="py-3 px-4">Ticket ID</th>
+                        <th className="py-3 px-4">Subject</th>
+                        <th className="py-3 px-4">Category</th>
+                        <th className="py-3 px-4">Priority</th>
+                        <th className="py-3 px-4">Status</th>
+                        <th className="py-3 px-4">Created Date</th>
+                        <th className="py-3 px-4 text-right">Conversation</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                      {supportTickets.map((t) => (
+                        <tr key={t.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
+                          <td className="py-3.5 px-4 font-mono font-bold text-blue-600 dark:text-blue-400">
+                            {t.ticketNumber}
+                          </td>
+                          <td className="py-3.5 px-4 font-semibold text-slate-900 dark:text-white">
+                            {t.subject}
+                          </td>
+                          <td className="py-3.5 px-4 text-slate-500">
+                            {t.category}
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <span
+                              className={`font-semibold uppercase text-[10px] ${
+                                t.priority === 'high' ? 'text-rose-600' : 'text-slate-500'
+                              }`}
+                            >
+                              {t.priority}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <StatusBadge
+                              tone={t.status === 'resolved' ? 'approved' : t.status === 'in_progress' ? 'info' : 'pending'}
+                              label={t.status.replace('_', ' ')}
+                            />
+                          </td>
+                          <td className="py-3.5 px-4 font-mono text-slate-400 text-[11px]">
+                            {t.createdAt}
+                          </td>
+                          <td className="py-3.5 px-4 text-right">
+                            <button
+                              onClick={() => setSelectedTicket(t)}
+                              className="px-3 py-1.5 rounded-lg bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 hover:bg-blue-100 font-semibold cursor-pointer"
+                            >
+                              View ({t.messages.length})
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </>
+          )}
         </div>
       )}
 
@@ -235,7 +282,7 @@ export const SupportPage: React.FC = () => {
               return (
                 <div
                   key={idx}
-                  className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden"
+                  className="rounded-2xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-[#111827] overflow-hidden"
                 >
                   <button
                     onClick={() => setOpenFaq(isOpen ? null : idx)}
@@ -262,42 +309,52 @@ export const SupportPage: React.FC = () => {
 
       {/* TAB 3: Notifications Feed */}
       {activeTab === 'notifications' && (
-        <div className="max-w-2xl bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs p-6 space-y-4 text-xs">
+        <div className="max-w-2xl bg-white dark:bg-[#111827] rounded-2xl border border-slate-200/90 dark:border-slate-800 shadow-xs p-6 space-y-4 text-xs">
           <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
             <span className="font-bold text-slate-900 dark:text-white">
               System & Operations Feed
             </span>
-            <button
-              onClick={markAllNotificationsRead}
-              className="text-blue-600 dark:text-blue-400 hover:underline font-semibold"
-            >
-              Mark all as read
-            </button>
+            {notifications.length > 0 && (
+              <button
+                onClick={markAllNotificationsRead}
+                className="text-blue-600 dark:text-blue-400 hover:underline font-semibold cursor-pointer"
+              >
+                Mark all as read
+              </button>
+            )}
           </div>
 
-          <div className="space-y-3">
-            {notifications.map((notif) => (
-              <div
-                key={notif.id}
-                onClick={() => markNotificationRead(notif.id)}
-                className={`p-3.5 rounded-xl border transition-colors cursor-pointer ${
-                  !notif.read
-                    ? 'border-blue-300 bg-blue-50/60 dark:border-blue-900 dark:bg-blue-950/20'
-                    : 'border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40'
-                }`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-semibold text-slate-900 dark:text-white">
-                    {notif.title}
-                  </span>
-                  <span className="text-[10px] text-slate-400">{notif.timestamp}</span>
+          {notifications.length === 0 ? (
+            <EmptyState
+              icon={Bell}
+              title="All caught up"
+              description="Order alerts, low-stock warnings, and payment updates will appear here."
+            />
+          ) : (
+            <div className="space-y-3">
+              {notifications.map((notif) => (
+                <div
+                  key={notif.id}
+                  onClick={() => markNotificationRead(notif.id)}
+                  className={`p-3.5 rounded-xl border transition-colors cursor-pointer ${
+                    !notif.read
+                      ? 'border-blue-300 bg-blue-50/60 dark:border-blue-900 dark:bg-blue-950/20'
+                      : 'border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-slate-900 dark:text-white">
+                      {notif.title}
+                    </span>
+                    <span className="text-[10px] text-slate-400">{notif.timestamp}</span>
+                  </div>
+                  <p className="text-slate-600 dark:text-slate-300 mt-1 leading-relaxed">
+                    {notif.message}
+                  </p>
                 </div>
-                <p className="text-slate-600 dark:text-slate-300 mt-1 leading-relaxed">
-                  {notif.message}
-                </p>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

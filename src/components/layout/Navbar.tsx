@@ -4,6 +4,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { useApp } from '../../context/AppContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { LanguageSwitcher } from '../ui/LanguageSwitcher';
+import { ThemeSelector } from '../ui/ThemeSelector';
 import { Sun, Moon, Menu, X, ArrowRight, LayoutDashboard } from 'lucide-react';
 
 export const Navbar: React.FC = () => {
@@ -134,8 +135,14 @@ export const Navbar: React.FC = () => {
             transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
             className="lg:hidden border-b border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-950/95 backdrop-blur-xl px-4 pt-3 pb-6 space-y-4"
           >
-            <div className="sm:hidden">
+            <div className="sm:hidden space-y-2.5">
               <LanguageSwitcher size="md" fullWidth />
+              <div className="flex items-center justify-between pt-1">
+                <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                  {t.workspace.theme.label}
+                </span>
+                <ThemeSelector compact />
+              </div>
             </div>
 
             <nav aria-label="Mobile Navigation" className="flex flex-col space-y-1">

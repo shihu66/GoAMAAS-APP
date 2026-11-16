@@ -762,6 +762,192 @@ export interface TranslationDictionary {
       submitFailed: string;
     };
   };
+  workspace: {
+    theme: {
+      label: string;
+      light: string;
+      dark: string;
+      system: string;
+    };
+    nav: {
+      overview: string;
+      myWebsite: string;
+      products: string;
+      orders: string;
+      inventory: string;
+      customers: string;
+      analytics: string;
+      settings: string;
+      support: string;
+      billing: string;
+      landingPages: string;
+      automations: string;
+      webRequests: string;
+      more: string;
+      mainGroup: string;
+      workspaceGroup: string;
+      quickSearchPlaceholder: string;
+      quickSearchHint: string;
+      websiteStatusLive: string;
+      websiteStatusDraft: string;
+      websiteStatusNone: string;
+      buildWebsiteCta: string;
+      continueSetupCta: string;
+      openSite: string;
+      signOut: string;
+      freeForeverLabel: string;
+    };
+    onboarding: {
+      welcomeTitle: string;
+      welcomeSubtitle: string;
+      welcomeStartBtn: string;
+      welcomeSkipBtn: string;
+      welcomeReassurance: string;
+      stepLabels: string[];
+      stepOf: (step: number, total: number) => string;
+      step1Title: string;
+      step1Subtitle: string;
+      businessNameLabel: string;
+      businessNamePlaceholder: string;
+      categoryLabel: string;
+      descriptionLabel: string;
+      descriptionPlaceholder: string;
+      step2Title: string;
+      step2Subtitle: string;
+      logoUploadLabel: string;
+      logoUploadBtn: string;
+      logoReplaceBtn: string;
+      logoRemoveBtn: string;
+      colorStyleLabel: string;
+      templateStyleLabel: string;
+      step3Title: string;
+      step3Subtitle: string;
+      addProductBtn: string;
+      skipProductsBtn: string;
+      productNamePlaceholder: string;
+      productPricePlaceholder: string;
+      productStockPlaceholder: string;
+      productDescPlaceholder: string;
+      uploadPhotoBtn: string;
+      step4Title: string;
+      step4Subtitle: string;
+      phoneLabel: string;
+      whatsappLabel: string;
+      emailLabel: string;
+      addressLabel: string;
+      mapsUrlLabel: string;
+      mapsUrlHelper: string;
+      step5Title: string;
+      step5Subtitle: string;
+      subdomainLabel: string;
+      subdomainExplainer: string;
+      subdomainAvailable: (domain: string) => string;
+      subdomainTaken: string;
+      subdomainChecking: string;
+      step6Title: string;
+      step6Subtitle: string;
+      createMyWebsiteBtn: string;
+      creatingBtn: string;
+      backBtn: string;
+      nextBtn: string;
+    };
+    overview: {
+      welcomeHeading: (name: string) => string;
+      welcomeSubheading: string;
+      websiteCardTitle: string;
+      websiteCardEmptyTitle: string;
+      websiteCardEmptyDesc: string;
+      websiteCardCreateBtn: string;
+      openLiveSiteBtn: string;
+      editWebsiteBtn: string;
+      previewSiteBtn: string;
+      copyLinkBtn: string;
+      linkCopiedToast: string;
+      quickActionsTitle: string;
+      actionEditSite: string;
+      actionEditSiteDesc: string;
+      actionAddProduct: string;
+      actionAddProductDesc: string;
+      actionViewOrders: string;
+      actionViewOrdersDesc: string;
+      actionViewSite: string;
+      actionViewSiteDesc: string;
+      kpiTotalOrders: string;
+      kpiPendingOrders: string;
+      kpiTotalProducts: string;
+      kpiWebsiteStatus: string;
+      checklistTitle: string;
+      checklistSubtitle: string;
+      checklistDoneTitle: string;
+      checklistDoneSubtitle: string;
+      checklistSteps: Array<{
+        title: string;
+        desc: string;
+        cta: string;
+      }>;
+      nextActionsTitle: string;
+      nextActionShare: string;
+      nextActionCatalog: string;
+      nextActionOrders: string;
+    };
+    builder: {
+      title: string;
+      railDesign: string;
+      railSections: string;
+      railProducts: string;
+      railImages: string;
+      railLocation: string;
+      railEffects: string;
+      railSettings: string;
+      chooseTemplateBtn: string;
+      saveDraftBtn: string;
+      publishChangesBtn: string;
+      payAndPublishBtn: string;
+      openLiveBtn: string;
+      statusSaved: string;
+      statusUnsaved: string;
+      statusSaving: string;
+      statusFailed: string;
+      statusDraftReady: string;
+      statusLive: string;
+      moreOptionsToggle: string;
+      lessOptionsToggle: string;
+      desktopPreview: string;
+      mobilePreview: string;
+      clickToEditHint: string;
+      templateModalTitle: string;
+      templateModalSubtitle: string;
+      useDesignBtn: string;
+      previewDesignBtn: string;
+      noWebsiteTitle: string;
+      noWebsiteDesc: string;
+      noWebsiteCta: string;
+    };
+    products: {
+      emptyTitle: string;
+      emptyDesc: string;
+      emptyCta: string;
+      addProductBtn: string;
+      moreOptionsLabel: string;
+      duplicateBtn: string;
+      moveUpLabel: string;
+      moveDownLabel: string;
+      featuredLabel: string;
+      galleryCameraHint: string;
+    };
+    orders: {
+      emptyTitle: string;
+      emptyDesc: string;
+      emptyCta: string;
+      viewDetailsBtn: string;
+      statusPending: string;
+      statusConfirmed: string;
+      statusProcessing: string;
+      statusShipped: string;
+      statusDelivered: string;
+      statusCancelled: string;
+    };
+  };
 }
 
 export const TRANSLATIONS: Record<Language, TranslationDictionary> = {
@@ -2249,6 +2435,224 @@ export const TRANSLATIONS: Record<Language, TranslationDictionary> = {
         submitFailed: 'Failed to submit payment request. Please try again.',
       },
     },
+    workspace: {
+      theme: {
+        label: 'Appearance',
+        light: 'Light',
+        dark: 'Dark',
+        system: 'System',
+      },
+      nav: {
+        overview: 'Overview',
+        myWebsite: 'My Website',
+        products: 'Products',
+        orders: 'Orders',
+        inventory: 'Inventory',
+        customers: 'Customers',
+        analytics: 'Analytics',
+        settings: 'Settings',
+        support: 'Help & Support',
+        billing: 'Billing & Add-ons',
+        landingPages: 'Page Builder',
+        automations: 'Automations',
+        webRequests: 'Custom Site Request',
+        more: 'More',
+        mainGroup: 'Workspace',
+        workspaceGroup: 'Account & Tools',
+        quickSearchPlaceholder: 'Search pages, products, or orders...',
+        quickSearchHint: 'Quick Jump',
+        websiteStatusLive: 'Published',
+        websiteStatusDraft: 'Draft',
+        websiteStatusNone: 'No website yet',
+        buildWebsiteCta: 'Build Website',
+        continueSetupCta: 'Continue Setup',
+        openSite: 'Open Site',
+        signOut: 'Sign Out',
+        freeForeverLabel: 'Free Forever Dashboard',
+      },
+      onboarding: {
+        welcomeTitle: "Let's build your website!",
+        welcomeSubtitle:
+          'Answer a few simple questions and see your live business website in minutes. No coding or experience needed.',
+        welcomeStartBtn: 'Create My Website',
+        welcomeSkipBtn: "I'll do this later",
+        welcomeReassurance: 'Your merchant dashboard tools are 100% free — customize or update anytime.',
+        stepLabels: [
+          'Business Info',
+          'Brand & Design',
+          'First Products',
+          'Contact & Map',
+          'Website Address',
+          'Preview & Create',
+        ],
+        stepOf: (step, total) => `Step ${step} of ${total}`,
+        step1Title: 'Tell us about your business',
+        step1Subtitle: 'Pick your business name and type so we can prepare a matching layout.',
+        businessNameLabel: 'Business Name *',
+        businessNamePlaceholder: 'e.g. Dhaka Craft House',
+        categoryLabel: 'What kind of business is this?',
+        descriptionLabel: 'Short Description (Optional)',
+        descriptionPlaceholder: 'Describe what you sell or offer in one or two friendly sentences.',
+        step2Title: 'Choose your look & logo',
+        step2Subtitle: 'Upload a logo if you have one, then pick colors and a style you love.',
+        logoUploadLabel: 'Business Logo (Optional)',
+        logoUploadBtn: 'Upload Logo',
+        logoReplaceBtn: 'Replace Logo',
+        logoRemoveBtn: 'Remove',
+        colorStyleLabel: 'Brand Colors',
+        templateStyleLabel: 'Visual Style Preset',
+        step3Title: 'Add your first products (Optional)',
+        step3Subtitle: 'Add 1 or 2 items customers can browse right away, or skip and add later.',
+        addProductBtn: 'Add Another Item',
+        skipProductsBtn: 'Skip for now',
+        productNamePlaceholder: 'e.g. Classic Cotton Panjabi',
+        productPricePlaceholder: 'Price (৳)',
+        productStockPlaceholder: 'Stock qty',
+        productDescPlaceholder: 'Short details for shoppers...',
+        uploadPhotoBtn: 'Upload Photo',
+        step4Title: 'How can customers reach you?',
+        step4Subtitle: 'Add your phone, WhatsApp, and location so buyers can contact or visit you easily.',
+        phoneLabel: 'Phone Number',
+        whatsappLabel: 'WhatsApp Number (for Orders)',
+        emailLabel: 'Business Email (Optional)',
+        addressLabel: 'Shop or Office Address',
+        mapsUrlLabel: 'Google Maps Link (Optional)',
+        mapsUrlHelper: 'Paste your Google Maps share link so customers can open directions in one tap.',
+        step5Title: 'Pick your website address',
+        step5Subtitle: 'Choose a clean, memorable web address ending in .amaas.xyz — included free.',
+        subdomainLabel: 'Your Website Address *',
+        subdomainExplainer:
+          'A website address (like yourshop.amaas.xyz) is the link you share on Facebook, WhatsApp, and business cards.',
+        subdomainAvailable: (domain) => `Great news! ${domain} is available.`,
+        subdomainTaken: 'That address is already taken. Try adding a city or short word.',
+        subdomainChecking: 'Checking availability...',
+        step6Title: 'Preview & create your website',
+        step6Subtitle: 'Switch between Phone and Computer view below. Everything looks good? Create your site!',
+        createMyWebsiteBtn: 'Create My Website',
+        creatingBtn: 'Creating Your Website...',
+        backBtn: 'Back',
+        nextBtn: 'Continue',
+      },
+      overview: {
+        welcomeHeading: (name) => `Welcome back, ${name}`,
+        welcomeSubheading: "Here's a clear look at your website, products, and incoming customer orders.",
+        websiteCardTitle: 'Your Website',
+        websiteCardEmptyTitle: 'Ready to launch your brand online?',
+        websiteCardEmptyDesc:
+          'Create a mobile-friendly business website in minutes with your own .amaas.xyz web link.',
+        websiteCardCreateBtn: 'Build Your Website',
+        openLiveSiteBtn: 'Open Live Site',
+        editWebsiteBtn: 'Edit Website',
+        previewSiteBtn: 'Preview',
+        copyLinkBtn: 'Copy Link',
+        linkCopiedToast: 'Website link copied to clipboard!',
+        quickActionsTitle: 'Quick Actions',
+        actionEditSite: 'Edit Website',
+        actionEditSiteDesc: 'Update design, hero, & text',
+        actionAddProduct: 'Add Product',
+        actionAddProductDesc: 'Upload item photos & price',
+        actionViewOrders: 'View Orders',
+        actionViewOrdersDesc: 'Check & confirm orders',
+        actionViewSite: 'Preview Site',
+        actionViewSiteDesc: 'See what customers see',
+        kpiTotalOrders: 'Total Orders',
+        kpiPendingOrders: 'Pending Orders',
+        kpiTotalProducts: 'Total Products',
+        kpiWebsiteStatus: 'Website Status',
+        checklistTitle: 'Getting Started Checklist',
+        checklistSubtitle: 'Complete these 5 quick steps to make your storefront shine.',
+        checklistDoneTitle: 'All setup steps complete!',
+        checklistDoneSubtitle: 'Your store is ready for customers. Explore these growth actions next:',
+        checklistSteps: [
+          {
+            title: 'Choose a website design',
+            desc: 'Pick colors and a visual preset that matches your brand.',
+            cta: 'Open Design',
+          },
+          {
+            title: 'Upload your business logo',
+            desc: 'Add a logo or brand icon to appear at the top of your site.',
+            cta: 'Add Logo',
+          },
+          {
+            title: 'Add your first product',
+            desc: 'Publish at least one item with a photo and price.',
+            cta: 'Add Product',
+          },
+          {
+            title: 'Add contact details or WhatsApp',
+            desc: 'Make it easy for shoppers to message or call your business.',
+            cta: 'Add Contact',
+          },
+          {
+            title: 'Preview & publish your website',
+            desc: 'Check desktop and mobile views and make your site live.',
+            cta: 'Preview & Publish',
+          },
+        ],
+        nextActionsTitle: 'Recommended Next Steps',
+        nextActionShare: 'Copy & share your website link on WhatsApp and Facebook',
+        nextActionCatalog: 'Add more product photos and highlight featured items',
+        nextActionOrders: 'Review incoming orders and confirm deliveries promptly',
+      },
+      builder: {
+        title: 'Visual Website Studio',
+        railDesign: 'Design',
+        railSections: 'Sections',
+        railProducts: 'Products',
+        railImages: 'Images',
+        railLocation: 'Location',
+        railEffects: 'Effects',
+        railSettings: 'Settings',
+        chooseTemplateBtn: 'Templates',
+        saveDraftBtn: 'Save Draft',
+        publishChangesBtn: 'Publish Changes',
+        payAndPublishBtn: 'Activate & Publish',
+        openLiveBtn: 'Open Live',
+        statusSaved: 'Saved',
+        statusUnsaved: 'Unsaved changes',
+        statusSaving: 'Saving...',
+        statusFailed: 'Save failed',
+        statusDraftReady: 'Draft ready to publish',
+        statusLive: 'Live',
+        moreOptionsToggle: 'More Options',
+        lessOptionsToggle: 'Hide Advanced Options',
+        desktopPreview: 'Desktop',
+        mobilePreview: 'Mobile',
+        clickToEditHint: 'Click any section in the preview to edit it directly on the right.',
+        templateModalTitle: 'Choose a Website Design',
+        templateModalSubtitle: 'Pick a curated look crafted for clear typography and effortless shopping. You can adjust any color later.',
+        useDesignBtn: 'Use This Design',
+        previewDesignBtn: 'Preview',
+        noWebsiteTitle: 'No website created yet',
+        noWebsiteDesc: 'Start with our guided 6-step builder to set up your brand, products, and .amaas.xyz link.',
+        noWebsiteCta: 'Start Guided Website Setup',
+      },
+      products: {
+        emptyTitle: 'No products yet.',
+        emptyDesc: 'Add your first product with a clear photo and price so customers can place orders.',
+        emptyCta: 'Add My First Product',
+        addProductBtn: 'Add Product',
+        moreOptionsLabel: 'More Product Options (SKU, Discount Price, Low Stock Alert)',
+        duplicateBtn: 'Duplicate',
+        moveUpLabel: 'Move Up',
+        moveDownLabel: 'Move Down',
+        featuredLabel: 'Featured',
+        galleryCameraHint: 'Supports gallery photos or mobile camera capture (PNG, JPG, WebP).',
+      },
+      orders: {
+        emptyTitle: 'No orders yet.',
+        emptyDesc: 'When customers order from your website or you log a manual order, it appears here.',
+        emptyCta: 'Add Manual Order',
+        viewDetailsBtn: 'Details',
+        statusPending: 'Pending',
+        statusConfirmed: 'Confirmed',
+        statusProcessing: 'Processing',
+        statusShipped: 'Shipped',
+        statusDelivered: 'Delivered',
+        statusCancelled: 'Cancelled',
+      },
+    },
   },
 
   bn: {
@@ -3733,6 +4137,224 @@ export const TRANSLATIONS: Record<Language, TranslationDictionary> = {
         alreadyPending:
           'এই সাবস্ক্রিপশনের একটি পেমেন্ট রিকোয়েস্ট ইতিমধ্যে যাচাইয়ের অপেক্ষায় রয়েছে।',
         submitFailed: 'পেমেন্ট রিকোয়েস্ট জমা দেওয়া যায়নি। আবার চেষ্টা করুন।',
+      },
+    },
+    workspace: {
+      theme: {
+        label: 'থিম',
+        light: 'লাইট',
+        dark: 'ডার্ক',
+        system: 'সিস্টেম',
+      },
+      nav: {
+        overview: 'ওভারভিউ',
+        myWebsite: 'আমার ওয়েবসাইট',
+        products: 'পণ্যসমূহ',
+        orders: 'অর্ডার',
+        inventory: 'ইনভেন্টরি',
+        customers: 'কাস্টমার',
+        analytics: 'বিশ্লেষণ',
+        settings: 'সেটিংস',
+        support: 'সাহায্য ও সাপোর্ট',
+        billing: 'বিলিং ও অ্যাড-অন',
+        landingPages: 'পেজ বিল্ডার',
+        automations: 'অটোমেশন',
+        webRequests: 'কাস্টম সাইট রিকোয়েস্ট',
+        more: 'আরও',
+        mainGroup: 'ওয়ার্কস্পেস',
+        workspaceGroup: 'অ্যাকাউন্ট ও টুলস',
+        quickSearchPlaceholder: 'পণ্য, অর্ডার বা পেজ খুঁজুন...',
+        quickSearchHint: 'দ্রুত যান',
+        websiteStatusLive: 'লাইভ',
+        websiteStatusDraft: 'ড্রাফট',
+        websiteStatusNone: 'এখনো ওয়েবসাইট নেই',
+        buildWebsiteCta: 'ওয়েবসাইট তৈরি করুন',
+        continueSetupCta: 'সেটআপ চালিয়ে যান',
+        openSite: 'সাইট দেখুন',
+        signOut: 'সাইন আউট',
+        freeForeverLabel: 'চিরকাল ফ্রি ড্যাশবোর্ড',
+      },
+      onboarding: {
+        welcomeTitle: 'চলুন আপনার ওয়েবসাইট তৈরি করি!',
+        welcomeSubtitle:
+          'কয়েকটি সহজ প্রশ্নের উত্তর দিন এবং মিনিটের মধ্যেই আপনার ব্যবসার সুন্দর ওয়েবসাইট তৈরি করে ফেলুন। কোনো কোডিং বা পূর্ব অভিজ্ঞতার প্রয়োজন নেই।',
+        welcomeStartBtn: 'আমার ওয়েবসাইট তৈরি করুন',
+        welcomeSkipBtn: 'আমি এটি পরে করব',
+        welcomeReassurance: 'আপনার মার্চেন্ট ড্যাশবোর্ড ১০০% ফ্রি — যেকোনো সময় সবকিছু বদলাতে পারবেন।',
+        stepLabels: [
+          'ব্যবসার তথ্য',
+          'ব্র্যান্ড ও ডিজাইন',
+          'প্রথম পণ্য',
+          'যোগাযোগ ও ম্যাপ',
+          'ওয়েবসাইট ঠিকানা',
+          'প্রিভিউ ও তৈরি',
+        ],
+        stepOf: (step, total) => `ধাপ ${step} / ${total}`,
+        step1Title: 'আপনার ব্যবসা সম্পর্কে বলুন',
+        step1Subtitle: 'আপনার ব্যবসার নাম ও ধরন নির্বাচন করুন যাতে আমরা সেরা লেআউট সাজাতে পারি।',
+        businessNameLabel: 'ব্যবসা বা দোকানের নাম *',
+        businessNamePlaceholder: 'যেমন: ঢাকা ক্রাফট হাউস',
+        categoryLabel: 'এটি কোন ধরনের ব্যবসা?',
+        descriptionLabel: 'সংক্ষিপ্ত বিবরণ (ঐচ্ছিক)',
+        descriptionPlaceholder: 'আপনার পণ্য বা সেবা সম্পর্কে এক-দুই লাইনে সহজভাবে লিখুন।',
+        step2Title: 'ডিজাইন ও লোগো বেছে নিন',
+        step2Subtitle: 'লোগো থাকলে আপলোড করুন, এরপর পছন্দের রঙ ও ডিজাইন স্টাইল বেছে নিন।',
+        logoUploadLabel: 'ব্যবসার লোগো (ঐচ্ছিক)',
+        logoUploadBtn: 'লোগো আপলোড করুন',
+        logoReplaceBtn: 'লোগো বদলান',
+        logoRemoveBtn: 'মুছুন',
+        colorStyleLabel: 'ব্র্যান্ডের রঙ',
+        templateStyleLabel: 'ভিজ্যুয়াল স্টাইল',
+        step3Title: 'প্রথম কয়েকটি পণ্য যোগ করুন (ঐচ্ছিক)',
+        step3Subtitle: 'শুরুতে ১ বা ২টি পণ্য ছবি ও দামসহ যোগ করুন, অথবা চাইলে এই ধাপ এড়িয়ে পরে যোগ করুন।',
+        addProductBtn: 'আরও একটি পণ্য যোগ করুন',
+        skipProductsBtn: 'আপাতত স্কিপ করুন',
+        productNamePlaceholder: 'যেমন: প্রিমিয়াম কটন পাঞ্জাবি',
+        productPricePlaceholder: 'দাম (৳)',
+        productStockPlaceholder: 'স্টক সংখ্যা',
+        productDescPlaceholder: 'ক্রেতাদের জন্য সংক্ষিপ্ত বিবরণ...',
+        uploadPhotoBtn: 'ছবি আপলোড করুন',
+        step4Title: 'ক্রেতারা কীভাবে যোগাযোগ করবে?',
+        step4Subtitle: 'ফোন, WhatsApp এবং ঠিকানা দিন যাতে ক্রেতারা সহজে অর্ডার ও যোগাযোগ করতে পারে।',
+        phoneLabel: 'ফোন নম্বর',
+        whatsappLabel: 'WhatsApp নম্বর (অর্ডারের জন্য)',
+        emailLabel: 'ব্যবসায়িক ইমেইল (ঐচ্ছিক)',
+        addressLabel: 'দোকান বা অফিসের ঠিকানা',
+        mapsUrlLabel: 'গুগল ম্যাপস লিংক (ঐচ্ছিক)',
+        mapsUrlHelper: 'আপনার দোকানের Google Maps শেয়ার লিংক দিলে ক্রেতারা এক ক্লিকে দিকনির্দেশনা পাবে।',
+        step5Title: 'আপনার ওয়েবসাইটের ঠিকানা ঠিক করুন',
+        step5Subtitle: '.amaas.xyz দিয়ে শেষ হওয়া একটি সহজ ও মনে রাখার মতো ঠিকানা বেছে নিন — একদম ফ্রি।',
+        subdomainLabel: 'আপনার ওয়েবসাইটের ঠিকানা *',
+        subdomainExplainer:
+          'ওয়েবসাইট ঠিকানা (যেমন yourshop.amaas.xyz) হলো সেই লিংক যা আপনি Facebook, WhatsApp ও ভিজিটিং কার্ডে শেয়ার করবেন।',
+        subdomainAvailable: (domain) => `দারুণ! ${domain} ঠিকানাটি খালি আছে।`,
+        subdomainTaken: 'এই ঠিকানাটি ইতিমধ্যে নেওয়া হয়েছে। অন্য একটি নাম চেষ্টা করুন।',
+        subdomainChecking: 'ঠিকানা যাচাই করা হচ্ছে...',
+        step6Title: 'প্রিভিউ দেখুন ও ওয়েবসাইট তৈরি করুন',
+        step6Subtitle: 'নিচে মোবাইল ও কম্পিউটার ভিউ পরীক্ষা করুন। সব ঠিক থাকলে "আমার ওয়েবসাইট তৈরি করুন" বাটনে ক্লিক করুন।',
+        createMyWebsiteBtn: 'আমার ওয়েবসাইট তৈরি করুন',
+        creatingBtn: 'ওয়েবসাইট তৈরি হচ্ছে...',
+        backBtn: 'পিছনে',
+        nextBtn: 'পরবর্তী ধাপ',
+      },
+      overview: {
+        welcomeHeading: (name) => `স্বাগতম, ${name}`,
+        welcomeSubheading: 'আপনার ওয়েবসাইট, পণ্য এবং নতুন অর্ডারের সম্পূর্ণ সারসংক্ষেপ এখানে দেখুন।',
+        websiteCardTitle: 'আপনার ওয়েবসাইট',
+        websiteCardEmptyTitle: 'আপনার ব্যবসা অনলাইনে আনতে প্রস্তুত?',
+        websiteCardEmptyDesc:
+          'মিনিটের মধ্যেই আপনার নিজস্ব .amaas.xyz লিংকসহ মোবাইল-ফ্রেন্ডলি ওয়েবসাইট তৈরি করুন।',
+        websiteCardCreateBtn: 'ওয়েবসাইট তৈরি করুন',
+        openLiveSiteBtn: 'লাইভ সাইট দেখুন',
+        editWebsiteBtn: 'ওয়েবসাইট এডিট করুন',
+        previewSiteBtn: 'প্রিভিউ',
+        copyLinkBtn: 'লিংক কপি করুন',
+        linkCopiedToast: 'ওয়েবসাইট লিংক কপি করা হয়েছে!',
+        quickActionsTitle: 'দ্রুত কাজ',
+        actionEditSite: 'ওয়েবসাইট এডিট',
+        actionEditSiteDesc: 'ডিজাইন ও লেখা বদলান',
+        actionAddProduct: 'পণ্য যোগ করুন',
+        actionAddProductDesc: 'ছবি ও দাম আপলোড করুন',
+        actionViewOrders: 'অর্ডার দেখুন',
+        actionViewOrdersDesc: 'নতুন অর্ডার কনফার্ম করুন',
+        actionViewSite: 'সাইট প্রিভিউ',
+        actionViewSiteDesc: 'ক্রেতারা যেমন দেখবে',
+        kpiTotalOrders: 'মোট অর্ডার',
+        kpiPendingOrders: 'অপেক্ষমাণ অর্ডার',
+        kpiTotalProducts: 'মোট পণ্য',
+        kpiWebsiteStatus: 'ওয়েবসাইট স্ট্যাটাস',
+        checklistTitle: 'শুরুর চেকলিস্ট',
+        checklistSubtitle: 'আপনার স্টোর সুন্দরভাবে প্রস্তুত করতে এই ৫টি সহজ ধাপ সম্পূর্ণ করুন।',
+        checklistDoneTitle: 'সকল প্রাথমিক ধাপ সম্পন্ন হয়েছে!',
+        checklistDoneSubtitle: 'আপনার স্টোর এখন ক্রেতাদের জন্য প্রস্তুত। পরবর্তী ধাপগুলো দেখুন:',
+        checklistSteps: [
+          {
+            title: 'ওয়েবসাইটের ডিজাইন বেছে নিন',
+            desc: 'আপনার ব্র্যান্ডের সাথে মানানসই রঙ ও স্টাইল নির্বাচন করুন।',
+            cta: 'ডিজাইন খুলুন',
+          },
+          {
+            title: 'ব্যবসার লোগো আপলোড করুন',
+            desc: 'আপনার ওয়েবসাইটের ওপরে দেখানোর জন্য লোগো যোগ করুন।',
+            cta: 'লোগো যোগ করুন',
+          },
+          {
+            title: 'প্রথম পণ্য যোগ করুন',
+            desc: 'ছবি ও দামসহ অন্তত একটি পণ্য প্রকাশ করুন।',
+            cta: 'পণ্য যোগ করুন',
+          },
+          {
+            title: 'যোগাযোগ বা WhatsApp যোগ করুন',
+            desc: 'ক্রেতারা যেন সহজেই আপনাকে মেসেজ বা কল করতে পারে।',
+            cta: 'যোগাযোগ যোগ করুন',
+          },
+          {
+            title: 'ওয়েবসাইট প্রিভিউ ও পাবলিশ করুন',
+            desc: 'মোবাইল ও ডেস্কটপ ভিউ দেখে আপনার সাইট লাইভ করুন।',
+            cta: 'প্রিভিউ ও পাবলিশ',
+          },
+        ],
+        nextActionsTitle: 'পরবর্তী করণীয়',
+        nextActionShare: 'আপনার ওয়েবসাইট লিংক কপি করে WhatsApp ও Facebook-এ শেয়ার করুন',
+        nextActionCatalog: 'আরও পণ্যের ছবি যোগ করুন এবং জনপ্রিয় পণ্যগুলো হাইলাইট করুন',
+        nextActionOrders: 'নতুন অর্ডার দ্রুত পর্যালোচনা করুন ও ডেলিভারি নিশ্চিত করুন',
+      },
+      builder: {
+        title: 'ভিজ্যুয়াল ওয়েবসাইট স্টুডিও',
+        railDesign: 'ডিজাইন',
+        railSections: 'সেকশন',
+        railProducts: 'পণ্যসমূহ',
+        railImages: 'ছবিসমূহ',
+        railLocation: 'অবস্থান',
+        railEffects: 'ইফেক্ট',
+        railSettings: 'সেটিংস',
+        chooseTemplateBtn: 'টেমপ্লেট',
+        saveDraftBtn: 'ড্রাফট সেভ করুন',
+        publishChangesBtn: 'পরিবর্তন পাবলিশ করুন',
+        payAndPublishBtn: 'সক্রিয় ও পাবলিশ করুন',
+        openLiveBtn: 'লাইভ দেখুন',
+        statusSaved: 'সেভ করা হয়েছে',
+        statusUnsaved: 'অসংরক্ষিত পরিবর্তন',
+        statusSaving: 'সেভ হচ্ছে...',
+        statusFailed: 'সেভ ব্যর্থ হয়েছে',
+        statusDraftReady: 'পাবলিশের জন্য প্রস্তুত',
+        statusLive: 'লাইভ',
+        moreOptionsToggle: 'আরও অপশন দেখুন',
+        lessOptionsToggle: 'অ্যাডভান্সড অপশন লুকান',
+        desktopPreview: 'ডেস্কটপ',
+        mobilePreview: 'মোবাইল',
+        clickToEditHint: 'প্রিভিউয়ের যেকোনো সেকশনে ক্লিক করলে ডানপাশে তার সেটিংস খুলে যাবে।',
+        templateModalTitle: 'ওয়েবসাইটের ডিজাইন বেছে নিন',
+        templateModalSubtitle: 'পরিচ্ছন্ন টাইপোগ্রাফি ও সহজ কেনাকাটার জন্য তৈরি প্রিমিয়াম টেমপ্লেট। পরে যেকোনো রঙ বদলাতে পারবেন।',
+        useDesignBtn: 'এই ডিজাইন ব্যবহার করুন',
+        previewDesignBtn: 'প্রিভিউ',
+        noWebsiteTitle: 'এখনো কোনো ওয়েবসাইট তৈরি হয়নি',
+        noWebsiteDesc: 'সহজ ৬-ধাপের গাইডেড সেটআপ দিয়ে আপনার ব্র্যান্ড, পণ্য ও .amaas.xyz লিংক তৈরি করুন।',
+        noWebsiteCta: 'ওয়েবসাইট সেটআপ শুরু করুন',
+      },
+      products: {
+        emptyTitle: 'এখনো কোনো পণ্য নেই।',
+        emptyDesc: 'ক্রেতারা যাতে অর্ডার করতে পারেন সেজন্য ছবি ও দামসহ আপনার প্রথম পণ্য যোগ করুন।',
+        emptyCta: 'আমার প্রথম পণ্য যোগ করুন',
+        addProductBtn: 'পণ্য যোগ করুন',
+        moreOptionsLabel: 'আরও অপশন (SKU, ডিসকাউন্ট দাম, স্টক সতর্কতা)',
+        duplicateBtn: 'ডুপ্লিকেট',
+        moveUpLabel: 'ওপরে নিন',
+        moveDownLabel: 'নিচে নিন',
+        featuredLabel: 'ফিচার্ড',
+        galleryCameraHint: 'গ্যালারি বা মোবাইলের ক্যামেরা দিয়ে সরাসরি ছবি তোলা যাবে (PNG, JPG, WebP)।',
+      },
+      orders: {
+        emptyTitle: 'এখনো কোনো অর্ডার আসেনি।',
+        emptyDesc: 'ক্রেতারা ওয়েবসাইট থেকে অর্ডার করলে বা আপনি ম্যানুয়ালি অর্ডার যোগ করলে এখানে দেখা যাবে।',
+        emptyCta: 'নতুন অর্ডার যোগ করুন',
+        viewDetailsBtn: 'বিস্তারিত',
+        statusPending: 'অপেক্ষমাণ',
+        statusConfirmed: 'কনফার্মড',
+        statusProcessing: 'প্রস্তুত হচ্ছে',
+        statusShipped: 'পাঠানো হয়েছে',
+        statusDelivered: 'ডেলিভারড',
+        statusCancelled: 'বাতিল',
       },
     },
   },

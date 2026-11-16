@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
+import { useLanguage } from '../../context/LanguageContext';
 import {
   SubscribedWebsite,
   BusinessNiche,
@@ -14,6 +15,9 @@ import {
   WebsiteProductItem,
 } from '../../types';
 import { WebsitePreviewRenderer } from '../../components/website/WebsitePreviewRenderer';
+import { TemplateSelectorModal } from '../../components/website/TemplateSelectorModal';
+import { CuratedWebsiteTemplate } from '../../data/websiteTemplates';
+import { StatusBadge } from '../../components/ui/StatusBadge';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { ManualPaymentModal } from '../../components/payment/ManualPaymentModal';
@@ -187,6 +191,8 @@ export const SubscribedWebsitePage: React.FC = () => {
     refreshSubscribedWebsites,
   } = useApp();
 
+  const { t, lang } = useLanguage();
+  const [searchParams] = useSearchParams();
   const [selectedWebsiteId, setSelectedWebsiteId] = useState<string>('');
 
   const activeWebsite: SubscribedWebsite | undefined =
@@ -194,12 +200,24 @@ export const SubscribedWebsitePage: React.FC = () => {
     subscribedWebsites.find((s) => s.storeId === activeStore?.id) ||
     subscribedWebsites[0];
 
-  // Visual Editor Tab State (8 Structured Tabs)
+  // Visual Editor Tab State (8 Structured Studio Panels)
   const [editorTab, setEditorTab] = useState<
     'business' | 'hero' | 'banner' | 'sections' | 'products' | 'location' | 'animations' | 'publish'
-  >('business');
+  >(() => {
+    const param = searchParams.get('tab');
+    if (param === 'design' || param === 'business') return 'business';
+    if (param === 'hero') return 'hero';
+    if (param === 'banner') return 'banner';
+    if (param === 'sections') return 'sections';
+    if (param === 'products') return 'products';
+    if (param === 'settings' || param === 'location') return 'location';
+    if (param === 'animations') return 'animations';
+    if (param === 'publish') return 'publish';
+    return 'business';
+  });
   const [previewDevice, setPreviewDevice] = useState<'desktop' | 'mobile'>('desktop');
   const [expandedSectionId, setExpandedSectionId] = useState<string | null>(null);
+  const [isTemplateModalOpen, setIsTemplateModalOpen] = useState(false);
 
   // Saving / Uploading / Action States
   const [isSavingDraft, setIsSavingDraft] = useState(false);
@@ -207,6 +225,20 @@ export const SubscribedWebsitePage: React.FC = () => {
   const [isActionLoading, setIsActionLoading] = useState(false);
   const [uploadingKey, setUploadingKey] = useState<string | null>(null);
   const [isDirty, setIsDirty] = useState(false);
+  const [saveErrorText, setSaveErrorText] = useState<string | null>(null);
+  const [editTemplateId, setEditTemplateId] = useState<string>('minimal-clean');
+  const [editTemplateName, setEditTemplateName] = useState<string>('Minimal Daylight');
+
+  // Protect against accidental tab close with unsaved edits
+  useEffect(() => {
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (!isDirty) return;
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [isDirty]);
 
   // Dialogs & Modals
   const [isRequestModalOpen, setIsRequestModalOpen] = useState(false);
@@ -321,6 +353,8 @@ export const SubscribedWebsitePage: React.FC = () => {
     );
 
     setEditNiche(site.niche || 'ecommerce');
+    setEditTemplateId(draft?.templateId ?? site.templateId ?? 'minimal-clean');
+    setEditTemplateName(draft?.templateName ?? site.templateName ?? 'Minimal Daylight');
     const primary =
       draft?.themeSettings?.primaryColor ??
       draft?.brandColor ??
@@ -486,6 +520,8 @@ export const SubscribedWebsitePage: React.FC = () => {
       businessName: editBusinessName.trim(),
       niche: editNiche,
       nicheLabel: foundCat?.label || activeWebsite?.nicheLabel || editNiche,
+      templateId: editTemplateId || activeWebsite?.templateId,
+      templateName: editTemplateName || activeWebsite?.templateName,
       brandColor: editBrandColor,
       logoUrl: resolvedLogoUrl || '',
       heroImageUrl: resolvedHeroUrl || '',
@@ -653,6 +689,30 @@ export const SubscribedWebsitePage: React.FC = () => {
     unifiedWebsiteProducts,
   ]);
 
+  const handleApplyCuratedTemplate = (tpl: CuratedWebsiteTemplate) => {
+    setEditTemplateId(tpl.id);
+    setEditTemplateName(tpl.name);
+    setEditBrandColor(tpl.brandColor);
+    setEditThemeSettings((prev) => ({
+      ...prev,
+      ...tpl.themeSettings,
+      paletteId: tpl.id,
+      primaryColor: tpl.brandColor,
+      accentColor: tpl.accentColor,
+      backgroundColor: tpl.bgColor,
+      textColor: tpl.textColor,
+      animations: prev.animations,
+      location: prev.location,
+    }));
+    markDirty();
+    showToast(
+      lang === 'bn'
+        ? `"${tpl.nameBn}" ডিজাইন প্রয়োগ করা হয়েছে`
+        : `Applied "${tpl.name}" design theme.`,
+      'success'
+    );
+  };
+
   const handleSaveDraftClick = async () => {
     if (!activeWebsite) return;
     if (!editBusinessName.trim()) {
@@ -661,12 +721,18 @@ export const SubscribedWebsitePage: React.FC = () => {
       return;
     }
 
+    setSaveErrorText(null);
     setIsSavingDraft(true);
     try {
       const res = await saveWebsiteDraft(activeWebsite.id, buildEditablePayload());
       if (res.success) {
         setIsDirty(false);
+        setSaveErrorText(null);
+      } else {
+        setSaveErrorText(res.error?.message || 'Save failed');
       }
+    } catch (err: any) {
+      setSaveErrorText(err?.message || 'Save failed');
     } finally {
       setIsSavingDraft(false);
     }
@@ -1762,72 +1828,85 @@ export const SubscribedWebsitePage: React.FC = () => {
       </div>
 
       {/* ========================================================================= */}
-      {/* INTEGRATED VISUAL WEBSITE BUILDER & REAL-TIME PREVIEW WORKSPACE           */}
+      {/* 3-COLUMN VISUAL WEBSITE STUDIO WORKSPACE                                  */}
       {/* ========================================================================= */}
-      <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
-        {/* Builder Top Toolbar: Tabs + Save Draft + Publish Updates */}
-        <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex flex-col xl:flex-row xl:items-center justify-between gap-4 bg-slate-50/70 dark:bg-slate-900">
-          {/* 8 Structured Builder Tabs */}
-          <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-200/70 dark:bg-slate-800 overflow-x-auto text-xs">
-            {[
-              { id: 'business', label: '1. Business Info', icon: Building },
-              { id: 'hero', label: '2. Hero & Branding', icon: Sparkles },
-              { id: 'banner', label: '3. Promo Banner', icon: Megaphone },
-              {
-                id: 'sections',
-                label: `4. Sections (${editSections.filter((s) => s.enabled).length})`,
-                icon: Layers,
-              },
-              {
-                id: 'products',
-                label: `5. Products (${unifiedWebsiteProducts.length})`,
-                icon: ShoppingBag,
-              },
-              { id: 'location', label: '6. Location & Contact', icon: MapPin },
-              { id: 'animations', label: '7. Animation & Effects', icon: Activity },
-              { id: 'publish', label: '8. Preview & Publish', icon: Globe },
-            ].map((t) => {
-              const Icon = t.icon;
-              const active = editorTab === t.id;
-              return (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => setEditorTab(t.id as any)}
-                  className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 whitespace-nowrap transition-colors cursor-pointer ${
-                    active
-                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white font-bold shadow-xs'
-                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white font-medium'
-                  }`}
-                >
-                  <Icon className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
-                  <span>{t.label}</span>
-                </button>
-              );
-            })}
+      <div className="rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs overflow-hidden">
+        {/* Studio Header Toolbar */}
+        <div className="px-4 py-3.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3 bg-slate-50/70 dark:bg-slate-900/80">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => setIsTemplateModalOpen(true)}
+              className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-blue-500 text-slate-800 dark:text-slate-100 text-xs font-semibold inline-flex items-center gap-1.5 shadow-2xs transition-colors cursor-pointer"
+            >
+              <Palette className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+              <span>{t.workspace.builder.chooseTemplateBtn}</span>
+            </button>
+
+            <span className="hidden sm:inline-block text-xs text-slate-400">|</span>
+
+            <StatusBadge
+              tone={
+                saveErrorText
+                  ? 'rejected'
+                  : isSavingDraft || isPublishing
+                  ? 'pending'
+                  : isDirty
+                  ? 'pending'
+                  : 'approved'
+              }
+              label={
+                saveErrorText
+                  ? t.workspace.builder.statusFailed
+                  : isSavingDraft || isPublishing
+                  ? t.workspace.builder.statusSaving
+                  : isDirty
+                  ? t.workspace.builder.statusUnsaved
+                  : activeWebsite.hasUnpublishedDraft
+                  ? t.workspace.builder.statusDraftReady
+                  : t.workspace.builder.statusSaved
+              }
+            />
           </div>
 
-          {/* Save Draft & Publish Controls */}
-          <div className="flex flex-wrap items-center justify-between xl:justify-end gap-2.5 text-xs">
-            <span className="text-[11px] text-slate-500">
-              {isDirty
-                ? 'Unsaved edits in preview'
-                : activeWebsite.hasUnpublishedDraft
-                ? 'Staged draft saved (not yet published)'
-                : isLive
-                ? 'All changes live'
-                : 'Draft saved'}
-            </span>
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            {/* Device Switcher */}
+            <div className="inline-flex p-1 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+              <button
+                type="button"
+                onClick={() => setPreviewDevice('desktop')}
+                className={`min-h-[32px] px-2.5 py-1 rounded-lg flex items-center gap-1 cursor-pointer transition-colors ${
+                  previewDevice === 'desktop'
+                    ? 'bg-blue-600 text-white font-semibold'
+                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                }`}
+              >
+                <Monitor className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">{t.workspace.builder.desktopPreview}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setPreviewDevice('mobile')}
+                className={`min-h-[32px] px-2.5 py-1 rounded-lg flex items-center gap-1 cursor-pointer transition-colors ${
+                  previewDevice === 'mobile'
+                    ? 'bg-blue-600 text-white font-semibold'
+                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                }`}
+              >
+                <Smartphone className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">{t.workspace.builder.mobilePreview}</span>
+              </button>
+            </div>
 
             {(isDirty || activeWebsite.hasUnpublishedDraft) && (
               <button
                 type="button"
                 onClick={() => void handleDiscardDraft()}
-                className="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 font-semibold inline-flex items-center gap-1 cursor-pointer"
+                className="min-h-[38px] px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 font-semibold inline-flex items-center gap-1 cursor-pointer"
                 title="Revert unpublished draft edits"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
-                <span>Discard Draft</span>
+                <span className="hidden md:inline">Discard</span>
               </button>
             )}
 
@@ -1835,21 +1914,21 @@ export const SubscribedWebsitePage: React.FC = () => {
               type="button"
               disabled={isSavingDraft || isPublishing}
               onClick={() => void handleSaveDraftClick()}
-              className="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-750 text-slate-900 dark:text-white font-semibold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              className="min-h-[38px] px-3.5 py-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-750 text-slate-900 dark:text-white font-semibold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
             >
               {isSavingDraft ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
               ) : (
                 <Save className="w-3.5 h-3.5 text-blue-600" />
               )}
-              <span>Save Draft</span>
+              <span>{t.workspace.builder.saveDraftBtn}</span>
             </button>
 
             <button
               type="button"
               disabled={isPublishing || isSavingDraft}
               onClick={() => void handlePublishUpdatesClick()}
-              className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold shadow-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              className="min-h-[38px] px-4 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
             >
               {isPublishing ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -1858,19 +1937,87 @@ export const SubscribedWebsitePage: React.FC = () => {
               )}
               <span>
                 {isLive
-                  ? 'Publish Updates'
+                  ? t.workspace.builder.publishChangesBtn
                   : isPublishEligible
-                  ? 'Publish Website Live'
-                  : 'Save & Activate to Publish'}
+                  ? t.workspace.builder.payAndPublishBtn
+                  : 'Save & Activate'}
               </span>
             </button>
           </div>
         </div>
 
-        {/* Split Editor & Live Preview Grid */}
+        {/* 3-Column Studio Body: Category Rail (2 cols) + Live Preview Canvas (6 cols) + Inspector Panel (4 cols) */}
         <div className="grid grid-cols-1 lg:grid-cols-12 divide-y lg:divide-y-0 lg:divide-x divide-slate-200 dark:divide-slate-800">
-          {/* LEFT PANE: VISUAL EDITOR CONTROLS (5 Cols) */}
-          <div className="lg:col-span-5 p-5 space-y-5 max-h-[820px] overflow-y-auto text-xs">
+          {/* COLUMN 1: CLEAN BEGINNER SECTION RAIL (2 cols) */}
+          <nav
+            aria-label="Website builder sections"
+            className="lg:col-span-2 p-2.5 bg-slate-50/50 dark:bg-slate-900/50 flex lg:flex-col gap-1 overflow-x-auto"
+          >
+            {[
+              { id: 'business', label: 'Business Info', icon: Building },
+              { id: 'hero', label: 'Hero & Design', icon: Sparkles },
+              { id: 'banner', label: 'Promo Banner', icon: Megaphone },
+              {
+                id: 'sections',
+                label: `Sections (${editSections.filter((s) => s.enabled).length})`,
+                icon: Layers,
+              },
+              {
+                id: 'products',
+                label: `Products (${unifiedWebsiteProducts.length})`,
+                icon: ShoppingBag,
+              },
+              { id: 'location', label: 'Contact & Map', icon: MapPin },
+              { id: 'animations', label: 'Effects', icon: Activity },
+              { id: 'publish', label: 'Publish', icon: Globe },
+            ].map((item) => {
+              const Icon = item.icon;
+              const active = editorTab === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setEditorTab(item.id as any)}
+                  className={`min-h-[42px] px-3 py-2 rounded-xl flex items-center gap-2 text-xs whitespace-nowrap lg:whitespace-normal text-left transition-colors cursor-pointer shrink-0 lg:shrink ${
+                    active
+                      ? 'bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 font-semibold border border-blue-200/70 dark:border-blue-800/60'
+                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800/70 font-medium border border-transparent'
+                  }`}
+                >
+                  <Icon
+                    className={`w-4 h-4 shrink-0 ${
+                      active ? 'text-blue-600 dark:text-blue-400' : 'text-slate-400'
+                    }`}
+                  />
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+
+          {/* COLUMN 2: INTERACTIVE REAL-TIME PREVIEW CANVAS (6 cols desktop, order below/top as needed) */}
+          <div className="lg:col-span-6 p-3 sm:p-5 bg-slate-100/80 dark:bg-slate-950/60 flex flex-col space-y-2.5 lg:order-2">
+            <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400 px-1">
+              <span className="font-medium">
+                {t.workspace.builder.clickToEditHint}
+              </span>
+              <span className="font-mono text-slate-400">
+                {editTemplateName || activeWebsite.templateName || 'Modern'}
+              </span>
+            </div>
+
+            <div className="max-h-[760px] overflow-y-auto scrollbar-thin flex justify-center">
+              <WebsitePreviewRenderer
+                site={livePreviewSite}
+                viewMode={previewDevice}
+                showGraceBanner={isExpired}
+                onSelectSection={(targetTab) => setEditorTab(targetTab)}
+              />
+            </div>
+          </div>
+
+          {/* COLUMN 3: CONTEXTUAL INSPECTOR PANEL (4 cols) */}
+          <div className="lg:col-span-4 p-4 sm:p-5 space-y-5 max-h-[820px] overflow-y-auto scrollbar-thin text-xs lg:order-3">
             {/* TAB 1: HERO & PROMOTIONAL BANNER */}
             {editorTab === 'hero' && (
               <div className="space-y-5">
@@ -2102,168 +2249,170 @@ export const SubscribedWebsitePage: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Secondary CTA Text (Optional)
-                      </label>
-                      <input
-                        type="text"
-                        value={editSecondaryCtaText}
-                        onChange={(e) => {
-                          setEditSecondaryCtaText(e.target.value);
-                          markDirty();
-                        }}
-                        placeholder="View Offerings"
-                        className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Secondary CTA Destination
-                      </label>
-                      <input
-                        type="text"
-                        value={editSecondaryCtaLink}
-                        onChange={(e) => {
-                          setEditSecondaryCtaLink(e.target.value);
-                          markDirty();
-                        }}
-                        placeholder="#services"
-                        className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-mono"
-                      />
-                    </div>
-                  </div>
-                </div>
+                  <details className="rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 p-3.5 group">
+                    <summary className="cursor-pointer list-none flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-200">
+                      <span>More Hero Options (Secondary Button &amp; Image Styling)</span>
+                      <ChevronDown className="w-4 h-4 text-slate-400 transition-transform group-open:rotate-180" />
+                    </summary>
 
-                  {/* Hero Cover Image Advanced Controls */}
-                  <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-3.5">
-                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300">
-                      Cover Image Styling &amp; Dimensions
-                    </h4>
-
-                    {/* Image Positioning */}
-                    <div>
-                      <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
-                        Image Focal Point / Positioning
-                      </label>
-                      <div className="grid grid-cols-5 gap-1.5 text-xs">
-                        {(['center', 'top', 'bottom', 'left', 'right'] as const).map((pos) => (
-                          <button
-                            key={pos}
-                            type="button"
-                            onClick={() => {
-                              setEditThemeSettings((prev) => ({ ...prev, heroImagePosition: pos }));
+                    <div className="pt-3.5 mt-3 border-t border-slate-200 dark:border-slate-700 space-y-4">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                            Secondary CTA Text (Optional)
+                          </label>
+                          <input
+                            type="text"
+                            value={editSecondaryCtaText}
+                            onChange={(e) => {
+                              setEditSecondaryCtaText(e.target.value);
                               markDirty();
                             }}
-                            className={`py-1.5 px-2 rounded-lg border capitalize font-semibold transition-colors cursor-pointer ${
-                              (editThemeSettings.heroImagePosition || 'center') === pos
-                                ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300'
-                                : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
-                            }`}
-                          >
-                            {pos}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Overlay Opacity */}
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
-                          Dark Overlay Opacity
-                        </label>
-                        <span className="font-mono text-xs font-bold text-slate-700 dark:text-slate-300">
-                          {editThemeSettings.heroOverlayOpacity ?? 40}%
-                        </span>
-                      </div>
-                      <input
-                        type="range"
-                        min="0"
-                        max="100"
-                        step="5"
-                        value={editThemeSettings.heroOverlayOpacity ?? 40}
-                        onChange={(e) => {
-                          setEditThemeSettings((prev) => ({
-                            ...prev,
-                            heroOverlayOpacity: Number(e.target.value),
-                          }));
-                          markDirty();
-                        }}
-                        className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer"
-                      />
-                      <div className="flex justify-between text-[10px] text-slate-400 mt-0.5">
-                        <span>Transparent (0%)</span>
-                        <span>Balanced (40%)</span>
-                        <span>Solid Dark (100%)</span>
-                      </div>
-                    </div>
-
-                    {/* Image Brightness */}
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
-                          Image Brightness
-                        </label>
-                        <span className="font-mono text-xs font-bold text-slate-700 dark:text-slate-300">
-                          {editThemeSettings.heroBrightness ?? 100}%
-                        </span>
-                      </div>
-                      <input
-                        type="range"
-                        min="50"
-                        max="150"
-                        step="5"
-                        value={editThemeSettings.heroBrightness ?? 100}
-                        onChange={(e) => {
-                          setEditThemeSettings((prev) => ({
-                            ...prev,
-                            heroBrightness: Number(e.target.value),
-                          }));
-                          markDirty();
-                        }}
-                        className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer"
-                      />
-                      <div className="flex justify-between text-[10px] text-slate-400 mt-0.5">
-                        <span>Dim (50%)</span>
-                        <span>Normal (100%)</span>
-                        <span>High (150%)</span>
-                      </div>
-                    </div>
-
-                    {/* Hero Height */}
-                    <div>
-                      <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
-                        Hero Height Dimension
-                      </label>
-                      <div className="grid grid-cols-4 gap-1.5 text-xs">
-                        {([
-                          { id: 'compact', label: 'Compact' },
-                          { id: 'medium', label: 'Medium' },
-                          { id: 'tall', label: 'Tall' },
-                          { id: 'full', label: 'Full Screen' },
-                        ] as const).map((h) => (
-                          <button
-                            key={h.id}
-                            type="button"
-                            onClick={() => {
-                              setEditThemeSettings((prev) => ({ ...prev, heroHeight: h.id }));
+                            placeholder="View Offerings"
+                            className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                            Secondary CTA Destination
+                          </label>
+                          <input
+                            type="text"
+                            value={editSecondaryCtaLink}
+                            onChange={(e) => {
+                              setEditSecondaryCtaLink(e.target.value);
                               markDirty();
                             }}
-                            className={`py-1.5 px-2 rounded-lg border font-semibold transition-colors cursor-pointer ${
-                              (editThemeSettings.heroHeight || 'medium') === h.id
-                                ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300'
-                                : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
-                            }`}
-                          >
-                            {h.label}
-                          </button>
-                        ))}
+                            placeholder="#services"
+                            className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Image Positioning */}
+                      <div>
+                        <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                          Image Focal Point / Positioning
+                        </label>
+                        <div className="grid grid-cols-5 gap-1.5 text-xs">
+                          {(['center', 'top', 'bottom', 'left', 'right'] as const).map((pos) => (
+                            <button
+                              key={pos}
+                              type="button"
+                              onClick={() => {
+                                setEditThemeSettings((prev) => ({ ...prev, heroImagePosition: pos }));
+                                markDirty();
+                              }}
+                              className={`py-1.5 px-2 rounded-lg border capitalize font-semibold transition-colors cursor-pointer ${
+                                (editThemeSettings.heroImagePosition || 'center') === pos
+                                  ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300'
+                                  : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+                              }`}
+                            >
+                              {pos}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Overlay Opacity */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                            Dark Overlay Opacity
+                          </label>
+                          <span className="font-mono text-xs font-bold text-slate-700 dark:text-slate-300 tabular-nums">
+                            {editThemeSettings.heroOverlayOpacity ?? 40}%
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          step="5"
+                          value={editThemeSettings.heroOverlayOpacity ?? 40}
+                          onChange={(e) => {
+                            setEditThemeSettings((prev) => ({
+                              ...prev,
+                              heroOverlayOpacity: Number(e.target.value),
+                            }));
+                            markDirty();
+                          }}
+                          className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer"
+                        />
+                        <div className="flex justify-between text-[10px] text-slate-400 mt-0.5">
+                          <span>Transparent (0%)</span>
+                          <span>Balanced (40%)</span>
+                          <span>Solid Dark (100%)</span>
+                        </div>
+                      </div>
+
+                      {/* Image Brightness */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                            Image Brightness
+                          </label>
+                          <span className="font-mono text-xs font-bold text-slate-700 dark:text-slate-300 tabular-nums">
+                            {editThemeSettings.heroBrightness ?? 100}%
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min="50"
+                          max="150"
+                          step="5"
+                          value={editThemeSettings.heroBrightness ?? 100}
+                          onChange={(e) => {
+                            setEditThemeSettings((prev) => ({
+                              ...prev,
+                              heroBrightness: Number(e.target.value),
+                            }));
+                            markDirty();
+                          }}
+                          className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer"
+                        />
+                        <div className="flex justify-between text-[10px] text-slate-400 mt-0.5">
+                          <span>Dim (50%)</span>
+                          <span>Normal (100%)</span>
+                          <span>High (150%)</span>
+                        </div>
+                      </div>
+
+                      {/* Hero Height */}
+                      <div>
+                        <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                          Hero Height Dimension
+                        </label>
+                        <div className="grid grid-cols-4 gap-1.5 text-xs">
+                          {([
+                            { id: 'compact', label: 'Compact' },
+                            { id: 'medium', label: 'Medium' },
+                            { id: 'tall', label: 'Tall' },
+                            { id: 'full', label: 'Full Screen' },
+                          ] as const).map((h) => (
+                            <button
+                              key={h.id}
+                              type="button"
+                              onClick={() => {
+                                setEditThemeSettings((prev) => ({ ...prev, heroHeight: h.id }));
+                                markDirty();
+                              }}
+                              className={`py-1.5 px-2 rounded-lg border font-semibold transition-colors cursor-pointer ${
+                                (editThemeSettings.heroHeight || 'medium') === h.id
+                                  ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300'
+                                  : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+                              }`}
+                            >
+                              {h.label}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  </details>
                 </div>
+              </div>
             )}
 
             {/* TAB 3: PROMOTIONAL BANNER */}
@@ -4226,54 +4375,6 @@ export const SubscribedWebsitePage: React.FC = () => {
               </div>
             )}
           </div>
-
-          {/* RIGHT PANE: LIVE REAL-TIME DESKTOP & MOBILE PREVIEW (7 Cols) */}
-          <div className="lg:col-span-7 p-4 sm:p-6 bg-slate-100/80 dark:bg-slate-950/60 flex flex-col space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="text-xs">
-                <span className="font-bold text-slate-900 dark:text-white">
-                  Real-Time Storefront Preview
-                </span>
-                <span className="text-slate-400 mx-2">·</span>
-                <span className="text-slate-500">Updates immediately as you edit</span>
-              </div>
-
-              <div className="inline-flex p-1 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs">
-                <button
-                  type="button"
-                  onClick={() => setPreviewDevice('desktop')}
-                  className={`px-3 py-1 rounded-md flex items-center gap-1.5 cursor-pointer ${
-                    previewDevice === 'desktop'
-                      ? 'bg-blue-600 text-white font-semibold'
-                      : 'text-slate-500 hover:text-slate-900 dark:hover:text-white'
-                  }`}
-                >
-                  <Monitor className="w-3.5 h-3.5" />
-                  <span>Desktop</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPreviewDevice('mobile')}
-                  className={`px-3 py-1 rounded-md flex items-center gap-1.5 cursor-pointer ${
-                    previewDevice === 'mobile'
-                      ? 'bg-blue-600 text-white font-semibold'
-                      : 'text-slate-500 hover:text-slate-900 dark:hover:text-white'
-                  }`}
-                >
-                  <Smartphone className="w-3.5 h-3.5" />
-                  <span>Mobile</span>
-                </button>
-              </div>
-            </div>
-
-            <div className="max-h-[750px] overflow-y-auto flex justify-center">
-              <WebsitePreviewRenderer
-                site={livePreviewSite}
-                viewMode={previewDevice}
-                showGraceBanner={isExpired}
-              />
-            </div>
-          </div>
         </div>
       </div>
 
@@ -4638,6 +4739,15 @@ export const SubscribedWebsitePage: React.FC = () => {
         confirmLabel="Unpublish Website"
         cancelLabel="Stay Live"
         isDestructive={true}
+      />
+
+      {/* Template Selector Modal */}
+      <TemplateSelectorModal
+        isOpen={isTemplateModalOpen}
+        onClose={() => setIsTemplateModalOpen(false)}
+        activeTemplateId={editTemplateId}
+        businessName={editBusinessName}
+        onSelectTemplate={handleApplyCuratedTemplate}
       />
 
       {/* Cancel Subscription Confirmation Dialog */}
