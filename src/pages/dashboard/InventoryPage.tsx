@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
+import { useLanguage } from '../../context/LanguageContext';
 import { Product } from '../../types';
 import {
   Boxes,
@@ -21,6 +22,7 @@ import { StatusBadge } from '../../components/ui/StatusBadge';
 
 export const InventoryPage: React.FC = () => {
   const { products, inventoryLogs, adjustProductStock } = useApp();
+  const { lang } = useLanguage();
 
   const [search, setSearch] = useState('');
   const [activeTab, setActiveTab] = useState<'inventory' | 'history'>('inventory');
@@ -72,10 +74,12 @@ export const InventoryPage: React.FC = () => {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
-            Inventory & Warehouse Stock Ledger
+            {lang === 'bn' ? 'আপনার স্টক ও ওয়্যারহাউস' : 'Your Stock & Warehouse Ledger'}
           </h1>
           <p className="text-xs text-slate-500 mt-1">
-            Real-time stock tracking, automatic reorder alerts, and movement audit logs.
+            {lang === 'bn'
+              ? 'রিয়েল-টাইম স্টক ট্র্যাকিং, লো-স্টক সতর্কতা এবং প্রতিটি স্টক পরিবর্তনের হিসাব রাখুন।'
+              : 'Real-time stock tracking, automatic reorder alerts, and movement audit logs.'}
           </p>
         </div>
 
@@ -205,7 +209,56 @@ export const InventoryPage: React.FC = () => {
           />
         ) : (
           <div className="rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs overflow-hidden">
-            <div className="overflow-x-auto">
+            {/* Mobile Stock Cards */}
+            <div className="md:hidden divide-y divide-slate-100 dark:divide-slate-800">
+              {filteredProducts.map((p) => {
+                const isLow = p.stock <= p.lowStockThreshold && p.stock > 0;
+                const isOut = p.stock === 0;
+                return (
+                  <div key={`mob-${p.id}`} className="p-4 space-y-2.5 text-xs">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <h3 className="font-semibold text-sm text-slate-900 dark:text-white truncate">
+                          {p.name}
+                        </h3>
+                        <p className="font-mono text-[11px] text-blue-600 dark:text-blue-400">
+                          {p.sku} · <span className="font-sans text-slate-500">{p.category}</span>
+                        </p>
+                      </div>
+                      <span
+                        className={`font-mono font-bold text-sm tabular-nums shrink-0 ${
+                          isOut ? 'text-rose-600' : isLow ? 'text-amber-600' : 'text-emerald-600'
+                        }`}
+                      >
+                        {p.stock} units
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+                      {isOut ? (
+                        <StatusBadge tone="rejected" label="Out of Stock" />
+                      ) : isLow ? (
+                        <StatusBadge tone="pending" label={`Low Stock (<${p.lowStockThreshold})`} />
+                      ) : (
+                        <StatusBadge tone="approved" label="In Stock" />
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedProduct(p);
+                          setAdjustDelta(10);
+                          setIsAdjustModalOpen(true);
+                        }}
+                        className="min-h-[36px] px-3 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-blue-600 hover:text-white text-slate-700 dark:text-slate-200 font-semibold cursor-pointer"
+                      >
+                        Adjust Stock
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="hidden md:block overflow-x-auto">
               <table className="w-full text-left text-xs">
                 <thead className="bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 font-semibold">
                   <tr>
@@ -295,7 +348,38 @@ export const InventoryPage: React.FC = () => {
           />
         ) : (
           <div className="rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs overflow-hidden">
-            <div className="overflow-x-auto">
+            {/* Mobile Movement Log Cards */}
+            <div className="md:hidden divide-y divide-slate-100 dark:divide-slate-800">
+              {filteredLogs.map((log) => (
+                <div key={`mob-${log.id}`} className="p-4 space-y-2 text-xs">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <span className="font-semibold text-slate-900 dark:text-white block truncate">
+                        {log.productName}
+                      </span>
+                      <span className="font-mono text-[10px] text-slate-400">
+                        {log.date} · {log.sku}
+                      </span>
+                    </div>
+                    <span
+                      className={`font-mono font-bold tabular-nums shrink-0 ${
+                        log.quantityDelta >= 0 ? 'text-emerald-600' : 'text-rose-600'
+                      }`}
+                    >
+                      {log.quantityDelta >= 0 ? `+${log.quantityDelta}` : log.quantityDelta}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-[11px] text-slate-500">
+                    <span className="truncate max-w-[200px]">{log.reason}</span>
+                    <span className="font-mono shrink-0">
+                      {log.previousStock} → <strong className="text-slate-900 dark:text-white">{log.newStock}</strong>
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="hidden md:block overflow-x-auto">
               <table className="w-full text-left text-xs">
                 <thead className="bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 font-semibold">
                   <tr>

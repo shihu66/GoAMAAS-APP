@@ -23,6 +23,7 @@ export interface Store {
 
 export interface Product {
   id: string;
+  storeId?: string;
   name: string;
   sku: string;
   category: string;
@@ -70,6 +71,7 @@ export type PaymentStatus = 'paid' | 'pending' | 'failed' | 'refunded';
 
 export interface Order {
   id: string;
+  storeId?: string;
   orderNumber: string;
   customerName: string;
   customerEmail: string;
@@ -98,6 +100,7 @@ export interface Order {
 
 export interface Customer {
   id: string;
+  storeId?: string;
   name: string;
   email: string;
   phone: string;
@@ -113,6 +116,7 @@ export interface Customer {
 
 export interface InventoryMovement {
   id: string;
+  storeId?: string;
   productId: string;
   productName: string;
   sku: string;

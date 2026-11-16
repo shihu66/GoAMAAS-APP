@@ -208,7 +208,7 @@ export default async function handler(req: RequestWithQuery, res: ServerResponse
           return undefined;
         };
 
-        const hydratedSite = {
+        let hydratedSite: Record<string, any> = {
           ...site,
           heroImageUrl: pickText('heroImageUrl'),
           heroCtaText: pickText('heroCtaText'),
@@ -243,6 +243,208 @@ export default async function handler(req: RequestWithQuery, res: ServerResponse
             : [],
           socialLinks: cleanSocialLinks,
         };
+
+        // Optional read-only server enrichment using SUPABASE_SERVICE_ROLE_KEY (for 20261029 slim RPC + live stock)
+        const serviceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+        const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        let serviceKeyValid = Boolean(serviceRoleKey);
+        if (serviceKeyValid && !serviceRoleKey.startsWith('sb_secret_')) {
+          try {
+            const urlRefMatch = new URL(supabaseUrl).hostname.match(/^([a-z0-9-]+)\.supabase\.co$/i);
+            const expectedRef = urlRefMatch ? urlRefMatch[1].toLowerCase() : '';
+            const jwtParts = serviceRoleKey.split('.');
+            if (jwtParts.length === 3) {
+              const claims = JSON.parse(Buffer.from(jwtParts[1], 'base64url').toString('utf8'));
+              if (claims?.role && claims.role !== 'service_role') serviceKeyValid = false;
+              if (claims?.ref && expectedRef && String(claims.ref).toLowerCase() !== expectedRef) {
+                serviceKeyValid = false;
+              }
+            }
+          } catch {
+            serviceKeyValid = false;
+          }
+        }
+
+        if (serviceKeyValid) {
+          try {
+            const adminHeaders: Record<string, string> = {
+              apikey: serviceRoleKey,
+              Authorization: `Bearer ${serviceRoleKey}`,
+              'Content-Type': 'application/json',
+            };
+            const rowResp = await fetch(
+              `${supabaseUrl}/rest/v1/subscribed_websites?subdomain=eq.${encodeURIComponent(subdomain)}&select=id,store_id,user_id,status,payment_status,deployment_status,current_period_end,config&limit=1`,
+              { method: 'GET', headers: adminHeaders }
+            );
+            if (rowResp.ok) {
+              const rows = (await rowResp.json()) as any[];
+              const siteRow = Array.isArray(rows) ? rows[0] : null;
+              if (siteRow) {
+                const rowPeriodEnd = siteRow.current_period_end
+                  ? Date.parse(String(siteRow.current_period_end))
+                  : NaN;
+                const rowExpired =
+                  siteRow.status === 'grace_period' ||
+                  siteRow.status === 'past_due' ||
+                  (Number.isFinite(rowPeriodEnd) && rowPeriodEnd <= Date.now());
+                if (
+                  rowExpired ||
+                  siteRow.status !== 'active' ||
+                  siteRow.payment_status !== 'paid' ||
+                  siteRow.deployment_status !== 'live'
+                ) {
+                  res.statusCode = 404;
+                  res.setHeader('Content-Type', 'application/json');
+                  res.setHeader('Cache-Control', 'private, no-cache, no-store, max-age=0, must-revalidate');
+                  res.end(
+                    JSON.stringify({
+                      found: false,
+                      expired: rowExpired,
+                      subdomain,
+                      message: rowExpired
+                        ? 'This website is currently unavailable because its 30-day subscription has expired.'
+                        : 'Website not found or is currently not published.',
+                    })
+                  );
+                  return;
+                }
+
+                const resolvedWebsiteId = uuidRe.test(String(siteRow.id || '').trim())
+                  ? String(siteRow.id).trim()
+                  : hydratedSite.id;
+                let resolvedStoreId = uuidRe.test(String(siteRow.store_id || '').trim())
+                  ? String(siteRow.store_id).trim()
+                  : String(hydratedSite.storeId || hydratedSite.store_id || '').trim();
+
+                if (!uuidRe.test(resolvedStoreId) && uuidRe.test(String(siteRow.user_id || '').trim())) {
+                  const storeResp = await fetch(
+                    `${supabaseUrl}/rest/v1/stores?owner_id=eq.${encodeURIComponent(String(siteRow.user_id).trim())}&order=created_at.asc&limit=1&select=id`,
+                    { method: 'GET', headers: adminHeaders }
+                  );
+                  if (storeResp.ok) {
+                    const stores = (await storeResp.json()) as any[];
+                    const fallbackSid = String(stores?.[0]?.id || '').trim();
+                    if (uuidRe.test(fallbackSid)) resolvedStoreId = fallbackSid;
+                  }
+                }
+
+                const rowConfig =
+                  siteRow.config && typeof siteRow.config === 'object'
+                    ? (siteRow.config as Record<string, any>)
+                    : {};
+                const catalogMeta =
+                  rowConfig.productCatalogMeta && typeof rowConfig.productCatalogMeta === 'object'
+                    ? (rowConfig.productCatalogMeta as Record<string, any>)
+                    : {};
+                const configCatalog: any[] = Array.isArray(rowConfig.servicesOrProducts)
+                  ? rowConfig.servicesOrProducts
+                  : hydratedSite.servicesOrProducts;
+
+                // Fetch strictly active public-safe columns from products table (never cost_price or drafts)
+                let dbProdById = new Map<string, any>();
+                if (uuidRe.test(resolvedStoreId)) {
+                  let prodResp = await fetch(
+                    `${supabaseUrl}/rest/v1/products?store_id=eq.${encodeURIComponent(resolvedStoreId)}&status=eq.active&select=id,name,sku,category,price,stock,status,description,image_url,is_visible,sort_order`,
+                    { method: 'GET', headers: adminHeaders }
+                  );
+                  if (!prodResp.ok) {
+                    prodResp = await fetch(
+                      `${supabaseUrl}/rest/v1/products?store_id=eq.${encodeURIComponent(resolvedStoreId)}&status=eq.active&select=id,name,sku,category,price,stock,status,description`,
+                      { method: 'GET', headers: adminHeaders }
+                    );
+                  }
+                  if (prodResp.ok) {
+                    const dbProds = (await prodResp.json()) as any[];
+                    for (const p of dbProds || []) {
+                      if (p?.id) dbProdById.set(String(p.id), p);
+                    }
+                  }
+                }
+
+                const enrichedItems = (configCatalog || [])
+                  .filter((item: any) => {
+                    if (!item || item.isVisible === false) return false;
+                    const pid = String(item.productId || item.id || '').trim();
+                    if (pid && catalogMeta[pid]?.isVisible === false) return false;
+                    if (pid && dbProdById.size > 0 && uuidRe.test(pid)) {
+                      const liveProd = dbProdById.get(pid);
+                      if (!liveProd || liveProd.is_visible === false) return false;
+                    }
+                    return true;
+                  })
+                  .map((item: any) => {
+                    const pid = String(item.productId || item.id || '').trim();
+                    const liveProd = pid ? dbProdById.get(pid) : undefined;
+                    const metaEntry = pid ? catalogMeta[pid] || {} : {};
+                    const liveStock =
+                      liveProd !== undefined
+                        ? Math.max(0, Math.trunc(Number(liveProd.stock) || 0))
+                        : typeof item.stock === 'number'
+                        ? Math.max(0, Math.trunc(item.stock))
+                        : undefined;
+                    const basePrice =
+                      liveProd !== undefined
+                        ? Number(liveProd.price) || 0
+                        : typeof item.priceNumeric === 'number'
+                        ? item.priceNumeric
+                        : undefined;
+                    const discountPrice =
+                      typeof item.discountPrice === 'number'
+                        ? item.discountPrice
+                        : typeof metaEntry.discountPrice === 'number'
+                        ? metaEntry.discountPrice
+                        : undefined;
+                    const validDiscount =
+                      typeof discountPrice === 'number' &&
+                      basePrice !== undefined &&
+                      discountPrice >= 0 &&
+                      discountPrice < basePrice
+                        ? discountPrice
+                        : undefined;
+                    const effectivePrice = validDiscount !== undefined ? validDiscount : basePrice;
+
+                    return {
+                      id: item.id,
+                      productId: item.productId || liveProd?.id || item.id,
+                      sku: item.sku || liveProd?.sku || undefined,
+                      name: liveProd?.name || item.name,
+                      price:
+                        effectivePrice !== undefined
+                          ? `৳${effectivePrice.toLocaleString()}`
+                          : item.price,
+                      priceNumeric: basePrice,
+                      ...(validDiscount !== undefined
+                        ? {
+                            discountPrice: validDiscount,
+                            originalPrice: `৳${basePrice!.toLocaleString()}`,
+                          }
+                        : {}),
+                      description: liveProd?.description ?? item.description ?? '',
+                      imageUrl: item.imageUrl || metaEntry.imageUrl || liveProd?.image_url || undefined,
+                      category: liveProd?.category || item.category || undefined,
+                      stock: liveStock,
+                      inStock: liveStock !== undefined ? liveStock > 0 : item.inStock ?? true,
+                      isVisible: true,
+                      sortOrder:
+                        typeof liveProd?.sort_order === 'number'
+                          ? liveProd.sort_order
+                          : (item.sortOrder ?? metaEntry.sortOrder),
+                      isFeatured: Boolean(item.isFeatured ?? metaEntry.isFeatured),
+                    };
+                  });
+
+                hydratedSite = {
+                  ...hydratedSite,
+                  ...(uuidRe.test(resolvedWebsiteId) ? { id: resolvedWebsiteId } : {}),
+                  ...(uuidRe.test(resolvedStoreId) ? { storeId: resolvedStoreId } : {}),
+                  servicesOrProducts: enrichedItems,
+                };
+              }
+            }
+          } catch {
+            // Fall back gracefully to RPC-hydrated response
+          }
+        }
 
         res.statusCode = 200;
         res.setHeader('Content-Type', 'application/json');

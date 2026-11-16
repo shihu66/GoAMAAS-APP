@@ -48,6 +48,7 @@ export const DashboardLayout: React.FC = () => {
     products,
     orders,
     customers,
+    supportTickets,
     subscribedWebsites,
   } = useApp();
   const { lang, toggleLang, t } = useLanguage();
@@ -81,6 +82,10 @@ export const DashboardLayout: React.FC = () => {
   }, []);
 
   const unreadNotifCount = notifications.filter((n) => !n.read).length;
+  const openTicketsCount = useMemo(
+    () => supportTickets.filter((tItem) => tItem.status === 'open' || tItem.status === 'in_progress').length,
+    [supportTickets]
+  );
   const pendingOrderCount = useMemo(
     () => orders.filter((o) => o.status === 'pending').length,
     [orders]
@@ -108,18 +113,23 @@ export const DashboardLayout: React.FC = () => {
         icon: ShoppingCart,
         count: pendingOrderCount > 0 ? pendingOrderCount : undefined,
       },
-      { label: navText.inventory, path: '/dashboard/inventory', icon: Boxes },
       { label: navText.customers, path: '/dashboard/customers', icon: Users },
+      {
+        label: navText.support,
+        path: '/dashboard/support',
+        icon: HelpCircle,
+        count: openTicketsCount > 0 ? openTicketsCount : undefined,
+      },
+      { label: navText.inventory, path: '/dashboard/inventory', icon: Boxes },
       { label: navText.analytics, path: '/dashboard/analytics', icon: BarChart3 },
     ],
-    [navText, pendingOrderCount]
+    [navText, pendingOrderCount, openTicketsCount]
   );
 
   const accountNavItems = useMemo(
     () => [
       { label: navText.settings, path: '/dashboard/settings', icon: Settings },
       { label: navText.billing, path: '/dashboard/billing', icon: CreditCard },
-      { label: navText.support, path: '/dashboard/support', icon: HelpCircle },
     ],
     [navText]
   );
@@ -183,6 +193,19 @@ export const DashboardLayout: React.FC = () => {
 
   const isActive = (path: string) => {
     if (path === '/dashboard') return location.pathname === '/dashboard';
+    if (path === '/dashboard/subscribed-website') {
+      return (
+        location.pathname.startsWith('/dashboard/subscribed-website') ||
+        location.pathname.startsWith('/dashboard/website')
+      );
+    }
+    if (path === '/dashboard/support') {
+      return (
+        location.pathname.startsWith('/dashboard/support') ||
+        location.pathname.startsWith('/dashboard/inbox') ||
+        location.pathname.startsWith('/dashboard/messages')
+      );
+    }
     return location.pathname.startsWith(path);
   };
 

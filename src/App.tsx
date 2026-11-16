@@ -121,6 +121,7 @@ export default function App() {
           </Route>
 
           {/* Multi-Tenant Public Website Routes */}
+          <Route path="/s/:subdomain" element={<PublicTenantWebsitePage />} />
           <Route path="/sites/:subdomain" element={<PublicTenantWebsitePage />} />
           <Route path="/site/:subdomain" element={<PublicTenantWebsitePage />} />
 
@@ -159,10 +160,13 @@ export default function App() {
             <Route path="automations" element={<AutomationsPage />} />
             <Route path="analytics" element={<AnalyticsPage />} />
             <Route path="subscribed-website" element={<SubscribedWebsitePage />} />
+            <Route path="website" element={<SubscribedWebsitePage />} />
             <Route path="billing" element={<BillingPage />} />
             <Route path="website-requests" element={<WebsiteRequestPage />} />
             <Route path="settings" element={<TeamSettingsPage />} />
             <Route path="support" element={<SupportPage />} />
+            <Route path="inbox" element={<SupportPage />} />
+            <Route path="messages" element={<SupportPage />} />
           </Route>
 
           {/* Isolated GoAMAAS Admin Panel (/admin & /admin/*) */}

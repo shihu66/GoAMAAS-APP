@@ -97,6 +97,8 @@ export const TeamSettingsPage: React.FC = () => {
     teamMembers,
     addTeamMember,
     removeTeamMember,
+    orderSoundEnabled,
+    setOrderSoundEnabled,
     user,
     showToast,
   } = useApp();
@@ -1202,6 +1204,23 @@ export const TeamSettingsPage: React.FC = () => {
           </h3>
 
           <div className="space-y-3">
+            <label className="flex items-center justify-between p-3 rounded-lg border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40 cursor-pointer">
+              <div>
+                <strong className="block font-semibold text-slate-900 dark:text-white">
+                  New Customer Order Sound Chime
+                </strong>
+                <span className="text-slate-500 text-[11px]">
+                  Play a subtle confirmation chime in your browser when a new website order arrives
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                checked={orderSoundEnabled}
+                onChange={(e) => setOrderSoundEnabled(e.target.checked)}
+                className="w-4 h-4 text-blue-600 rounded"
+              />
+            </label>
+
             <label className="flex items-center justify-between p-3 rounded-lg border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40">
               <div>
                 <strong className="block font-semibold text-slate-900 dark:text-white">Customer Order Dispatch SMS</strong>

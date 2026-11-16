@@ -612,6 +612,33 @@ export function normalizeCustomerPhone(raw: string): string {
   return (raw || '').replace(/[\s()-]+/g, '').trim();
 }
 
+export function getBangladeshPhoneVariants(raw: string): string[] {
+  const cleaned = normalizeCustomerPhone(raw);
+  if (!cleaned) return [];
+  const digits = cleaned.replace(/^\+/, '');
+  const variants = new Set<string>([cleaned]);
+
+  if (/^8801[3-9]\d{8}$/.test(digits)) {
+    const local = `0${digits.slice(3)}`;
+    variants.add(local);
+    variants.add(digits);
+    variants.add(`+${digits}`);
+  } else if (/^01[3-9]\d{8}$/.test(digits)) {
+    variants.add(digits);
+    variants.add(`88${digits}`);
+    variants.add(`+88${digits}`);
+  }
+
+  return Array.from(variants);
+}
+
+export function phonesMatch(a?: string | null, b?: string | null): boolean {
+  const va = getBangladeshPhoneVariants(String(a || ''));
+  const vb = new Set(getBangladeshPhoneVariants(String(b || '')));
+  if (va.length === 0 || vb.size === 0) return false;
+  return va.some((variant) => vb.has(variant));
+}
+
 export function validatePublicCustomerOrderInput(
   input: PublicCustomerOrderInput
 ): { valid: boolean; error?: string } {

@@ -53,6 +53,8 @@ const DEFAULT_CATEGORIES = [
 export const ProductsPage: React.FC = () => {
   const {
     products,
+    productSyncStatusMap,
+    retryProductWebsiteSync,
     subscribedWebsites,
     activeStore,
     addProduct,
@@ -476,9 +478,45 @@ export const ProductsPage: React.FC = () => {
     }
   };
 
-  const renderWebsiteSyncStatus = (state: ProductWebsiteSyncState) => {
+  const renderWebsiteSyncStatus = (state: ProductWebsiteSyncState, productId?: string) => {
+    const liveStatus = productId ? productSyncStatusMap[productId] : undefined;
+
+    if (liveStatus === 'saving') {
+      return <StatusBadge tone="pending" label={lang === 'bn' ? 'সংরক্ষণ হচ্ছে...' : 'Saving...'} />;
+    }
+    if (liveStatus === 'syncing') {
+      return (
+        <StatusBadge
+          tone="info"
+          label={lang === 'bn' ? 'ওয়েবসাইটে সিঙ্ক হচ্ছে...' : 'Syncing with website...'}
+        />
+      );
+    }
+    if (liveStatus === 'error' && productId) {
+      return (
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <StatusBadge
+            tone="rejected"
+            label={lang === 'bn' ? 'সিঙ্ক ব্যর্থ' : 'Sync failed'}
+          />
+          <button
+            type="button"
+            onClick={() => void retryProductWebsiteSync(productId)}
+            className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+          >
+            {lang === 'bn' ? 'আবার চেষ্টা করুন' : 'Retry'}
+          </button>
+        </div>
+      );
+    }
+
     if (state === 'published') {
-      return <StatusBadge tone="live" label={lang === 'bn' ? 'প্রকাশিত' : 'Published'} />;
+      return (
+        <StatusBadge
+          tone="live"
+          label={lang === 'bn' ? 'ওয়েবসাইটে লাইভ' : 'Live on website'}
+        />
+      );
     }
     if (state === 'update_pending') {
       return <StatusBadge tone="pending" label={lang === 'bn' ? 'আপডেট বাকি' : 'Update Pending'} />;
@@ -741,7 +779,7 @@ export const ProductsPage: React.FC = () => {
                           {p.stock} in stock
                         </span>
                       </p>
-                      <div className="mt-2">{renderWebsiteSyncStatus(syncInfo.state)}</div>
+                      <div className="mt-2">{renderWebsiteSyncStatus(syncInfo.state, p.id)}</div>
                     </div>
                   </div>
 
@@ -910,7 +948,7 @@ export const ProductsPage: React.FC = () => {
 
                       <td className="py-3.5 px-4">
                         <div className="space-y-0.5">
-                          {renderWebsiteSyncStatus(syncInfo.state)}
+                          {renderWebsiteSyncStatus(syncInfo.state, p.id)}
                           {targetWebsite ? (
                             <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-mono">
                               <span className="truncate max-w-[150px]">
@@ -1153,7 +1191,7 @@ export const ProductsPage: React.FC = () => {
                       <span className="font-mono text-blue-600 dark:text-blue-400 truncate">
                         {p.sku} · {p.category}
                       </span>
-                      {renderWebsiteSyncStatus(syncInfo.state)}
+                      {renderWebsiteSyncStatus(syncInfo.state, p.id)}
                     </div>
 
                     <h3 className="font-bold text-sm text-slate-900 dark:text-white line-clamp-1">
@@ -1367,7 +1405,7 @@ export const ProductsPage: React.FC = () => {
                   <span>{formData.imageUrl ? 'Replace Photo' : 'Upload / Take Photo'}</span>
                   <input
                     type="file"
-                    accept="image/*"
+                    accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
                     onChange={handleImageFileUpload}
                     disabled={isUploadingImage}
                     className="hidden"
@@ -1756,7 +1794,8 @@ export const ProductsPage: React.FC = () => {
               <span className="text-slate-500">Website Publishing Status:</span>
               {renderWebsiteSyncStatus(
                 productSyncMap.get(activeProduct.id)?.state ||
-                  computeProductWebsiteSyncState(activeProduct, myWebsites).state
+                  computeProductWebsiteSyncState(activeProduct, myWebsites).state,
+                activeProduct.id
               )}
             </div>
 

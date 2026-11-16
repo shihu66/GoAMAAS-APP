@@ -360,27 +360,7 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       return;
     }
 
-    const storeId = String(site.storeId || site.store_id || '').trim();
-    const websiteId = String(site.id || '').trim();
-    if (!UUID_REGEX.test(storeId) || !UUID_REGEX.test(websiteId)) {
-      sendJson(res, 422, {
-        ok: false,
-        code: 'STORE_NOT_LINKED',
-        error: 'This website is not linked to an active merchant inventory store yet.',
-      });
-      return;
-    }
-
-    if (body.websiteId && String(body.websiteId).trim() !== websiteId) {
-      sendJson(res, 403, {
-        ok: false,
-        code: 'TENANT_MISMATCH',
-        error: 'Storefront identity mismatch.',
-      });
-      return;
-    }
-
-    // Step 2: Require server-only SUPABASE_SERVICE_ROLE_KEY for RLS-protected order & stock persistence
+    // Step 2: Require server-only SUPABASE_SERVICE_ROLE_KEY for RLS-protected resolution, order, & stock persistence
     if (!serviceRoleKey) {
       sendJson(res, 503, {
         ok: false,
@@ -430,6 +410,87 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       'Content-Type': 'application/json',
     };
 
+    // Resolve authoritative websiteId, storeId, and server-side catalog metadata (handles 20261029 slim RPC payloads)
+    let storeId = String(site.storeId || site.store_id || '').trim();
+    let websiteId = String(site.id || '').trim();
+    let authoritativeSiteConfig: Record<string, any> | null = null;
+
+    if (!UUID_REGEX.test(storeId) || !UUID_REGEX.test(websiteId)) {
+      const siteLookupResp = await fetch(
+        `${supabaseUrl}/rest/v1/subscribed_websites?subdomain=eq.${encodeURIComponent(subdomain)}&select=id,store_id,user_id,status,payment_status,deployment_status,current_period_end,config&limit=1`,
+        { method: 'GET', headers: adminHeaders }
+      );
+      if (siteLookupResp.ok) {
+        const rows = (await siteLookupResp.json()) as any[];
+        const siteRow = Array.isArray(rows) ? rows[0] : null;
+        if (siteRow) {
+          const rowPeriodEnd = siteRow.current_period_end ? Date.parse(String(siteRow.current_period_end)) : NaN;
+          const rowExpired =
+            siteRow.status === 'grace_period' ||
+            siteRow.status === 'past_due' ||
+            (Number.isFinite(rowPeriodEnd) && rowPeriodEnd <= Date.now());
+          if (
+            rowExpired ||
+            siteRow.status !== 'active' ||
+            siteRow.payment_status !== 'paid' ||
+            siteRow.deployment_status !== 'live'
+          ) {
+            sendJson(res, 403, {
+              ok: false,
+              code: 'STOREFRONT_INACTIVE',
+              error: 'Orders cannot be placed because this storefront subscription is currently inactive.',
+            });
+            return;
+          }
+          if (!UUID_REGEX.test(websiteId) && UUID_REGEX.test(String(siteRow.id || '').trim())) {
+            websiteId = String(siteRow.id).trim();
+          }
+          if (!UUID_REGEX.test(storeId) && UUID_REGEX.test(String(siteRow.store_id || '').trim())) {
+            storeId = String(siteRow.store_id).trim();
+          }
+          if (!UUID_REGEX.test(storeId) && UUID_REGEX.test(String(siteRow.user_id || '').trim())) {
+            const ownerStoreResp = await fetch(
+              `${supabaseUrl}/rest/v1/stores?owner_id=eq.${encodeURIComponent(String(siteRow.user_id).trim())}&order=created_at.asc&limit=1&select=id`,
+              { method: 'GET', headers: adminHeaders }
+            );
+            if (ownerStoreResp.ok) {
+              const ownerStores = (await ownerStoreResp.json()) as any[];
+              const fallbackSid = String(ownerStores?.[0]?.id || '').trim();
+              if (UUID_REGEX.test(fallbackSid)) {
+                storeId = fallbackSid;
+              }
+            }
+          }
+          if (siteRow.config && typeof siteRow.config === 'object') {
+            authoritativeSiteConfig = siteRow.config as Record<string, any>;
+          }
+        }
+      }
+    }
+
+    if (!UUID_REGEX.test(storeId) || !UUID_REGEX.test(websiteId)) {
+      sendJson(res, 422, {
+        ok: false,
+        code: 'STORE_NOT_LINKED',
+        error: 'This website is not linked to an active merchant inventory store yet.',
+      });
+      return;
+    }
+
+    const incomingWebsiteId = String(body.websiteId || '').trim();
+    if (
+      incomingWebsiteId &&
+      incomingWebsiteId !== `site-${subdomain}` &&
+      incomingWebsiteId !== websiteId
+    ) {
+      sendJson(res, 403, {
+        ok: false,
+        code: 'TENANT_MISMATCH',
+        error: 'Storefront identity mismatch.',
+      });
+      return;
+    }
+
     // Step 3: Idempotency check — prevent duplicate orders on double click or network retry
     const orderNumber = buildDeterministicOrderNumber(subdomain, checkoutAttemptId);
     const existingOrderResp = await fetch(
@@ -440,6 +501,10 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       const existingRows = (await existingOrderResp.json()) as any[];
       if (Array.isArray(existingRows) && existingRows.length > 0) {
         const row = existingRows[0];
+        const firstMeta =
+          Array.isArray(row.items) && row.items[0]?.orderMeta && typeof row.items[0].orderMeta === 'object'
+            ? row.items[0].orderMeta
+            : {};
         sendJson(res, 200, {
           ok: true,
           duplicatePrevented: true,
@@ -451,12 +516,19 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
             customerEmail: row.customer_email || '',
             shippingAddress: row.address,
             city: row.city,
+            deliveryArea: firstMeta.deliveryArea || undefined,
+            deliveryMethod: firstMeta.deliveryMethod || deliverySpec.label,
+            deliveryInstructions: firstMeta.deliveryInstructions || undefined,
+            notes: firstMeta.orderNotes || undefined,
             subtotal: Number(row.subtotal) || 0,
             deliveryFee: Number(row.delivery_charge) || 0,
             total: Number(row.total) || 0,
             status: row.status || 'pending',
             paymentStatus: row.payment_status || 'pending',
             paymentMethod: row.payment_method || paymentMethod,
+            source: row.source || `Website (${subdomain}.amaas.xyz)`,
+            websiteId,
+            websiteSubdomain: subdomain,
             items: Array.isArray(row.items) ? row.items : [],
             createdAt: row.created_at,
           },
@@ -466,14 +538,38 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
     }
 
     // Step 4: Verify every requested product is published on THIS website and belongs to THIS store
-    const publishedCatalog: any[] = Array.isArray(site.servicesOrProducts)
-      ? site.servicesOrProducts.filter((it: any) => it && it.isVisible !== false)
-      : [];
+    const configCatalog = Array.isArray(authoritativeSiteConfig?.servicesOrProducts)
+      ? authoritativeSiteConfig.servicesOrProducts
+      : null;
+    const rawCatalogSource =
+      configCatalog && configCatalog.length > 0
+        ? configCatalog
+        : Array.isArray(site.servicesOrProducts)
+        ? site.servicesOrProducts
+        : [];
+    const catalogMeta =
+      authoritativeSiteConfig?.productCatalogMeta &&
+      typeof authoritativeSiteConfig.productCatalogMeta === 'object'
+        ? (authoritativeSiteConfig.productCatalogMeta as Record<string, any>)
+        : {};
+    const publishedCatalog: any[] = rawCatalogSource.filter((it: any) => {
+      if (!it || it.isVisible === false) return false;
+      const pid = String(it.productId || it.id || '').trim();
+      if (pid && catalogMeta[pid]?.isVisible === false) return false;
+      return true;
+    });
     const publishedByProductId = new Map<string, any>();
     for (const pubItem of publishedCatalog) {
       const pid = String(pubItem.productId || pubItem.id || '').trim();
       if (UUID_REGEX.test(pid)) {
-        publishedByProductId.set(pid, pubItem);
+        const metaEntry = catalogMeta[pid] || {};
+        publishedByProductId.set(pid, {
+          ...pubItem,
+          ...(metaEntry.imageUrl && !pubItem.imageUrl ? { imageUrl: metaEntry.imageUrl } : {}),
+          ...(typeof metaEntry.discountPrice === 'number' && pubItem.discountPrice === undefined
+            ? { discountPrice: metaEntry.discountPrice }
+            : {}),
+        });
       }
     }
 
@@ -754,8 +850,23 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
     }
 
     try {
+      const digitsOnly = customerPhone.replace(/^\+/, '');
+      const phoneVariants = new Set<string>([customerPhone]);
+      if (/^8801[3-9]\d{8}$/.test(digitsOnly)) {
+        phoneVariants.add(`0${digitsOnly.slice(3)}`);
+        phoneVariants.add(digitsOnly);
+        phoneVariants.add(`+${digitsOnly}`);
+      } else if (/^01[3-9]\d{8}$/.test(digitsOnly)) {
+        phoneVariants.add(digitsOnly);
+        phoneVariants.add(`88${digitsOnly}`);
+        phoneVariants.add(`+88${digitsOnly}`);
+      }
+      const phoneOrClause = Array.from(phoneVariants)
+        .map((p) => `phone.eq.${encodeURIComponent(p)}`)
+        .join(',');
+
       const custLookupResp = await fetch(
-        `${supabaseUrl}/rest/v1/customers?store_id=eq.${encodeURIComponent(storeId)}&phone=eq.${encodeURIComponent(customerPhone)}&select=*`,
+        `${supabaseUrl}/rest/v1/customers?store_id=eq.${encodeURIComponent(storeId)}&or=(${phoneOrClause})&limit=1&select=*`,
         { method: 'GET', headers: adminHeaders }
       );
       const existingCustomers = custLookupResp.ok ? ((await custLookupResp.json()) as any[]) : [];

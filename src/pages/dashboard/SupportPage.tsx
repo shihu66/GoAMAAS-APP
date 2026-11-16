@@ -1,5 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
+import { useLanguage } from '../../context/LanguageContext';
+import { extractOrderMetadataFromItems } from '../../lib/storefrontSync';
 import { SupportTicket } from '../../types';
 import {
   HelpCircle,
@@ -12,6 +15,10 @@ import {
   BookOpen,
   Bell,
   ChevronDown,
+  Inbox,
+  Phone,
+  Globe,
+  ArrowRight,
 } from 'lucide-react';
 import { Modal } from '../../components/ui/Modal';
 import { EmptyState } from '../../components/ui/EmptyState';
@@ -25,10 +32,13 @@ export const SupportPage: React.FC = () => {
     notifications,
     markNotificationRead,
     markAllNotificationsRead,
+    orders,
+    subscribedWebsites,
     showToast,
   } = useApp();
+  const { lang } = useLanguage();
 
-  const [activeTab, setActiveTab] = useState<'tickets' | 'faq' | 'notifications'>('tickets');
+  const [activeTab, setActiveTab] = useState<'inquiries' | 'tickets' | 'faq' | 'notifications'>('tickets');
   const [selectedTicket, setSelectedTicket] = useState<SupportTicket | null>(null);
   const [isNewTicketModalOpen, setIsNewTicketModalOpen] = useState(false);
 
@@ -44,6 +54,33 @@ export const SupportPage: React.FC = () => {
   // FAQ search
   const [faqSearch, setFaqSearch] = useState('');
   const [openFaq, setOpenFaq] = useState<number | null>(0);
+
+  const customerInquiries = useMemo(() => {
+    return orders
+      .filter((o) => {
+        const meta = extractOrderMetadataFromItems(o.items);
+        return (
+          Boolean(o.notes?.trim()) ||
+          Boolean(o.deliveryInstructions?.trim()) ||
+          Boolean(meta.deliveryInstructions?.trim()) ||
+          meta.orderSource === 'public_website' ||
+          Boolean(o.websiteSubdomain || meta.websiteSubdomain)
+        );
+      })
+      .slice(0, 20)
+      .map((o) => {
+        const meta = extractOrderMetadataFromItems(o.items);
+        return {
+          order: o,
+          subdomain: o.websiteSubdomain || meta.websiteSubdomain,
+          instructions: o.deliveryInstructions || meta.deliveryInstructions || '',
+          note: o.notes || '',
+        };
+      });
+  }, [orders]);
+
+  const primaryWebsite = subscribedWebsites[0] || null;
+  const unreadNotificationCount = notifications.filter((n) => !n.read).length;
 
   const knowledgeBase = [
     {
@@ -102,16 +139,18 @@ export const SupportPage: React.FC = () => {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
-            Support Center & In-App Notifications
+            {lang === 'bn' ? 'ইনবক্স ও সাপোর্ট কেন্দ্র' : 'Inbox & Support Center'}
           </h1>
           <p className="text-xs text-slate-500 mt-1">
-            Submit technical tickets to AMAAS engineering, search knowledge guides, and check notifications.
+            {lang === 'bn'
+              ? 'ক্রেতার অর্ডার বার্তা, অ্যালার্ট এবং টেকনিক্যাল সাপোর্ট টিকেট এক জায়গায় দেখুন।'
+              : 'Review customer order messages & instructions, live store alerts, and GoAMAAS support tickets.'}
           </p>
         </div>
 
         <button
           onClick={() => setIsNewTicketModalOpen(true)}
-          className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-xs transition-colors self-start sm:self-auto"
+          className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-xs transition-colors self-start sm:self-auto cursor-pointer"
         >
           <Plus className="w-3.5 h-3.5" />
           <span>Open Support Ticket</span>
@@ -121,8 +160,20 @@ export const SupportPage: React.FC = () => {
       {/* Tabs */}
       <div className="flex items-center gap-1 border-b border-slate-200 dark:border-slate-800 text-xs font-semibold overflow-x-auto pb-1">
         <button
+          onClick={() => setActiveTab('inquiries')}
+          className={`px-4 py-2 rounded-t-lg transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+            activeTab === 'inquiries'
+              ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 border-b-2 border-blue-600'
+              : 'text-slate-500 hover:text-slate-900 dark:hover:text-white'
+          }`}
+        >
+          <Inbox className="w-3.5 h-3.5" />
+          <span>Customer Messages ({customerInquiries.length})</span>
+        </button>
+
+        <button
           onClick={() => setActiveTab('tickets')}
-          className={`px-4 py-2 rounded-t-lg transition-colors flex items-center gap-2 whitespace-nowrap ${
+          className={`px-4 py-2 rounded-t-lg transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer ${
             activeTab === 'tickets'
               ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 border-b-2 border-blue-600'
               : 'text-slate-500 hover:text-slate-900 dark:hover:text-white'
@@ -133,29 +184,146 @@ export const SupportPage: React.FC = () => {
         </button>
 
         <button
-          onClick={() => setActiveTab('faq')}
-          className={`px-4 py-2 rounded-t-lg transition-colors flex items-center gap-2 whitespace-nowrap ${
-            activeTab === 'faq'
-              ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 border-b-2 border-blue-600'
-              : 'text-slate-500 hover:text-slate-900 dark:hover:text-white'
-          }`}
-        >
-          <BookOpen className="w-3.5 h-3.5" />
-          <span>Help Knowledge Base</span>
-        </button>
-
-        <button
           onClick={() => setActiveTab('notifications')}
-          className={`px-4 py-2 rounded-t-lg transition-colors flex items-center gap-2 whitespace-nowrap ${
+          className={`px-4 py-2 rounded-t-lg transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer ${
             activeTab === 'notifications'
               ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 border-b-2 border-blue-600'
               : 'text-slate-500 hover:text-slate-900 dark:hover:text-white'
           }`}
         >
           <Bell className="w-3.5 h-3.5" />
-          <span>In-App Notifications</span>
+          <span>
+            Notifications{unreadNotificationCount > 0 ? ` (${unreadNotificationCount} new)` : ''}
+          </span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('faq')}
+          className={`px-4 py-2 rounded-t-lg transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+            activeTab === 'faq'
+              ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 border-b-2 border-blue-600'
+              : 'text-slate-500 hover:text-slate-900 dark:hover:text-white'
+          }`}
+        >
+          <BookOpen className="w-3.5 h-3.5" />
+          <span>Help Guide</span>
         </button>
       </div>
+
+      {/* TAB 0: Customer Order Messages & Website Inquiries */}
+      {activeTab === 'inquiries' && (
+        <div className="space-y-4">
+          {primaryWebsite && (
+            <div className="p-4 rounded-2xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+              <div className="space-y-0.5">
+                <p className="font-semibold text-slate-900 dark:text-white">
+                  Website Direct Inquiries ({primaryWebsite.businessName})
+                </p>
+                <p className="text-slate-600 dark:text-slate-300">
+                  Website contact &amp; WhatsApp inquiries route to{' '}
+                  <strong className="font-mono">
+                    {primaryWebsite.whatsappNumber || primaryWebsite.phone || primaryWebsite.email || 'your storefront contact settings'}
+                  </strong>
+                  . Customer checkout notes appear automatically below.
+                </p>
+              </div>
+              <Link
+                to="/dashboard/subscribed-website?tab=settings"
+                className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 font-semibold hover:underline shrink-0"
+              >
+                <span>Edit Store Contact</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </Link>
+            </div>
+          )}
+
+          {customerInquiries.length === 0 ? (
+            <EmptyState
+              icon={Inbox}
+              title="No customer order messages yet"
+              description="When shoppers leave delivery instructions or notes on your website checkout, they will appear right here."
+            />
+          ) : (
+            <div className="space-y-3">
+              {customerInquiries.map(({ order, subdomain, instructions, note }) => (
+                <div
+                  key={order.id}
+                  className="p-4 rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs space-y-2 text-xs"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-bold text-slate-900 dark:text-white">
+                          {order.customerName}
+                        </span>
+                        <span className="font-mono text-blue-600 dark:text-blue-400">
+                          {order.customerPhone}
+                        </span>
+                        {subdomain && (
+                          <span className="inline-flex items-center gap-1 text-[11px] text-emerald-700 dark:text-emerald-400 font-medium">
+                            <Globe className="w-3 h-3" />
+                            <span>{subdomain}.amaas.xyz</span>
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-0.5 font-mono">
+                        Order #{order.orderNumber} · ৳{order.total.toLocaleString()} ·{' '}
+                        {new Date(order.createdAt).toLocaleString()}
+                      </p>
+                    </div>
+                    <StatusBadge
+                      tone={
+                        order.status === 'delivered'
+                          ? 'delivered'
+                          : order.status === 'cancelled'
+                          ? 'cancelled'
+                          : 'pending'
+                      }
+                      label={order.status}
+                    />
+                  </div>
+
+                  {(instructions || note) ? (
+                    <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 space-y-1 text-slate-700 dark:text-slate-200">
+                      {instructions && (
+                        <p>
+                          <strong>Delivery instructions:</strong> {instructions}
+                        </p>
+                      )}
+                      {note && (
+                        <p>
+                          <strong>Customer note:</strong> {note}
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-slate-500">
+                      Website order for {order.items.map((it) => `${it.name} × ${it.quantity}`).join(', ')} ({order.city}).
+                    </p>
+                  )}
+
+                  <div className="flex items-center justify-between pt-1">
+                    <a
+                      href={`tel:${order.customerPhone}`}
+                      className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 font-semibold hover:underline"
+                    >
+                      <Phone className="w-3 h-3" />
+                      <span>Call Customer</span>
+                    </a>
+                    <Link
+                      to="/dashboard/orders"
+                      className="inline-flex items-center gap-1 text-slate-600 dark:text-slate-300 font-semibold hover:underline"
+                    >
+                      <span>Open in Orders</span>
+                      <ArrowRight className="w-3 h-3" />
+                    </Link>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* TAB 1: Support Tickets */}
       {activeTab === 'tickets' && (

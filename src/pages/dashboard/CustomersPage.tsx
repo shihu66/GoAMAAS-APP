@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Customer } from '../../types';
+import { phonesMatch } from '../../lib/storefrontSync';
 import {
   Users,
   Search,
@@ -16,6 +17,7 @@ import {
   Sparkles,
   ChevronLeft,
   ChevronRight,
+  ShoppingBag,
 } from 'lucide-react';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
@@ -23,7 +25,7 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { StatusBadge } from '../../components/ui/StatusBadge';
 
 export const CustomersPage: React.FC = () => {
-  const { customers, addCustomer, updateCustomer, deleteCustomer, addCustomerNote } = useApp();
+  const { customers, orders, addCustomer, updateCustomer, deleteCustomer, addCustomerNote } = useApp();
 
   const [search, setSearch] = useState('');
   const [selectedTag, setSelectedTag] = useState<string>('all');
@@ -209,7 +211,70 @@ export const CustomersPage: React.FC = () => {
         />
       ) : (
         <div className="rounded-2xl bg-white dark:bg-[#111827] border border-slate-200/90 dark:border-slate-800 shadow-xs overflow-hidden">
-          <div className="overflow-x-auto">
+          {/* Mobile Customer Cards */}
+          <div className="md:hidden divide-y divide-slate-100 dark:divide-slate-800">
+            {paginatedCustomers.map((c) => (
+              <div key={`mob-${c.id}`} className="p-4 space-y-2.5 text-xs">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-semibold text-sm text-slate-900 dark:text-white truncate">
+                        {c.name}
+                      </span>
+                      <StatusBadge
+                        tone={c.status === 'vip' ? 'info' : c.status === 'active' ? 'approved' : 'neutral'}
+                        label={c.status.toUpperCase()}
+                      />
+                    </div>
+                    <p className="font-mono text-blue-600 dark:text-blue-400 mt-0.5">{c.phone}</p>
+                    <p className="text-[11px] text-slate-500">
+                      {c.city}
+                      {c.email ? ` · ${c.email}` : ''}
+                    </p>
+                  </div>
+                  <div className="text-right shrink-0 font-mono tabular-nums">
+                    <span className="font-bold text-sm text-slate-900 dark:text-white block">
+                      ৳{c.totalSpent.toLocaleString()}
+                    </span>
+                    <span className="text-[11px] text-slate-500">{c.ordersCount} orders</span>
+                  </div>
+                </div>
+                <div className="flex items-center justify-end gap-1.5 pt-2 border-t border-slate-100 dark:border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveCustomer(c);
+                      setIsDetailModalOpen(true);
+                    }}
+                    className="min-h-[36px] px-3 py-1 rounded-lg border border-slate-200 dark:border-slate-700 font-semibold text-slate-700 dark:text-slate-200 cursor-pointer"
+                  >
+                    Profile & Orders
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleOpenEdit(c)}
+                    className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 cursor-pointer"
+                    title="Edit"
+                  >
+                    <Edit className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveCustomer(c);
+                      setIsDeleteDialogOpen(true);
+                    }}
+                    className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg border border-rose-200 dark:border-rose-900/50 text-rose-500 cursor-pointer"
+                    title="Delete"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="hidden md:block overflow-x-auto">
             <table className="w-full text-left text-xs">
               <thead className="bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 font-semibold">
                 <tr>
@@ -471,6 +536,68 @@ export const CustomersPage: React.FC = () => {
                 <span className="font-mono text-slate-900 dark:text-white">{activeCustomer.lastOrderDate}</span>
               </div>
             </div>
+
+            {(() => {
+              const matchedOrders = orders.filter(
+                (o) =>
+                  phonesMatch(o.customerPhone, activeCustomer.phone) ||
+                  (activeCustomer.email &&
+                    o.customerEmail &&
+                    o.customerEmail.toLowerCase() === activeCustomer.email.toLowerCase())
+              );
+              return (
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-slate-400 font-semibold inline-flex items-center gap-1.5">
+                      <ShoppingBag className="w-3.5 h-3.5 text-blue-600" />
+                      <span>Order History ({matchedOrders.length})</span>
+                    </span>
+                  </div>
+                  {matchedOrders.length === 0 ? (
+                    <div className="p-3 rounded-lg border border-dashed border-slate-200 dark:border-slate-700 text-slate-500">
+                      No matched orders loaded in this store session yet.
+                    </div>
+                  ) : (
+                    <div className="max-h-44 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
+                      {matchedOrders.slice(0, 10).map((ord) => (
+                        <div
+                          key={ord.id}
+                          className="p-2.5 flex items-center justify-between gap-2"
+                        >
+                          <div className="min-w-0">
+                            <span className="font-mono font-bold text-blue-600 dark:text-blue-400 block">
+                              {ord.orderNumber}
+                            </span>
+                            <span className="text-[11px] text-slate-500 truncate block">
+                              {ord.items[0]?.name || 'Order'}
+                              {ord.items.length > 1 ? ` +${ord.items.length - 1} more` : ''} ·{' '}
+                              {new Date(ord.createdAt).toLocaleDateString()}
+                            </span>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <span className="font-mono font-bold text-slate-900 dark:text-white block">
+                              ৳{ord.total.toLocaleString()}
+                            </span>
+                            <StatusBadge
+                              tone={
+                                ord.status === 'delivered'
+                                  ? 'delivered'
+                                  : ord.status === 'cancelled'
+                                  ? 'cancelled'
+                                  : ord.status === 'shipped'
+                                  ? 'shipped'
+                                  : 'pending'
+                              }
+                              label={ord.status}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             <div>
               <span className="text-slate-400 block font-semibold mb-1">Customer Notes:</span>

@@ -4208,6 +4208,7 @@ interface RawProductRow {
 function mapRowToProduct(row: RawProductRow): Product {
   return {
     id: row.id,
+    storeId: row.store_id,
     name: row.name,
     sku: row.sku,
     category: row.category || 'General',
@@ -4224,6 +4225,28 @@ function mapRowToProduct(row: RawProductRow): Product {
     isVisible: row.is_visible ?? true,
     sortOrder: typeof row.sort_order === 'number' ? row.sort_order : 0,
   };
+}
+
+export async function fetchProductsByIdsFromDb(productIds: string[]): Promise<{
+  data: Product[] | null;
+  error: Error | null;
+}> {
+  const cleanIds = Array.from(new Set(productIds.filter((id) => UUID_REGEX.test(id))));
+  if (!isSupabaseConfigured || !supabase || cleanIds.length === 0) {
+    return { data: [], error: null };
+  }
+  try {
+    const { data, error } = await supabase
+      .from('products')
+      .select('*')
+      .in('id', cleanIds);
+    if (error) {
+      return { data: null, error: new Error(error.message || 'Failed to fetch products by ID') };
+    }
+    return { data: ((data as RawProductRow[]) || []).map(mapRowToProduct), error: null };
+  } catch (err: unknown) {
+    return { data: null, error: err instanceof Error ? err : new Error('Failed to load products by ID') };
+  }
 }
 
 export async function fetchStoreProductsFromDb(storeId: string): Promise<{
@@ -4524,6 +4547,7 @@ function mapRowToOrder(row: RawOrderRow): Order {
 
   return {
     id: row.id,
+    storeId: row.store_id,
     orderNumber: row.order_number,
     customerName: row.customer_name,
     customerEmail: row.customer_email || '',
@@ -4695,6 +4719,33 @@ export async function fetchStoreOrdersFromDb(storeId: string): Promise<{
   }
 }
 
+export async function fetchOrdersForStoresFromDb(storeIds: string[]): Promise<{
+  data: Order[] | null;
+  error: Error | null;
+}> {
+  const cleanIds = Array.from(new Set(storeIds.filter((id) => UUID_REGEX.test(id))));
+  if (!isSupabaseConfigured || !supabase || cleanIds.length === 0) {
+    return { data: [], error: null };
+  }
+  if (cleanIds.length === 1) {
+    return fetchStoreOrdersFromDb(cleanIds[0]);
+  }
+  try {
+    const { data, error } = await supabase
+      .from('orders')
+      .select('*')
+      .in('store_id', cleanIds)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      return { data: null, error: new Error(error.message || 'Failed to fetch orders') };
+    }
+    return { data: ((data as RawOrderRow[]) || []).map(mapRowToOrder), error: null };
+  } catch (err: unknown) {
+    return { data: null, error: err instanceof Error ? err : new Error('Failed to load orders') };
+  }
+}
+
 export async function createOrderInDb(
   storeId: string,
   orderNumber: string,
@@ -4813,6 +4864,7 @@ function mapRowToCustomer(row: RawCustomerRow): Customer {
 
   return {
     id: row.id,
+    storeId: row.store_id,
     name: row.name,
     email: row.email || '',
     phone: row.phone,
@@ -4839,6 +4891,33 @@ export async function fetchStoreCustomersFromDb(storeId: string): Promise<{
       .from('customers')
       .select('*')
       .eq('store_id', storeId)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      return { data: null, error: new Error(error.message || 'Failed to fetch customers') };
+    }
+    return { data: ((data as RawCustomerRow[]) || []).map(mapRowToCustomer), error: null };
+  } catch (err: unknown) {
+    return { data: null, error: err instanceof Error ? err : new Error('Failed to load customers') };
+  }
+}
+
+export async function fetchCustomersForStoresFromDb(storeIds: string[]): Promise<{
+  data: Customer[] | null;
+  error: Error | null;
+}> {
+  const cleanIds = Array.from(new Set(storeIds.filter((id) => UUID_REGEX.test(id))));
+  if (!isSupabaseConfigured || !supabase || cleanIds.length === 0) {
+    return { data: [], error: null };
+  }
+  if (cleanIds.length === 1) {
+    return fetchStoreCustomersFromDb(cleanIds[0]);
+  }
+  try {
+    const { data, error } = await supabase
+      .from('customers')
+      .select('*')
+      .in('store_id', cleanIds)
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -4970,6 +5049,56 @@ export async function fetchStoreInventoryMovementsFromDb(storeId: string): Promi
       const newStock = Number(row.new_stock) || 0;
       return {
         id: row.id,
+        storeId: row.store_id,
+        productId: row.product_id,
+        productName: row.product_name,
+        sku: '',
+        type: row.type === 'damaged' ? 'adjustment' : row.type,
+        quantityDelta: qtyDelta,
+        previousStock: Math.max(0, newStock - qtyDelta),
+        newStock,
+        reason: row.reason || '',
+        operator: 'Store Staff',
+        date: row.created_at
+          ? new Date(row.created_at).toISOString().split('T')[0]
+          : new Date().toISOString().split('T')[0],
+      };
+    });
+
+    return { data: mapped, error: null };
+  } catch (err: unknown) {
+    return { data: null, error: err instanceof Error ? err : new Error('Failed to load inventory movements') };
+  }
+}
+
+export async function fetchInventoryMovementsForStoresFromDb(storeIds: string[]): Promise<{
+  data: InventoryMovement[] | null;
+  error: Error | null;
+}> {
+  const cleanIds = Array.from(new Set(storeIds.filter((id) => UUID_REGEX.test(id))));
+  if (!isSupabaseConfigured || !supabase || cleanIds.length === 0) {
+    return { data: [], error: null };
+  }
+  if (cleanIds.length === 1) {
+    return fetchStoreInventoryMovementsFromDb(cleanIds[0]);
+  }
+  try {
+    const { data, error } = await supabase
+      .from('inventory_movements')
+      .select('*')
+      .in('store_id', cleanIds)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      return { data: null, error: new Error(error.message || 'Failed to fetch inventory movements') };
+    }
+
+    const mapped: InventoryMovement[] = ((data as RawInventoryMovementRow[]) || []).map((row) => {
+      const qtyDelta = Number(row.quantity_change) || 0;
+      const newStock = Number(row.new_stock) || 0;
+      return {
+        id: row.id,
+        storeId: row.store_id,
         productId: row.product_id,
         productName: row.product_name,
         sku: '',

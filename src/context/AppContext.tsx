@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Product,
   Order,
@@ -120,17 +120,21 @@ import {
   fetchServicePricingCatalogFromDb,
   fetchWebsiteLifecycleAuditLogsFromDb,
   fetchStoreProductsFromDb,
+  fetchProductsByIdsFromDb,
   createProductInDb,
   updateProductInDb,
   deleteProductInDb,
   fetchStoreOrdersFromDb,
+  fetchOrdersForStoresFromDb,
   createOrderInDb,
   updateOrderInDb,
   fetchStoreCustomersFromDb,
+  fetchCustomersForStoresFromDb,
   createCustomerInDb,
   updateCustomerInDb,
   deleteCustomerInDb,
   fetchStoreInventoryMovementsFromDb,
+  fetchInventoryMovementsForStoresFromDb,
   createInventoryMovementInDb,
   fetchStoreMembersFromDb,
   inviteStoreMemberInDb,
@@ -149,6 +153,7 @@ import {
   getEffectiveProductUnitPrice,
   mergeStoreProductsWithWebsites,
   normalizeCustomerPhone,
+  phonesMatch,
   removeProductFromWebsiteCatalog,
   upsertProductIntoWebsiteCatalog,
   validatePublicCustomerOrderInput,
@@ -212,6 +217,8 @@ interface AppContextType {
 
   // Products
   products: Product[];
+  productSyncStatusMap: Record<string, 'saving' | 'saved' | 'syncing' | 'synced' | 'error'>;
+  retryProductWebsiteSync: (productId: string) => Promise<{ success: boolean; message: string }>;
   addProduct: (product: Omit<Product, 'id' | 'salesCount' | 'rating'>) => Promise<Product | null>;
   updateProduct: (id: string, product: Partial<Product>) => Promise<Product | null>;
   deleteProduct: (id: string) => Promise<boolean>;
@@ -230,7 +237,11 @@ interface AppContextType {
   orders: Order[];
   isOrdersLoading: boolean;
   ordersLoadError: string | null;
-  refreshStoreOrders: () => Promise<void>;
+  isOrderRealtimeLive: boolean;
+  lastOrderSyncAt: string | null;
+  orderSoundEnabled: boolean;
+  setOrderSoundEnabled: (enabled: boolean) => void;
+  refreshStoreOrders: (options?: { silent?: boolean }) => Promise<void>;
   addOrder: (order: Omit<Order, 'id' | 'orderNumber' | 'createdAt'>) => void;
   submitPublicCustomerOrder: (
     input: PublicCustomerOrderInput
@@ -1140,6 +1151,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [subscribedWebsites]);
 
+  const [productSyncStatusMap, setProductSyncStatusMap] = useState<
+    Record<string, 'saving' | 'saved' | 'syncing' | 'synced' | 'error'>
+  >({});
+
   const resolveTargetWebsiteForProduct = useCallback(
     (prod: Partial<Product> & { id?: string }, explicitWebsiteId?: string): SubscribedWebsite | undefined => {
       if (explicitWebsiteId) {
@@ -1158,10 +1173,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         );
         if (byCatalog) return byCatalog;
       }
-      const storeWebsites = subscribedWebsites.filter((w) => w.storeId && w.storeId === activeStore.id);
-      if (storeWebsites.length === 1) return storeWebsites[0];
-      if (subscribedWebsites.length === 1) return subscribedWebsites[0];
-      return undefined;
+      const prodStoreMatch = prod.storeId
+        ? subscribedWebsites.find((w) => w.storeId === prod.storeId)
+        : undefined;
+      if (prodStoreMatch) return prodStoreMatch;
+      const activeStoreMatch = subscribedWebsites.find((w) => w.storeId && w.storeId === activeStore.id);
+      if (activeStoreMatch) return activeStoreMatch;
+      return subscribedWebsites[0];
     },
     [subscribedWebsites, activeStore.id]
   );
@@ -1177,7 +1195,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   ): Promise<{ success: boolean; website?: SubscribedWebsite; error?: Error }> => {
     const site = resolveTargetWebsiteForProduct(prod, opts?.targetWebsiteId);
     if (!site) {
+      if (prod.id) {
+        setProductSyncStatusMap((prev) => ({ ...prev, [prod.id]: 'saved' }));
+      }
       return { success: true };
+    }
+
+    if (prod.id && !opts?.deleteMetaEntry) {
+      setProductSyncStatusMap((prev) => ({ ...prev, [prod.id]: 'syncing' }));
     }
 
     const existingMeta = { ...(site.productCatalogMeta || {}) };
@@ -1224,6 +1249,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       );
       if (!success || error) {
+        if (prod.id && !opts?.deleteMetaEntry) {
+          setProductSyncStatusMap((prev) => ({ ...prev, [prod.id]: 'error' }));
+        }
         return {
           success: false,
           website: site,
@@ -1246,14 +1274,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       )
     );
 
+    if (prod.id && !opts?.deleteMetaEntry) {
+      setProductSyncStatusMap((prev) => ({
+        ...prev,
+        [prod.id]: shouldAppearInCatalog ? 'synced' : 'saved',
+      }));
+    }
+
     return { success: true, website: site };
   };
 
   const addProduct = async (
     prodData: Omit<Product, 'id' | 'salesCount' | 'rating'>
   ): Promise<Product | null> => {
+    const defaultWebsiteForActive =
+      prodData.websiteId ||
+      (prodData.isVisible !== false && prodData.status !== 'draft' && prodData.status !== 'archived'
+        ? (subscribedWebsites.find((w) => w.storeId === activeStore.id) || subscribedWebsites[0])?.id
+        : undefined);
+
     const normalizedInput: Omit<Product, 'id' | 'salesCount' | 'rating'> = {
       ...prodData,
+      websiteId: defaultWebsiteForActive,
       price: Math.max(0, Number(prodData.price) || 0),
       discountPrice:
         typeof prodData.discountPrice === 'number' &&
@@ -1265,7 +1307,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       costPrice: Math.max(0, Number(prodData.costPrice) || 0),
       stock: Math.max(0, Math.trunc(Number(prodData.stock) || 0)),
       lowStockThreshold: Math.max(0, Math.trunc(Number(prodData.lowStockThreshold) || 10)),
-      isVisible: prodData.isVisible ?? Boolean(prodData.websiteId),
+      isVisible:
+        prodData.isVisible !== undefined
+          ? prodData.isVisible
+          : prodData.status === 'active'
+          ? true
+          : Boolean(defaultWebsiteForActive),
     };
 
     if (isSupabaseConfigured && user?.id) {
@@ -1288,38 +1335,48 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       const enrichedProduct: Product = {
         ...data,
+        storeId: resolvedStoreId,
         image: normalizedInput.image ?? data.image,
         discountPrice: normalizedInput.discountPrice ?? data.discountPrice,
         websiteId: normalizedInput.websiteId ?? data.websiteId,
         isVisible: normalizedInput.isVisible ?? data.isVisible,
         sortOrder: normalizedInput.sortOrder ?? data.sortOrder,
+        isFeatured: normalizedInput.isFeatured ?? data.isFeatured,
       };
 
-      // Persist extended product metadata & website catalog entry when linked or when merchant owns a website
+      setProductSyncStatusMap((prev) => ({ ...prev, [enrichedProduct.id]: 'saved' }));
+
+      // Automatically sync active visible products & extended metadata with merchant's storefront
       if (
         enrichedProduct.websiteId ||
         enrichedProduct.image ||
-        enrichedProduct.discountPrice !== undefined
+        enrichedProduct.discountPrice !== undefined ||
+        (enrichedProduct.status === 'active' && enrichedProduct.isVisible !== false && subscribedWebsites.length > 0)
       ) {
         const syncRes = await syncProductCatalogStateToWebsite(enrichedProduct, {
           targetWebsiteId: enrichedProduct.websiteId,
           forcePublish: Boolean(
-            enrichedProduct.websiteId &&
-              enrichedProduct.status === 'active' &&
-              enrichedProduct.isVisible !== false
+            enrichedProduct.status === 'active' &&
+              enrichedProduct.isVisible !== false &&
+              (enrichedProduct.websiteId || subscribedWebsites.length > 0)
           ),
         });
         if (!syncRes.success) {
           showToast(
             syncRes.error?.message ||
-              'Product saved to inventory, but website storefront catalog sync failed. Click Publish to Website to retry.',
+              'Product saved to inventory, but website storefront sync failed. Click Retry Sync.',
             'warning'
           );
         }
       }
 
       setProducts((prev) => [enrichedProduct, ...prev.filter((p) => p.id !== enrichedProduct.id)]);
-      showToast(`Added product "${enrichedProduct.name}"`, 'success');
+      showToast(
+        enrichedProduct.status === 'active' && enrichedProduct.isVisible !== false && subscribedWebsites.length > 0
+          ? `Added "${enrichedProduct.name}" and synced with your website`
+          : `Added product "${enrichedProduct.name}"`,
+        'success'
+      );
       return enrichedProduct;
     }
 
@@ -1331,7 +1388,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       rating: 5.0,
     };
     setProducts((prev) => [newProduct, ...prev]);
-    if (newProduct.websiteId) {
+    if (newProduct.websiteId || (newProduct.status === 'active' && newProduct.isVisible !== false && subscribedWebsites.length > 0)) {
       await syncProductCatalogStateToWebsite(newProduct, {
         targetWebsiteId: newProduct.websiteId,
         forcePublish: newProduct.status === 'active' && newProduct.isVisible !== false,
@@ -1373,9 +1430,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setProducts((prev) => prev.map((p) => (p.id === id ? optimisticItem : p)));
 
     if (isSupabaseConfigured && user?.id && UUID_REGEX.test(id)) {
+      setProductSyncStatusMap((prev) => ({ ...prev, [id]: 'saving' }));
       const { data, error } = await updateProductInDb(id, sanitizedPatch);
       if (error || !data) {
         setProducts(prevSnapshot);
+        setProductSyncStatusMap((prev) => ({ ...prev, [id]: 'error' }));
         showToast(error?.message || 'Failed to update product in database', 'error');
         return null;
       }
@@ -1398,6 +1457,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           sanitizedPatch.sortOrder !== undefined
             ? sanitizedPatch.sortOrder
             : data.sortOrder ?? existing.sortOrder,
+        isFeatured:
+          sanitizedPatch.isFeatured !== undefined
+            ? sanitizedPatch.isFeatured
+            : existing.isFeatured,
       };
 
       setProducts((prev) => prev.map((p) => (p.id === id ? mergedConfirmed : p)));
@@ -1405,6 +1468,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // Keep website catalog & productCatalogMeta synchronized whenever linked or previously published
       const syncRes = await syncProductCatalogStateToWebsite(mergedConfirmed, {
         targetWebsiteId: mergedConfirmed.websiteId || existing.websiteId,
+        forcePublish: Boolean(
+          mergedConfirmed.status === 'active' &&
+            mergedConfirmed.isVisible !== false &&
+            (mergedConfirmed.websiteId || subscribedWebsites.length > 0)
+        ),
         removeFromCatalog:
           mergedConfirmed.status !== 'active' ||
           mergedConfirmed.isVisible === false ||
@@ -1413,7 +1481,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!syncRes.success) {
         showToast(
           syncRes.error?.message ||
-            'Product saved, but website catalog could not be refreshed automatically.',
+            'Product saved, but website catalog could not be refreshed automatically. Click Retry Sync.',
           'warning'
         );
       }
@@ -1424,6 +1492,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     await syncProductCatalogStateToWebsite(optimisticItem, {
       targetWebsiteId: optimisticItem.websiteId || existing.websiteId,
+      forcePublish: optimisticItem.status === 'active' && optimisticItem.isVisible !== false,
       removeFromCatalog: optimisticItem.status !== 'active' || optimisticItem.isVisible === false,
     });
     showToast('Product details updated', 'success');
@@ -1484,6 +1553,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: msg };
     }
 
+    setProductSyncStatusMap((prev) => ({ ...prev, [productId]: 'syncing' }));
     let confirmedProd: Product = {
       ...prod,
       status: 'active',
@@ -1499,6 +1569,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
       if (error || !data) {
         const msg = error?.message || 'Failed to update product status before publishing.';
+        setProductSyncStatusMap((prev) => ({ ...prev, [productId]: 'error' }));
         showToast(msg, 'error');
         return { success: false, message: msg };
       }
@@ -1579,9 +1650,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     setProducts((prev) => prev.map((p) => (p.id === productId ? confirmedProd : p)));
-    const okMsg = `"${confirmedProd.name}" unpublished from public storefront. Past order records remain intact.`;
+    const okMsg = `"${confirmedProd.name}" hidden from public storefront. Past order records remain intact.`;
     showToast(okMsg, 'info');
     return { success: true, message: okMsg };
+  };
+
+  const retryProductWebsiteSync = async (
+    productId: string
+  ): Promise<{ success: boolean; message: string }> => {
+    const prod = products.find((p) => p.id === productId);
+    if (!prod) {
+      return { success: false, message: 'Product not found.' };
+    }
+    const syncRes = await syncProductCatalogStateToWebsite(prod, {
+      targetWebsiteId: prod.websiteId,
+      forcePublish: prod.status === 'active' && prod.isVisible !== false,
+      removeFromCatalog: prod.status !== 'active' || prod.isVisible === false,
+    });
+    if (!syncRes.success) {
+      const msg = syncRes.error?.message || 'Sync failed. Please check your connection and try again.';
+      showToast(msg, 'error');
+      return { success: false, message: msg };
+    }
+    const msg =
+      prod.status === 'active' && prod.isVisible !== false
+        ? `"${prod.name}" synced with your website.`
+        : `"${prod.name}" catalog state synced.`;
+    showToast(msg, 'success');
+    return { success: true, message: msg };
   };
 
   const adjustProductStock = (id: string, delta: number, reason: string) => {
@@ -1605,11 +1701,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       prev.map((p) => (p.id === id ? updatedLocalProd : p))
     );
 
-    if (isSupabaseConfigured && user?.id && UUID_REGEX.test(activeStore.id) && UUID_REGEX.test(id)) {
+    const targetStoreId =
+      prod.storeId && UUID_REGEX.test(prod.storeId) ? prod.storeId : activeStore.id;
+
+    if (isSupabaseConfigured && user?.id && UUID_REGEX.test(targetStoreId) && UUID_REGEX.test(id)) {
       void (async () => {
+        setProductSyncStatusMap((prev) => ({ ...prev, [id]: 'saving' }));
         const { error: prodErr } = await updateProductInDb(id, { stock: newStock });
         if (prodErr) {
           setProducts((prev) => prev.map((p) => (p.id === id ? { ...p, stock: previousStock } : p)));
+          setProductSyncStatusMap((prev) => ({ ...prev, [id]: 'error' }));
           showToast(prodErr.message || 'Failed to update stock in database', 'error');
           return;
         }
@@ -1617,7 +1718,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           targetWebsiteId: updatedLocalProd.websiteId,
         });
         const { data: logRow } = await createInventoryMovementInDb({
-          storeId: activeStore.id,
+          storeId: targetStoreId,
           productId: id,
           productName: prod.name,
           type: moveType,
@@ -1653,32 +1754,156 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     showToast(`Updated stock for "${prod.name}" by ${delta > 0 ? `+${delta}` : delta}`, 'success');
   };
 
-  // Orders (Real multi-tenant orders; zero mock data when Supabase is configured)
+  // Orders (Real multi-tenant orders across all merchant stores/websites; zero mock data when Supabase is configured)
   const [orders, setOrders] = useState<Order[]>(() =>
     isSupabaseConfigured ? [] : getStored('orders', INITIAL_ORDERS)
   );
   const [isOrdersLoading, setIsOrdersLoading] = useState<boolean>(false);
   const [ordersLoadError, setOrdersLoadError] = useState<string | null>(null);
+  const [isOrderRealtimeLive, setIsOrderRealtimeLive] = useState<boolean>(false);
+  const [lastOrderSyncAt, setLastOrderSyncAt] = useState<string | null>(null);
+  const [orderSoundEnabled, setOrderSoundEnabledState] = useState<boolean>(() =>
+    getStored<boolean>('order_sound_enabled', true)
+  );
+  const orderSoundEnabledRef = useRef<boolean>(orderSoundEnabled);
+  const seenOrderIdsRef = useRef<Set<string>>(new Set());
+  const initialOrdersHydratedRef = useRef<boolean>(false);
+  const subscribedWebsitesRef = useRef<SubscribedWebsite[]>(subscribedWebsites);
 
-  const refreshStoreOrders = useCallback(async () => {
-    if (!isSupabaseConfigured || !supabase || !user?.id || !UUID_REGEX.test(activeStore.id)) {
-      return;
-    }
-    setIsOrdersLoading(true);
-    setOrdersLoadError(null);
+  useEffect(() => {
+    subscribedWebsitesRef.current = subscribedWebsites;
+  }, [subscribedWebsites]);
+
+  const setOrderSoundEnabled = useCallback((enabled: boolean) => {
+    setOrderSoundEnabledState(enabled);
+    orderSoundEnabledRef.current = enabled;
+    setStored('order_sound_enabled', enabled);
+  }, []);
+
+  const playNewOrderChime = useCallback(() => {
+    if (!orderSoundEnabledRef.current || typeof window === 'undefined') return;
     try {
-      const { data, error } = await fetchStoreOrdersFromDb(activeStore.id);
-      if (error) {
-        setOrdersLoadError(error.message || 'Unable to load store orders from database.');
+      const AudioCtx =
+        window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const now = ctx.currentTime;
+      const notes = [587.33, 880]; // crisp D5 -> A5 merchant ping
+      notes.forEach((freq, idx) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, now + idx * 0.11);
+        gain.gain.setValueAtTime(0.001, now + idx * 0.11);
+        gain.gain.exponentialRampToValueAtTime(0.08, now + idx * 0.11 + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + idx * 0.11 + 0.24);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now + idx * 0.11);
+        osc.stop(now + idx * 0.11 + 0.26);
+      });
+      setTimeout(() => {
+        void ctx.close().catch(() => {});
+      }, 700);
+    } catch {
+      // Browser autoplay blocked — silently ignore
+    }
+  }, []);
+
+  const merchantStoreIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (activeStore?.id && UUID_REGEX.test(activeStore.id)) {
+      ids.add(activeStore.id);
+    }
+    for (const w of subscribedWebsites) {
+      if (w.storeId && UUID_REGEX.test(w.storeId)) {
+        ids.add(w.storeId);
+      }
+    }
+    return Array.from(ids);
+  }, [activeStore?.id, subscribedWebsites]);
+
+  const applyIncomingOrdersAndDetectNew = useCallback(
+    (incomingOrders: Order[], notifyNew: boolean) => {
+      const sorted = [...incomingOrders].sort(
+        (a, b) => Date.parse(b.createdAt || '') - Date.parse(a.createdAt || '')
+      );
+      setOrders(sorted);
+      setLastOrderSyncAt(new Date().toISOString());
+
+      if (!initialOrdersHydratedRef.current) {
+        seenOrderIdsRef.current = new Set(sorted.map((o) => o.id));
+        initialOrdersHydratedRef.current = true;
         return;
       }
-      if (data) {
-        setOrders(data);
+
+      const newlyArrived = sorted.filter((o) => !seenOrderIdsRef.current.has(o.id));
+      for (const o of sorted) {
+        seenOrderIdsRef.current.add(o.id);
       }
-    } finally {
-      setIsOrdersLoading(false);
-    }
-  }, [user?.id, activeStore.id]);
+
+      if (notifyNew && newlyArrived.length > 0) {
+        const newest = newlyArrived[0];
+        const notifId = `notif-order-${newest.id}`;
+        setNotifications((prev) => {
+          if (prev.some((n) => n.id === notifId)) return prev;
+          const notif: AppNotification = {
+            id: notifId,
+            title:
+              newlyArrived.length === 1
+                ? `New Customer Order #${newest.orderNumber}`
+                : `${newlyArrived.length} New Customer Orders Received`,
+            message:
+              newlyArrived.length === 1
+                ? `${newest.customerName || 'A customer'} placed an order for ৳${Number(newest.total || 0).toLocaleString()}.`
+                : `Latest order #${newest.orderNumber} from ${newest.customerName || 'a customer'} for ৳${Number(newest.total || 0).toLocaleString()}.`,
+            type: 'order',
+            link: '/dashboard/orders',
+            read: false,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          };
+          return [notif, ...prev];
+        });
+        showToast(
+          newlyArrived.length === 1
+            ? `New customer order #${newest.orderNumber} received!`
+            : `${newlyArrived.length} new customer orders arrived!`,
+          'success'
+        );
+        playNewOrderChime();
+      }
+    },
+    [playNewOrderChime]
+  );
+
+  const refreshStoreOrders = useCallback(
+    async (options?: { silent?: boolean }) => {
+      if (!isSupabaseConfigured || !supabase || !user?.id || merchantStoreIds.length === 0) {
+        return;
+      }
+      if (!options?.silent) {
+        setIsOrdersLoading(true);
+      }
+      setOrdersLoadError(null);
+      try {
+        const { data, error } = await fetchOrdersForStoresFromDb(merchantStoreIds);
+        if (error) {
+          if (!options?.silent) {
+            setOrdersLoadError(error.message || 'Unable to load store orders from database.');
+          }
+          return;
+        }
+        if (data) {
+          applyIncomingOrdersAndDetectNew(data, true);
+        }
+      } finally {
+        if (!options?.silent) {
+          setIsOrdersLoading(false);
+        }
+      }
+    },
+    [user?.id, merchantStoreIds, applyIncomingOrdersAndDetectNew]
+  );
 
   useEffect(() => {
     if (isSupabaseConfigured) {
@@ -1889,7 +2114,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
 
         const existingCustomer = customers.find(
-          (c) => c.phone === orderData.customerPhone || (c.email && c.email === orderData.customerEmail)
+          (c) =>
+            phonesMatch(c.phone, orderData.customerPhone) ||
+            (c.email && orderData.customerEmail && c.email.toLowerCase() === orderData.customerEmail.toLowerCase())
         );
         if (existingCustomer && UUID_REGEX.test(existingCustomer.id)) {
           updateCustomer(existingCustomer.id, {
@@ -1899,7 +2126,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         } else {
           const { data: newCust } = await createCustomerInDb(activeStore.id, {
             name: orderData.customerName,
-            phone: orderData.customerPhone,
+            phone: normalizeCustomerPhone(orderData.customerPhone),
             email: orderData.customerEmail,
             city: orderData.city,
             ordersCount: 1,
@@ -1940,7 +2167,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     const existingCustomer = customers.find(
-      (c) => c.phone === orderData.customerPhone || (c.email && c.email === orderData.customerEmail)
+      (c) =>
+        phonesMatch(c.phone, orderData.customerPhone) ||
+        (c.email && orderData.customerEmail && c.email.toLowerCase() === orderData.customerEmail.toLowerCase())
     );
     if (existingCustomer) {
       updateCustomer(existingCustomer.id, {
@@ -1951,7 +2180,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } else {
       addCustomer({
         name: orderData.customerName,
-        phone: orderData.customerPhone,
+        phone: normalizeCustomerPhone(orderData.customerPhone),
         email: orderData.customerEmail,
         city: orderData.city,
         notes: '',
@@ -2144,12 +2373,55 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!targetOrder || targetOrder.status === status) return;
     const wasCancelled = targetOrder.status === 'cancelled';
     const isNowCancelling = !wasCancelled && status === 'cancelled';
+    const isUncancelling = wasCancelled && status !== 'cancelled';
+
+    if (isUncancelling) {
+      for (const item of targetOrder.items) {
+        const matchingProd = products.find((p) => p.id === item.productId);
+        if (matchingProd && item.quantity > 0 && matchingProd.stock < item.quantity) {
+          showToast(
+            `Cannot reactivate order #${targetOrder.orderNumber}: "${matchingProd.name}" only has ${matchingProd.stock} left in stock.`,
+            'error'
+          );
+          return;
+        }
+      }
+    }
 
     const prevSnapshot = orders;
     setOrders((prev) => prev.map((o) => (o.id === id ? { ...o, status } : o)));
 
     if (isSupabaseConfigured && user?.id && UUID_REGEX.test(id)) {
       void (async () => {
+        // Hydrate any order products missing from local state before stock mutation
+        let localProductMap = new Map(products.map((p) => [p.id, p]));
+        if (isNowCancelling || isUncancelling) {
+          const missingIds = targetOrder.items
+            .map((it) => it.productId)
+            .filter((pid) => UUID_REGEX.test(pid) && !localProductMap.has(pid));
+          if (missingIds.length > 0) {
+            const { data: fetchedProds } = await fetchProductsByIdsFromDb(missingIds);
+            if (fetchedProds) {
+              for (const fp of fetchedProds) {
+                localProductMap.set(fp.id, fp);
+              }
+            }
+          }
+          if (isUncancelling) {
+            for (const item of targetOrder.items) {
+              const p = localProductMap.get(item.productId);
+              if (p && item.quantity > 0 && p.stock < item.quantity) {
+                setOrders(prevSnapshot);
+                showToast(
+                  `Cannot reactivate order #${targetOrder.orderNumber}: "${p.name}" only has ${p.stock} left in stock.`,
+                  'error'
+                );
+                return;
+              }
+            }
+          }
+        }
+
         const { data, error } = await updateOrderInDb(id, { status });
         if (error || !data) {
           setOrders(prevSnapshot);
@@ -2158,38 +2430,49 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
         setOrders((prev) => prev.map((o) => (o.id === id ? data : o)));
 
-        if (isNowCancelling) {
+        if (isNowCancelling || isUncancelling) {
           for (const item of targetOrder.items) {
-            const matchingProd = products.find((p) => p.id === item.productId);
+            const matchingProd = localProductMap.get(item.productId);
             if (matchingProd && UUID_REGEX.test(matchingProd.id) && item.quantity > 0) {
-              const restoredStock = matchingProd.stock + item.quantity;
-              const nextSales = Math.max(0, (matchingProd.salesCount || 0) - item.quantity);
-              const { data: restoredProd } = await updateProductInDb(matchingProd.id, {
-                stock: restoredStock,
+              const delta = isNowCancelling ? item.quantity : -item.quantity;
+              const nextStock = Math.max(0, matchingProd.stock + delta);
+              const nextSales = Math.max(0, (matchingProd.salesCount || 0) - delta);
+              const { data: updatedDbProd } = await updateProductInDb(matchingProd.id, {
+                stock: nextStock,
                 salesCount: nextSales,
               });
-              if (restoredProd) {
+              if (updatedDbProd) {
                 const mergedProd: Product = {
                   ...matchingProd,
-                  ...restoredProd,
-                  image: matchingProd.image || restoredProd.image,
+                  ...updatedDbProd,
+                  image: matchingProd.image || updatedDbProd.image,
                   discountPrice: matchingProd.discountPrice,
                   websiteId: matchingProd.websiteId,
                   isVisible: matchingProd.isVisible,
                 };
-                setProducts((prev) => prev.map((p) => (p.id === mergedProd.id ? mergedProd : p)));
+                setProducts((prev) =>
+                  prev.some((p) => p.id === mergedProd.id)
+                    ? prev.map((p) => (p.id === mergedProd.id ? mergedProd : p))
+                    : prev
+                );
                 await syncProductCatalogStateToWebsite(mergedProd, {
                   targetWebsiteId: mergedProd.websiteId,
                 });
-                if (UUID_REGEX.test(activeStore.id)) {
+                const moveStoreId =
+                  (mergedProd.storeId && UUID_REGEX.test(mergedProd.storeId) && mergedProd.storeId) ||
+                  (targetOrder.storeId && UUID_REGEX.test(targetOrder.storeId) && targetOrder.storeId) ||
+                  activeStore.id;
+                if (UUID_REGEX.test(moveStoreId)) {
                   const { data: logRow } = await createInventoryMovementInDb({
-                    storeId: activeStore.id,
+                    storeId: moveStoreId,
                     productId: mergedProd.id,
                     productName: mergedProd.name,
-                    type: 'return',
-                    quantityDelta: item.quantity,
-                    newStock: restoredStock,
-                    reason: `Cancelled Order #${targetOrder.orderNumber}`,
+                    type: isNowCancelling ? 'return' : 'sale',
+                    quantityDelta: delta,
+                    newStock: nextStock,
+                    reason: isNowCancelling
+                      ? `Cancelled Order #${targetOrder.orderNumber}`
+                      : `Reactivated Order #${targetOrder.orderNumber}`,
                   });
                   if (logRow) {
                     setInventoryLogs((prev) => [
@@ -2202,7 +2485,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }
           }
           showToast(
-            `Order #${targetOrder.orderNumber} cancelled and inventory stock restored.`,
+            isNowCancelling
+              ? `Order #${targetOrder.orderNumber} cancelled and inventory stock restored.`
+              : `Order #${targetOrder.orderNumber} reactivated and stock re-reserved.`,
             'info'
           );
           return;
@@ -2213,18 +2498,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
-    if (isNowCancelling) {
+    if (isNowCancelling || isUncancelling) {
       targetOrder.items.forEach((item) => {
         const matchingProd = products.find((p) => p.id === item.productId);
         if (matchingProd && item.quantity > 0) {
-          const restoredProd: Product = {
+          const delta = isNowCancelling ? item.quantity : -item.quantity;
+          const updatedProd: Product = {
             ...matchingProd,
-            stock: matchingProd.stock + item.quantity,
-            salesCount: Math.max(0, (matchingProd.salesCount || 0) - item.quantity),
+            stock: Math.max(0, matchingProd.stock + delta),
+            salesCount: Math.max(0, (matchingProd.salesCount || 0) - delta),
           };
-          setProducts((prev) => prev.map((p) => (p.id === restoredProd.id ? restoredProd : p)));
-          void syncProductCatalogStateToWebsite(restoredProd, {
-            targetWebsiteId: restoredProd.websiteId,
+          setProducts((prev) => prev.map((p) => (p.id === updatedProd.id ? updatedProd : p)));
+          void syncProductCatalogStateToWebsite(updatedProd, {
+            targetWebsiteId: updatedProd.websiteId,
           });
         }
       });
@@ -5071,51 +5357,46 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     showToast('Reply dispatched to ticket', 'success');
   };
 
-  // Synchronize store-scoped tables (products, orders, customers, inventory_movements, store_members)
+  // Reset order detection refs cleanly on user switch / logout
   useEffect(() => {
-    if (!isSupabaseConfigured || !supabase || !user?.id || !UUID_REGEX.test(activeStore.id)) {
+    seenOrderIdsRef.current = new Set();
+    initialOrdersHydratedRef.current = false;
+  }, [user?.id]);
+
+  // Synchronize store-scoped tables across ALL merchant stores & websites (products, orders, customers, inventory_movements, store_members)
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase || !user?.id || merchantStoreIds.length === 0) {
       return;
     }
 
     let cancelled = false;
     setIsOrdersLoading(true);
     (async () => {
-      const extraWebsiteStoreIds = Array.from(
-        new Set(
-          subscribedWebsites
-            .map((w) => w.storeId)
-            .filter((sid): sid is string => Boolean(sid && UUID_REGEX.test(sid) && sid !== activeStore.id))
-        )
-      );
-
-      const [prodRes, extraProdResults, ordRes, custRes, invRes, teamRes] = await Promise.all([
-        fetchStoreProductsFromDb(activeStore.id),
-        Promise.all(extraWebsiteStoreIds.map((sid) => fetchStoreProductsFromDb(sid))),
-        fetchStoreOrdersFromDb(activeStore.id),
-        fetchStoreCustomersFromDb(activeStore.id),
-        fetchStoreInventoryMovementsFromDb(activeStore.id),
+      const [prodResults, ordRes, custRes, invRes, teamRes] = await Promise.all([
+        Promise.all(merchantStoreIds.map((sid) => fetchStoreProductsFromDb(sid))),
+        fetchOrdersForStoresFromDb(merchantStoreIds),
+        fetchCustomersForStoresFromDb(merchantStoreIds),
+        fetchInventoryMovementsForStoresFromDb(merchantStoreIds),
         fetchStoreMembersFromDb(activeStore.id),
       ]);
       if (cancelled) return;
       setIsOrdersLoading(false);
 
-      if (!prodRes.error && prodRes.data) {
-        const mergedMap = new Map<string, Product>();
-        for (const p of prodRes.data) mergedMap.set(p.id, p);
-        for (const extra of extraProdResults) {
-          if (!extra.error && extra.data) {
-            for (const p of extra.data) {
-              if (!mergedMap.has(p.id)) mergedMap.set(p.id, p);
-            }
+      const mergedProdMap = new Map<string, Product>();
+      for (const pr of prodResults) {
+        if (!pr.error && pr.data) {
+          for (const p of pr.data) {
+            if (!mergedProdMap.has(p.id)) mergedProdMap.set(p.id, p);
           }
         }
-        setProducts(mergeStoreProductsWithWebsites(Array.from(mergedMap.values()), subscribedWebsites));
       }
+      setProducts(mergeStoreProductsWithWebsites(Array.from(mergedProdMap.values()), subscribedWebsites));
+
       if (ordRes.error) {
         setOrdersLoadError(ordRes.error.message || 'Unable to load store orders.');
       } else if (ordRes.data) {
         setOrdersLoadError(null);
-        setOrders(ordRes.data);
+        applyIncomingOrdersAndDetectNew(ordRes.data, false);
       }
       if (!custRes.error && custRes.data) setCustomers(custRes.data);
       if (!invRes.error && invRes.data) setInventoryLogs(invRes.data);
@@ -5125,66 +5406,88 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => {
       cancelled = true;
     };
-  }, [user?.id, activeStore.id, subscribedWebsites]);
+  }, [user?.id, activeStore.id, merchantStoreIds, subscribedWebsites, applyIncomingOrdersAndDetectNew]);
 
-  // Realtime order listener so public customer storefront orders appear immediately in the Merchant Dashboard
+  // Multi-store Realtime order listener + resilient adaptive polling fallback + focus/visibility re-sync
   useEffect(() => {
-    if (!isSupabaseConfigured || !supabase || !user?.id || !UUID_REGEX.test(activeStore.id)) {
+    if (!isSupabaseConfigured || !supabase || !user?.id || merchantStoreIds.length === 0) {
+      setIsOrderRealtimeLive(false);
       return;
     }
 
     const sbClient = supabase;
-    const channel = sbClient
-      .channel(`merchant-orders-${activeStore.id}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'orders',
-          filter: `store_id=eq.${activeStore.id}`,
-        },
-        (payload) => {
-          void refreshStoreOrders();
-          if (payload.eventType === 'INSERT') {
-            const newRow = payload.new as { order_number?: string; customer_name?: string; total?: number } | null;
-            if (newRow?.order_number) {
-              const notif: AppNotification = {
-                id: `notif-order-${Date.now()}`,
-                title: `New Customer Order #${newRow.order_number}`,
-                message: `${newRow.customer_name || 'A customer'} placed a new order${newRow.total ? ` for ৳${Number(newRow.total).toLocaleString()}` : ''}.`,
-                type: 'order',
-                read: false,
-                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-              };
-              setNotifications((prev) => [notif, ...prev]);
-              showToast(`New customer order #${newRow.order_number} received!`, 'success');
+    const storeIdSet = new Set(merchantStoreIds);
+    const channels = merchantStoreIds.map((sid) => {
+      const ch = sbClient
+        .channel(`merchant-orders-${sid}`)
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'orders',
+            filter: `store_id=eq.${sid}`,
+          },
+          (payload) => {
+            if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE' || payload.eventType === 'DELETE') {
+              void refreshStoreOrders({ silent: true });
+              if (payload.eventType === 'INSERT') {
+                void Promise.all([
+                  Promise.all(merchantStoreIds.map((s) => fetchStoreProductsFromDb(s))).then((results) => {
+                    const map = new Map<string, Product>();
+                    for (const res of results) {
+                      if (!res.error && res.data) {
+                        for (const p of res.data) map.set(p.id, p);
+                      }
+                    }
+                    setProducts(
+                      mergeStoreProductsWithWebsites(Array.from(map.values()), subscribedWebsitesRef.current)
+                    );
+                  }),
+                  fetchCustomersForStoresFromDb(merchantStoreIds).then((res) => {
+                    if (!res.error && res.data) setCustomers(res.data);
+                  }),
+                  fetchInventoryMovementsForStoresFromDb(merchantStoreIds).then((res) => {
+                    if (!res.error && res.data) setInventoryLogs(res.data);
+                  }),
+                ]);
+              }
             }
-            void Promise.all([
-              fetchStoreProductsFromDb(activeStore.id).then((res) => {
-                if (!res.error && res.data) {
-                  setProducts((prevWebMerged) => {
-                    void prevWebMerged;
-                    return mergeStoreProductsWithWebsites(res.data!, subscribedWebsites);
-                  });
-                }
-              }),
-              fetchStoreCustomersFromDb(activeStore.id).then((res) => {
-                if (!res.error && res.data) setCustomers(res.data);
-              }),
-              fetchStoreInventoryMovementsFromDb(activeStore.id).then((res) => {
-                if (!res.error && res.data) setInventoryLogs(res.data);
-              }),
-            ]);
           }
-        }
-      )
-      .subscribe();
+        )
+        .subscribe((status) => {
+          setIsOrderRealtimeLive(status === 'SUBSCRIBED');
+        });
+      return ch;
+    });
+
+    const pollIntervalMs = isOrderRealtimeLive ? 35000 : 15000;
+    const pollTimer = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (storeIdSet.size === 0) return;
+      void refreshStoreOrders({ silent: true });
+    }, pollIntervalMs);
+
+    const handleVisibilityOrFocus = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      void refreshStoreOrders({ silent: true });
+    };
+
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    window.addEventListener('online', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
 
     return () => {
-      void sbClient.removeChannel(channel);
+      window.clearInterval(pollTimer);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      window.removeEventListener('online', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+      for (const ch of channels) {
+        void sbClient.removeChannel(ch);
+      }
+      setIsOrderRealtimeLive(false);
     };
-  }, [user?.id, activeStore.id, refreshStoreOrders, subscribedWebsites]);
+  }, [user?.id, merchantStoreIds, isOrderRealtimeLive, refreshStoreOrders]);
 
   // Synchronize user-scoped support tickets & authoritative service pricing catalog
   useEffect(() => {
@@ -5289,6 +5592,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateOnboarding,
         completeOnboarding,
         products,
+        productSyncStatusMap,
+        retryProductWebsiteSync,
         addProduct,
         updateProduct,
         deleteProduct,
@@ -5299,6 +5604,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         orders,
         isOrdersLoading,
         ordersLoadError,
+        isOrderRealtimeLive,
+        lastOrderSyncAt,
+        orderSoundEnabled,
+        setOrderSoundEnabled,
         refreshStoreOrders,
         addOrder,
         submitPublicCustomerOrder,
