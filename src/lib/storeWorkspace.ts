@@ -117,6 +117,7 @@ export class StoreWorkspaceCoordinator {
   private userSelectedStoreId: string | null = null;
   private currentUserId: string | null = null;
   private epoch = 0;
+  private lastErrorWasRls = false;
 
   private inFlightPromise: Promise<StoreWorkspaceResolution> | null = null;
   private inFlightToken: symbol | null = null;
@@ -151,6 +152,7 @@ export class StoreWorkspaceCoordinator {
     this.status = 'idle';
     this.isInitializing = false;
     this.error = null;
+    this.lastErrorWasRls = false;
     this.inFlightPromise = null;
     this.inFlightToken = null;
     this.inFlightEpoch = -1;
@@ -176,6 +178,7 @@ export class StoreWorkspaceCoordinator {
       this.status = 'idle';
       this.isInitializing = false;
       this.error = null;
+      this.lastErrorWasRls = false;
       this.inFlightPromise = null;
       this.inFlightToken = null;
       this.inFlightEpoch = -1;
@@ -261,6 +264,16 @@ export class StoreWorkspaceCoordinator {
       }
     }
 
+    // Never repeatedly retry INSERT automatically after a database RLS violation unless user explicitly forces refresh
+    if (!options.forceRefresh && this.status === 'error' && this.lastErrorWasRls && this.error) {
+      return {
+        stores: this.stores,
+        status: 'error',
+        reason: 'error',
+        error: this.error,
+      };
+    }
+
     // Join in-flight initialization for this exact user & session epoch
     if (
       this.inFlightPromise &&
@@ -290,6 +303,7 @@ export class StoreWorkspaceCoordinator {
     this.isInitializing = true;
     this.status = 'loading';
     this.error = null;
+    this.lastErrorWasRls = false;
     this.emit();
 
     const run = (async (): Promise<StoreWorkspaceResolution> => {
@@ -379,6 +393,7 @@ export class StoreWorkspaceCoordinator {
           const errMsg =
             createError?.message ||
             'Could not initialize a store workspace for your account. Please retry.';
+          this.lastErrorWasRls = /42501|row-level security/i.test(errMsg);
           this.status = 'error';
           this.error = errMsg;
           this.isInitializing = false;

@@ -12,7 +12,12 @@ import { Globe, ArrowLeft, Loader2, Sparkles } from 'lucide-react';
 
 export const PublicTenantWebsitePage: React.FC = () => {
   const { subdomain: paramSubdomain } = useParams<{ subdomain?: string }>();
-  const { subscribedWebsites, resolvePublicWebsite, submitPublicCustomerOrder } = useApp();
+  const {
+    subscribedWebsites,
+    resolvePublicWebsite,
+    submitPublicCustomerOrder,
+    submitPublicCustomerInquiry,
+  } = useApp();
   const [loading, setLoading] = useState(true);
   const [site, setSite] = useState<SubscribedWebsite | null>(null);
 
@@ -143,6 +148,7 @@ export const PublicTenantWebsitePage: React.FC = () => {
         isPublicView={true}
         showGraceBanner={false}
         onSubmitOrder={submitPublicCustomerOrder}
+        onSubmitInquiry={submitPublicCustomerInquiry}
         onOrderPlaced={() => void refreshResolvedSite()}
       />
     </div>

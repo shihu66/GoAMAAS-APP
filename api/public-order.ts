@@ -410,59 +410,192 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       'Content-Type': 'application/json',
     };
 
-    // Resolve authoritative websiteId, storeId, and server-side catalog metadata (handles 20261029 slim RPC payloads)
+    // Resolve authoritative websiteId, storeId, and verify strict owner/store linkage via service_role
     let storeId = String(site.storeId || site.store_id || '').trim();
     let websiteId = String(site.id || '').trim();
     let authoritativeSiteConfig: Record<string, any> | null = null;
 
-    if (!UUID_REGEX.test(storeId) || !UUID_REGEX.test(websiteId)) {
-      const siteLookupResp = await fetch(
-        `${supabaseUrl}/rest/v1/subscribed_websites?subdomain=eq.${encodeURIComponent(subdomain)}&select=id,store_id,user_id,status,payment_status,deployment_status,current_period_end,config&limit=1`,
+    const siteSelectCols =
+      'id,store_id,user_id,status,payment_status,deployment_status,current_period_end,config';
+    let siteLookupResp = await fetch(
+      `${supabaseUrl}/rest/v1/subscribed_websites?subdomain=eq.${encodeURIComponent(subdomain)}&select=${siteSelectCols}&limit=1`,
+      { method: 'GET', headers: adminHeaders }
+    );
+    if (!siteLookupResp.ok) {
+      sendJson(res, 502, {
+        ok: false,
+        code: 'WEBSITE_LOOKUP_FAILED',
+        error: 'Unable to verify storefront website linkage right now. Please try again.',
+      });
+      return;
+    }
+
+    let siteRows = (await siteLookupResp.json()) as any[];
+    if (Array.isArray(siteRows) && siteRows.length === 0) {
+      siteLookupResp = await fetch(
+        `${supabaseUrl}/rest/v1/subscribed_websites?subdomain=ilike.${encodeURIComponent(subdomain)}&select=${siteSelectCols}&limit=1`,
         { method: 'GET', headers: adminHeaders }
       );
-      if (siteLookupResp.ok) {
-        const rows = (await siteLookupResp.json()) as any[];
-        const siteRow = Array.isArray(rows) ? rows[0] : null;
-        if (siteRow) {
-          const rowPeriodEnd = siteRow.current_period_end ? Date.parse(String(siteRow.current_period_end)) : NaN;
-          const rowExpired =
-            siteRow.status === 'grace_period' ||
-            siteRow.status === 'past_due' ||
-            (Number.isFinite(rowPeriodEnd) && rowPeriodEnd <= Date.now());
-          if (
-            rowExpired ||
-            siteRow.status !== 'active' ||
-            siteRow.payment_status !== 'paid' ||
-            siteRow.deployment_status !== 'live'
-          ) {
-            sendJson(res, 403, {
+      if (!siteLookupResp.ok) {
+        sendJson(res, 502, {
+          ok: false,
+          code: 'WEBSITE_LOOKUP_FAILED',
+          error: 'Unable to verify storefront website linkage right now. Please try again.',
+        });
+        return;
+      }
+      siteRows = (await siteLookupResp.json()) as any[];
+    }
+
+    const siteRow = Array.isArray(siteRows) ? siteRows[0] : null;
+    if (siteRow) {
+      if (siteRow.status !== undefined) {
+        const rowPeriodEnd = siteRow.current_period_end
+          ? Date.parse(String(siteRow.current_period_end))
+          : NaN;
+        const rowExpired =
+          siteRow.status === 'grace_period' ||
+          siteRow.status === 'past_due' ||
+          (Number.isFinite(rowPeriodEnd) && rowPeriodEnd <= Date.now());
+        if (
+          rowExpired ||
+          siteRow.status !== 'active' ||
+          siteRow.payment_status !== 'paid' ||
+          siteRow.deployment_status !== 'live'
+        ) {
+          sendJson(res, 403, {
+            ok: false,
+            code: 'STOREFRONT_INACTIVE',
+            error: 'Orders cannot be placed because this storefront subscription is currently inactive.',
+          });
+          return;
+        }
+      }
+
+      if (UUID_REGEX.test(String(siteRow.id || '').trim())) {
+        websiteId = String(siteRow.id).trim();
+      }
+
+      if (siteRow.config && typeof siteRow.config === 'object') {
+        authoritativeSiteConfig = siteRow.config as Record<string, any>;
+      }
+
+      const siteOwnerUserId = String(siteRow.user_id || '').trim();
+      if (UUID_REGEX.test(siteOwnerUserId)) {
+        const rowStoreId = String(siteRow.store_id || '').trim();
+        const candidateStoreId = UUID_REGEX.test(rowStoreId) ? rowStoreId : storeId;
+        storeId = '';
+
+        if (UUID_REGEX.test(candidateStoreId)) {
+          const verifyStoreResp = await fetch(
+            `${supabaseUrl}/rest/v1/stores?id=eq.${encodeURIComponent(candidateStoreId)}&select=id,owner_id&limit=1`,
+            { method: 'GET', headers: adminHeaders }
+          );
+          if (!verifyStoreResp.ok) {
+            sendJson(res, 502, {
               ok: false,
-              code: 'STOREFRONT_INACTIVE',
-              error: 'Orders cannot be placed because this storefront subscription is currently inactive.',
+              code: 'STORE_LOOKUP_FAILED',
+              error: 'Unable to verify linked merchant store right now. Please try again.',
             });
             return;
           }
-          if (!UUID_REGEX.test(websiteId) && UUID_REGEX.test(String(siteRow.id || '').trim())) {
-            websiteId = String(siteRow.id).trim();
+          const matchedStores = (await verifyStoreResp.json()) as any[];
+          const matched = Array.isArray(matchedStores) ? matchedStores[0] : null;
+          if (!matched || !UUID_REGEX.test(String(matched.id || '').trim())) {
+            sendJson(res, 422, {
+              ok: false,
+              code: 'STORE_NOT_LINKED',
+              error: 'This website is not linked to an active merchant inventory store yet.',
+            });
+            return;
           }
-          if (!UUID_REGEX.test(storeId) && UUID_REGEX.test(String(siteRow.store_id || '').trim())) {
-            storeId = String(siteRow.store_id).trim();
-          }
-          if (!UUID_REGEX.test(storeId) && UUID_REGEX.test(String(siteRow.user_id || '').trim())) {
-            const ownerStoreResp = await fetch(
-              `${supabaseUrl}/rest/v1/stores?owner_id=eq.${encodeURIComponent(String(siteRow.user_id).trim())}&order=created_at.asc&limit=1&select=id`,
+
+          const matchedOwnerId = String(matched.owner_id || '').trim();
+          if (UUID_REGEX.test(matchedOwnerId) && matchedOwnerId !== siteOwnerUserId) {
+            const memberResp = await fetch(
+              `${supabaseUrl}/rest/v1/store_members?store_id=eq.${encodeURIComponent(candidateStoreId)}&user_id=eq.${encodeURIComponent(siteOwnerUserId)}&status=eq.active&select=id&limit=1`,
               { method: 'GET', headers: adminHeaders }
             );
-            if (ownerStoreResp.ok) {
-              const ownerStores = (await ownerStoreResp.json()) as any[];
-              const fallbackSid = String(ownerStores?.[0]?.id || '').trim();
-              if (UUID_REGEX.test(fallbackSid)) {
-                storeId = fallbackSid;
-              }
+            if (!memberResp.ok) {
+              sendJson(res, 502, {
+                ok: false,
+                code: 'STORE_LOOKUP_FAILED',
+                error: 'Unable to verify store membership right now. Please try again.',
+              });
+              return;
+            }
+            const members = (await memberResp.json()) as any[];
+            if (!Array.isArray(members) || members.length === 0) {
+              sendJson(res, 403, {
+                ok: false,
+                code: 'STORE_OWNERSHIP_MISMATCH',
+                error: 'Store linkage does not belong to this website merchant account.',
+              });
+              return;
             }
           }
-          if (siteRow.config && typeof siteRow.config === 'object') {
-            authoritativeSiteConfig = siteRow.config as Record<string, any>;
+
+          storeId = String(matched.id).trim();
+        } else {
+          const ownerStoreResp = await fetch(
+            `${supabaseUrl}/rest/v1/stores?owner_id=eq.${encodeURIComponent(siteOwnerUserId)}&order=created_at.asc&limit=2&select=id,owner_id`,
+            { method: 'GET', headers: adminHeaders }
+          );
+          if (!ownerStoreResp.ok) {
+            sendJson(res, 502, {
+              ok: false,
+              code: 'STORE_LOOKUP_FAILED',
+              error: 'Unable to verify merchant store linkage right now. Please try again.',
+            });
+            return;
+          }
+          const rawStores = (await ownerStoreResp.json()) as any[];
+          const eligibleStores = (Array.isArray(rawStores) ? rawStores : []).filter((s) => {
+            const sid = String(s?.id || '').trim();
+            const oid = String(s?.owner_id || '').trim();
+            return UUID_REGEX.test(sid) && (!UUID_REGEX.test(oid) || oid === siteOwnerUserId);
+          });
+
+          if (eligibleStores.length === 1) {
+            storeId = String(eligibleStores[0].id).trim();
+          } else if (eligibleStores.length > 1) {
+            sendJson(res, 422, {
+              ok: false,
+              code: 'STORE_LINK_AMBIGUOUS',
+              error: 'This website cannot accept orders yet because the merchant has multiple stores without a specific store link.',
+            });
+            return;
+          } else {
+            const memberStoresResp = await fetch(
+              `${supabaseUrl}/rest/v1/store_members?user_id=eq.${encodeURIComponent(siteOwnerUserId)}&status=eq.active&select=store_id&limit=2`,
+              { method: 'GET', headers: adminHeaders }
+            );
+            if (!memberStoresResp.ok) {
+              sendJson(res, 502, {
+                ok: false,
+                code: 'STORE_LOOKUP_FAILED',
+                error: 'Unable to verify store membership right now. Please try again.',
+              });
+              return;
+            }
+            const memberships = (await memberStoresResp.json()) as any[];
+            const uniqueMemberStores = Array.from(
+              new Set(
+                (Array.isArray(memberships) ? memberships : [])
+                  .map((m) => String(m?.store_id || '').trim())
+                  .filter((id) => UUID_REGEX.test(id))
+              )
+            );
+            if (uniqueMemberStores.length === 1) {
+              storeId = uniqueMemberStores[0];
+            } else if (uniqueMemberStores.length > 1) {
+              sendJson(res, 422, {
+                ok: false,
+                code: 'STORE_LINK_AMBIGUOUS',
+                error: 'This website cannot accept orders yet because the merchant belongs to multiple stores without a specific store link.',
+              });
+              return;
+            }
           }
         }
       }

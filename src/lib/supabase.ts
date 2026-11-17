@@ -33,6 +33,7 @@ import {
 } from './paymentWorkflow';
 import { emitPaymentDiagnostic } from './paymentDiagnostics';
 import {
+  PublicCustomerInquiryInput,
   PublicCustomerOrderInput,
   embedPublicStorefrontMetaInConfig,
   extractOrderMetadataFromItems,
@@ -3547,6 +3548,12 @@ export async function fetchUserStoresFromDb(): Promise<{ data: Store[] | null; e
   }
 }
 
+export function isRlsPolicyError(err: { code?: string; message?: string } | null | undefined): boolean {
+  if (!err) return false;
+  const msg = String(err.message || '').toLowerCase();
+  return err.code === '42501' || msg.includes('row-level security');
+}
+
 export async function createStoreInDb(params: {
   name: string;
   slug?: string;
@@ -3560,7 +3567,7 @@ export async function createStoreInDb(params: {
   }
   try {
     const authState = await ensureActiveSupabaseSession();
-    if (authState.error || !authState.user) {
+    if (authState.error || !authState.user || !authState.session?.access_token) {
       return {
         data: null,
         error: authState.error || new Error('Authentication required to create a store'),
@@ -3568,8 +3575,31 @@ export async function createStoreInDb(params: {
     }
     const user = authState.user;
 
+    // Prevent duplicate stores if this user already owns a store in public.stores
+    const { data: existingOwnedRows, error: precheckError } = await supabase
+      .from('stores')
+      .select('*')
+      .eq('owner_id', user.id)
+      .order('created_at', { ascending: true })
+      .limit(1);
+
+    if (precheckError) {
+      return {
+        data: null,
+        error: new Error(
+          isRlsPolicyError(precheckError)
+            ? `Store workspace access was rejected by database row-level security (42501): ${precheckError.message}. Please sign in again and retry.`
+            : precheckError.message || 'Failed to verify existing store workspace'
+        ),
+      };
+    }
+
+    if (Array.isArray(existingOwnedRows) && existingOwnedRows.length > 0) {
+      return { data: mapDatabaseRowToStore(existingOwnedRows[0] as RawStoreRow), error: null };
+    }
+
     const cleanName = (params.name || '').trim() || 'My Store';
-    const primarySlug = sanitizeStoreSlug(params.slug || cleanName, user.id.slice(0, 6));
+    let targetSlug = sanitizeStoreSlug(params.slug || cleanName, user.id.slice(0, 6));
 
     const basePayload = {
       owner_id: user.id,
@@ -3580,34 +3610,87 @@ export async function createStoreInDb(params: {
       address: (params.address || '').trim(),
     };
 
-    const { data, error } = await supabase
+    // CRITICAL: Do NOT chain .select('*') on stores INSERT.
+    // Production RLS evaluates SELECT USING (can_access_store(id)) in the pre-insert snapshot
+    // when RETURNING * is requested, causing 42501 ("new row violates row-level security policy").
+    const { error: insertError } = await supabase
       .from('stores')
-      .insert({ ...basePayload, slug: primarySlug })
-      .select('*')
-      .single();
+      .insert({ ...basePayload, slug: targetSlug });
 
-    if (error) {
-      if (error.code === '23505') {
-        const retrySuffix = `${user.id.slice(0, 4)}${Math.random().toString(36).slice(2, 6)}`;
-        const retrySlug = sanitizeStoreSlug(cleanName, retrySuffix);
-        const { data: retryData, error: retryErr } = await supabase
-          .from('stores')
-          .insert({ ...basePayload, slug: retrySlug })
-          .select('*')
-          .single();
-        if (retryErr || !retryData) {
-          return { data: null, error: new Error(retryErr?.message || 'Failed to create store with unique slug') };
-        }
-        return { data: mapDatabaseRowToStore(retryData as RawStoreRow), error: null };
+    if (insertError) {
+      if (isRlsPolicyError(insertError)) {
+        return {
+          data: null,
+          error: new Error(
+            `Store creation was rejected by database row-level security (42501): ${insertError.message}. Please verify your active login session and retry.`
+          ),
+        };
       }
-      return { data: null, error: new Error(error.message || 'Failed to create store in database') };
+
+      if (insertError.code === '23505') {
+        const retrySuffix = `${user.id.slice(0, 4)}${Math.random().toString(36).slice(2, 6)}`;
+        targetSlug = sanitizeStoreSlug(cleanName, retrySuffix);
+        const { error: retryErr } = await supabase
+          .from('stores')
+          .insert({ ...basePayload, slug: targetSlug });
+
+        if (retryErr) {
+          return {
+            data: null,
+            error: new Error(
+              isRlsPolicyError(retryErr)
+                ? `Store creation was rejected by database row-level security (42501): ${retryErr.message}. Please verify your active login session and retry.`
+                : retryErr.message || 'Failed to create store with unique slug'
+            ),
+          };
+        }
+      } else {
+        return { data: null, error: new Error(insertError.message || 'Failed to create store in database') };
+      }
     }
 
-    if (!data) {
-      return { data: null, error: new Error('Failed to create store: empty response') };
+    // Read the newly committed store in a separate SELECT statement so can_access_store(id) passes cleanly
+    const { data: createdRow, error: selectError } = await supabase
+      .from('stores')
+      .select('*')
+      .eq('owner_id', user.id)
+      .eq('slug', targetSlug)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (selectError) {
+      return {
+        data: null,
+        error: new Error(
+          isRlsPolicyError(selectError)
+            ? `Store was created but could not be read due to row-level security (42501): ${selectError.message}`
+            : selectError.message || 'Failed to load newly created store'
+        ),
+      };
     }
 
-    return { data: mapDatabaseRowToStore(data as RawStoreRow), error: null };
+    if (createdRow) {
+      return { data: mapDatabaseRowToStore(createdRow as RawStoreRow), error: null };
+    }
+
+    // Fallback read by owner_id in case a server-side trigger normalized the slug
+    const { data: fallbackRow, error: fallbackError } = await supabase
+      .from('stores')
+      .select('*')
+      .eq('owner_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (fallbackError || !fallbackRow) {
+      return {
+        data: null,
+        error: new Error(fallbackError?.message || 'Failed to verify newly created store in database'),
+      };
+    }
+
+    return { data: mapDatabaseRowToStore(fallbackRow as RawStoreRow), error: null };
   } catch (err: unknown) {
     return {
       data: null,
@@ -3887,10 +3970,10 @@ export async function ensureActiveSupabaseSession(): Promise<{
       error: userErr,
     } = await supabase.auth.getUser();
 
-    if (userErr || !user) {
-      // One more refresh attempt if getUser rejected a stale cached token
+    if (userErr || !user || !session?.access_token) {
+      // One more refresh attempt if getUser rejected a stale cached token or access_token was missing
       const retryRefresh = await supabase.auth.refreshSession();
-      if (retryRefresh.data?.session?.user) {
+      if (retryRefresh.data?.session?.user && retryRefresh.data.session.access_token) {
         return {
           session: retryRefresh.data.session,
           user: retryRefresh.data.session.user,
@@ -3901,7 +3984,7 @@ export async function ensureActiveSupabaseSession(): Promise<{
         session: null,
         user: null,
         error: new Error(
-          'Your login session has expired. Please sign in again to verify pricing and submit payment.'
+          'Your login session has expired. Please sign in again to continue.'
         ),
       };
     }
@@ -4692,6 +4775,80 @@ export async function submitPublicWebsiteOrderInDb(
         err instanceof Error
           ? err
           : new Error('Network error while submitting your order. Please check your connection and try again.'),
+    };
+  }
+}
+
+export async function submitPublicWebsiteInquiryInDb(
+  input: PublicCustomerInquiryInput
+): Promise<{
+  data: { id: string; ticketNumber: string; subject: string; status: string; createdAt: string } | null;
+  error: Error | null;
+  code?: string;
+}> {
+  try {
+    const response = await fetch('/api/public-inquiry', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      cache: 'no-store',
+      body: JSON.stringify(input),
+    });
+
+    const contentType = (response.headers.get('content-type') || '').toLowerCase();
+    if (!contentType.includes('application/json')) {
+      return {
+        data: null,
+        code: 'INQUIRY_ENDPOINT_UNAVAILABLE',
+        error: new Error(
+          'Customer inquiry endpoint is currently unreachable. Please try again in a moment.'
+        ),
+      };
+    }
+
+    const body = (await response.json()) as {
+      ok?: boolean;
+      success?: boolean;
+      code?: string;
+      error?: string;
+      message?: string;
+      inquiry?: {
+        id: string;
+        ticketNumber: string;
+        subject: string;
+        status: string;
+        createdAt: string;
+      };
+    };
+
+    const isSuccess = body?.success === true || body?.ok === true;
+    if (!response.ok || !isSuccess || !body?.inquiry) {
+      return {
+        data: null,
+        code: body?.code || 'INQUIRY_SUBMISSION_FAILED',
+        error: new Error(
+          body?.message ||
+            body?.error ||
+            'Unable to send your message right now. Please check your details and try again.'
+        ),
+      };
+    }
+
+    return {
+      data: body.inquiry,
+      error: null,
+      code: body.code || 'INQUIRY_CONFIRMED',
+    };
+  } catch (err: unknown) {
+    return {
+      data: null,
+      code: 'NETWORK_ERROR',
+      error:
+        err instanceof Error
+          ? err
+          : new Error('Network error while sending your message. Please check your connection and try again.'),
     };
   }
 }

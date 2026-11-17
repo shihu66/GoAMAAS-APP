@@ -201,12 +201,26 @@ export interface TeamMember {
   joinedAt: string;
 }
 
+export interface PublicInquiryMetadata {
+  source?: 'public_website_inquiry';
+  websiteId?: string;
+  storeId?: string;
+  subdomain?: string;
+  customerName?: string;
+  customerPhone?: string;
+  customerEmail?: string;
+  productName?: string;
+  productId?: string;
+  inquirySubject?: string;
+}
+
 export interface SupportTicketMessage {
   id: string;
   sender: string;
   text: string;
   timestamp: string;
   isStaff: boolean;
+  inquiryMeta?: PublicInquiryMetadata;
 }
 
 export interface SupportTicket {

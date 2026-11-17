@@ -7,6 +7,7 @@ import { defineConfig, loadEnv } from 'vite';
 import resolveTenantHandler from './api/resolve-tenant.ts';
 import verifyPricingHandler from './api/verify-pricing.ts';
 import publicOrderHandler from './api/public-order.ts';
+import publicInquiryHandler from './api/public-inquiry.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -106,6 +107,22 @@ export default defineConfig(({ mode }) => {
                 ok: false,
                 code: 'INTERNAL_ORDER_ERROR',
                 error: 'Server error processing public storefront order.',
+              })
+            );
+          }
+          return;
+        }
+        if (pathname === '/api/public-inquiry') {
+          try {
+            await publicInquiryHandler(req, res);
+          } catch {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(
+              JSON.stringify({
+                ok: false,
+                code: 'INTERNAL_INQUIRY_ERROR',
+                error: 'Server error processing public website inquiry.',
               })
             );
           }

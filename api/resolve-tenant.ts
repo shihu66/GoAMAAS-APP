@@ -272,13 +272,21 @@ export default async function handler(req: RequestWithQuery, res: ServerResponse
               Authorization: `Bearer ${serviceRoleKey}`,
               'Content-Type': 'application/json',
             };
-            const rowResp = await fetch(
-              `${supabaseUrl}/rest/v1/subscribed_websites?subdomain=eq.${encodeURIComponent(subdomain)}&select=id,store_id,user_id,status,payment_status,deployment_status,current_period_end,config&limit=1`,
+            const selectCols = 'id,store_id,user_id,status,payment_status,deployment_status,current_period_end,config';
+            let rowResp = await fetch(
+              `${supabaseUrl}/rest/v1/subscribed_websites?subdomain=eq.${encodeURIComponent(subdomain)}&select=${selectCols}&limit=1`,
               { method: 'GET', headers: adminHeaders }
             );
-            if (rowResp.ok) {
-              const rows = (await rowResp.json()) as any[];
-              const siteRow = Array.isArray(rows) ? rows[0] : null;
+            let rows = rowResp.ok ? ((await rowResp.json()) as any[]) : null;
+            if (rowResp.ok && Array.isArray(rows) && rows.length === 0) {
+              rowResp = await fetch(
+                `${supabaseUrl}/rest/v1/subscribed_websites?subdomain=ilike.${encodeURIComponent(subdomain)}&select=${selectCols}&limit=1`,
+                { method: 'GET', headers: adminHeaders }
+              );
+              rows = rowResp.ok ? ((await rowResp.json()) as any[]) : null;
+            }
+            if (rowResp.ok && Array.isArray(rows)) {
+              const siteRow = rows[0] || null;
               if (siteRow) {
                 const rowPeriodEnd = siteRow.current_period_end
                   ? Date.parse(String(siteRow.current_period_end))
@@ -312,20 +320,76 @@ export default async function handler(req: RequestWithQuery, res: ServerResponse
                 const resolvedWebsiteId = uuidRe.test(String(siteRow.id || '').trim())
                   ? String(siteRow.id).trim()
                   : hydratedSite.id;
-                let resolvedStoreId = uuidRe.test(String(siteRow.store_id || '').trim())
+                const siteOwnerUserId = String(siteRow.user_id || '').trim();
+                const candidateStoreId = uuidRe.test(String(siteRow.store_id || '').trim())
                   ? String(siteRow.store_id).trim()
                   : String(hydratedSite.storeId || hydratedSite.store_id || '').trim();
 
-                if (!uuidRe.test(resolvedStoreId) && uuidRe.test(String(siteRow.user_id || '').trim())) {
-                  const storeResp = await fetch(
-                    `${supabaseUrl}/rest/v1/stores?owner_id=eq.${encodeURIComponent(String(siteRow.user_id).trim())}&order=created_at.asc&limit=1&select=id`,
-                    { method: 'GET', headers: adminHeaders }
-                  );
-                  if (storeResp.ok) {
-                    const stores = (await storeResp.json()) as any[];
-                    const fallbackSid = String(stores?.[0]?.id || '').trim();
-                    if (uuidRe.test(fallbackSid)) resolvedStoreId = fallbackSid;
+                let resolvedStoreId = '';
+                if (uuidRe.test(siteOwnerUserId)) {
+                  if (uuidRe.test(candidateStoreId)) {
+                    const verifyStoreResp = await fetch(
+                      `${supabaseUrl}/rest/v1/stores?id=eq.${encodeURIComponent(candidateStoreId)}&select=id,owner_id&limit=1`,
+                      { method: 'GET', headers: adminHeaders }
+                    );
+                    if (verifyStoreResp.ok) {
+                      const matchedStores = (await verifyStoreResp.json()) as any[];
+                      const matched = Array.isArray(matchedStores) ? matchedStores[0] : null;
+                      if (matched && uuidRe.test(String(matched.id || '').trim())) {
+                        const matchedOwner = String(matched.owner_id || '').trim();
+                        if (!uuidRe.test(matchedOwner) || matchedOwner === siteOwnerUserId) {
+                          resolvedStoreId = String(matched.id).trim();
+                        } else {
+                          const memberResp = await fetch(
+                            `${supabaseUrl}/rest/v1/store_members?store_id=eq.${encodeURIComponent(candidateStoreId)}&user_id=eq.${encodeURIComponent(siteOwnerUserId)}&status=eq.active&select=id&limit=1`,
+                            { method: 'GET', headers: adminHeaders }
+                          );
+                          if (memberResp.ok) {
+                            const members = (await memberResp.json()) as any[];
+                            if (Array.isArray(members) && members.length > 0) {
+                              resolvedStoreId = String(matched.id).trim();
+                            }
+                          }
+                        }
+                      }
+                    }
+                  } else {
+                    const storeResp = await fetch(
+                      `${supabaseUrl}/rest/v1/stores?owner_id=eq.${encodeURIComponent(siteOwnerUserId)}&order=created_at.asc&limit=2&select=id,owner_id`,
+                      { method: 'GET', headers: adminHeaders }
+                    );
+                    if (storeResp.ok) {
+                      const rawStores = (await storeResp.json()) as any[];
+                      const eligibleStores = (Array.isArray(rawStores) ? rawStores : []).filter((s) => {
+                        const sid = String(s?.id || '').trim();
+                        const oid = String(s?.owner_id || '').trim();
+                        return uuidRe.test(sid) && (!uuidRe.test(oid) || oid === siteOwnerUserId);
+                      });
+                      if (eligibleStores.length === 1) {
+                        resolvedStoreId = String(eligibleStores[0].id).trim();
+                      } else if (eligibleStores.length === 0) {
+                        const memberStoresResp = await fetch(
+                          `${supabaseUrl}/rest/v1/store_members?user_id=eq.${encodeURIComponent(siteOwnerUserId)}&status=eq.active&select=store_id&limit=2`,
+                          { method: 'GET', headers: adminHeaders }
+                        );
+                        if (memberStoresResp.ok) {
+                          const memberships = (await memberStoresResp.json()) as any[];
+                          const uniqueMemberStores = Array.from(
+                            new Set(
+                              (Array.isArray(memberships) ? memberships : [])
+                                .map((m) => String(m?.store_id || '').trim())
+                                .filter((id) => uuidRe.test(id))
+                            )
+                          );
+                          if (uniqueMemberStores.length === 1) {
+                            resolvedStoreId = uniqueMemberStores[0];
+                          }
+                        }
+                      }
+                    }
                   }
+                } else if (uuidRe.test(candidateStoreId)) {
+                  resolvedStoreId = candidateStoreId;
                 }
 
                 const rowConfig =
@@ -433,8 +497,9 @@ export default async function handler(req: RequestWithQuery, res: ServerResponse
                     };
                   });
 
+                const { store_id: _droppedStoreId, storeId: _droppedCamelStoreId, ...cleanHydrated } = hydratedSite;
                 hydratedSite = {
-                  ...hydratedSite,
+                  ...cleanHydrated,
                   ...(uuidRe.test(resolvedWebsiteId) ? { id: resolvedWebsiteId } : {}),
                   ...(uuidRe.test(resolvedStoreId) ? { storeId: resolvedStoreId } : {}),
                   servicesOrProducts: enrichedItems,

@@ -145,8 +145,10 @@ import {
   uploadWebsiteAssetToStorage,
   deleteWebsiteAssetFromStorage,
   submitPublicWebsiteOrderInDb,
+  submitPublicWebsiteInquiryInDb,
 } from '../lib/supabase';
 import {
+  PublicCustomerInquiryInput,
   PublicCustomerOrderInput,
   buildWebsiteProductItemFromProduct,
   extractPublicStorefrontMeta,
@@ -156,6 +158,7 @@ import {
   phonesMatch,
   removeProductFromWebsiteCatalog,
   upsertProductIntoWebsiteCatalog,
+  validatePublicCustomerInquiryInput,
   validatePublicCustomerOrderInput,
 } from '../lib/storefrontSync';
 import {
@@ -256,6 +259,9 @@ interface AppContextType {
   submitPublicCustomerOrder: (
     input: PublicCustomerOrderInput
   ) => Promise<{ success: boolean; message: string; order?: Order; code?: string }>;
+  submitPublicCustomerInquiry: (
+    input: PublicCustomerInquiryInput
+  ) => Promise<{ success: boolean; message: string; ticketNumber?: string; code?: string }>;
   updateOrderStatus: (id: string, status: OrderStatus) => void;
   updateOrderPaymentStatus: (id: string, paymentStatus: PaymentStatus) => void;
   updateOrderTracking: (id: string, courierName: string, trackingCode: string) => void;
@@ -380,8 +386,10 @@ interface AppContextType {
 
   // Support
   supportTickets: SupportTicket[];
+  refreshSupportTickets: () => Promise<void>;
   createSupportTicket: (subject: string, category: SupportTicket['category'], priority: SupportTicket['priority'], text: string) => void;
   replySupportTicket: (ticketId: string, text: string) => void;
+  resolveSupportTicket: (ticketId: string, nextStatus?: SupportTicket['status']) => void;
 
   // Notifications
   notifications: AppNotification[];
@@ -857,24 +865,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     storeCoordinatorRef.current?.syncUserSession(authUser.id);
-    const { data: createdStore, error: storeErr } = await createStoreInDb({
-      name: businessName.trim() || `${name.trim()}'s Store`,
-      category: 'General E-Commerce',
-      currency: '৳',
+    const storeResolution = await storeCoordinatorRef.current?.initialize({
+      userId: authUser.id,
+      userName: name.trim(),
+      preferredName: businessName.trim() || `${name.trim()}'s Store`,
+      userRole: 'merchant',
+      isAdminRoute: false,
+      allowAutoProvision: true,
+      defaultCategory: 'General E-Commerce',
+      defaultCurrency: '৳',
     });
 
-    if (storeErr) {
-      console.warn('[GoAMAAS] Initial store creation warning during signup:', storeErr.message);
+    if (storeResolution?.status === 'error' && storeResolution.error) {
+      console.warn('[GoAMAAS] Initial store creation warning during signup:', storeResolution.error);
     }
 
-    const resolvedStoreId = createdStore?.id || '';
+    const resolvedStoreId = storeResolution?.storeId || '';
+    const createdStore =
+      storeResolution?.stores?.find((s) => s.id === resolvedStoreId) || storeResolution?.stores?.[0];
     if (resolvedStoreId && createdStore) {
       await upsertUserProfile({
         id: authUser.id,
         store_id: resolvedStoreId,
       });
-      storeCoordinatorRef.current?.seedCreatedStore(createdStore);
-      setStores([createdStore]);
+      setStores(storeResolution?.stores || [createdStore]);
       setActiveStoreIdState(resolvedStoreId);
     }
 
@@ -1110,40 +1124,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (isSupabaseConfigured && supabase && user?.id) {
       void (async () => {
-        if (targetStoreId && UUID_REGEX.test(targetStoreId)) {
-          const { data: saved, error } = await updateStoreInDb(targetStoreId, updated);
-          if (error) {
-            showToast(`Failed to save store settings: ${error.message}`, 'error');
-            const { data: refreshed } = await fetchUserStoresFromDb();
-            if (refreshed) {
-              storeCoordinatorRef.current?.applyStoresFromExternalUpdate(refreshed, targetStoreId);
-            }
+        let resolvedTargetId = targetStoreId && UUID_REGEX.test(targetStoreId) ? targetStoreId : '';
+        if (!resolvedTargetId) {
+          const storeResolution = await resolveMerchantStoreForAction(
+            updated.name || activeStore.name,
+            { allowAutoProvision: true }
+          );
+          if (storeResolution.status !== 'ready' || !storeResolution.storeId || !UUID_REGEX.test(storeResolution.storeId)) {
+            showToast(
+              storeResolution.error || 'Failed to resolve store workspace in database',
+              'error'
+            );
             return;
           }
-          if (saved) {
-            const nextStores = storesRef.current.map((s) => (s.id === saved.id ? saved : s));
-            storeCoordinatorRef.current?.applyStoresFromExternalUpdate(nextStores, saved.id);
-          }
-          showToast('Store settings updated successfully', 'success');
-        } else {
-          const { data: created, error } = await createStoreInDb({
-            name: updated.name || activeStore.name,
-            slug: updated.slug,
-            category: updated.category || activeStore.category,
-            currency: updated.currency || activeStore.currency,
-            phone: updated.phone ?? activeStore.phone,
-            address: updated.address ?? activeStore.address,
-          });
-          if (error || !created) {
-            showToast(`Failed to create store in database: ${error?.message || 'Unknown error'}`, 'error');
-            return;
-          }
-          storeCoordinatorRef.current?.seedCreatedStore(created);
-          setStores([created]);
-          setActiveStoreIdState(created.id);
-          await upsertUserProfile({ id: user.id, store_id: created.id });
-          showToast('Store created and saved to database', 'success');
+          resolvedTargetId = storeResolution.storeId;
+          await upsertUserProfile({ id: user.id, store_id: resolvedTargetId });
         }
+
+        const { data: saved, error } = await updateStoreInDb(resolvedTargetId, updated);
+        if (error) {
+          showToast(`Failed to save store settings: ${error.message}`, 'error');
+          const { data: refreshed } = await fetchUserStoresFromDb();
+          if (refreshed) {
+            storeCoordinatorRef.current?.applyStoresFromExternalUpdate(refreshed, resolvedTargetId);
+          }
+          return;
+        }
+        if (saved) {
+          const nextStores = storesRef.current.some((s) => s.id === saved.id)
+            ? storesRef.current.map((s) => (s.id === saved.id ? saved : s))
+            : [saved, ...storesRef.current];
+          storeCoordinatorRef.current?.applyStoresFromExternalUpdate(nextStores, saved.id);
+        }
+        showToast('Store settings updated successfully', 'success');
       })();
       return;
     }
@@ -1175,6 +1188,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? activeStore.id
           : undefined;
 
+      if (!validStoreId) {
+        const resolution = await resolveMerchantStoreForAction(
+          storePatch.name || `${user.name}'s Store`,
+          { allowAutoProvision: true }
+        );
+        if (resolution.storeId && UUID_REGEX.test(resolution.storeId)) {
+          validStoreId = resolution.storeId;
+        } else if (resolution.error) {
+          showToast('Warning: Store workspace setup could not complete: ' + resolution.error, 'warning');
+        }
+      }
+
       if (validStoreId) {
         const { data: savedStore } = await updateStoreInDb(validStoreId, storePatch);
         if (savedStore) {
@@ -1182,20 +1207,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             ? storesRef.current.map((s) => (s.id === savedStore.id ? savedStore : s))
             : [savedStore, ...storesRef.current];
           storeCoordinatorRef.current?.applyStoresFromExternalUpdate(nextStores, savedStore.id);
-        }
-      } else {
-        const { data: createdStore } = await createStoreInDb({
-          name: storePatch.name || `${user.name}'s Store`,
-          category: storePatch.category,
-          currency: storePatch.currency,
-          phone: storePatch.phone,
-          address: storePatch.address,
-        });
-        if (createdStore) {
-          validStoreId = createdStore.id;
-          storeCoordinatorRef.current?.seedCreatedStore(createdStore);
-          setStores((prev) => [createdStore, ...prev.filter((s) => s.id !== createdStore.id)]);
-          setActiveStoreIdState(createdStore.id);
         }
       }
 
@@ -2994,7 +3005,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ) {
         resolvedStoreId = requestedStoreId;
       } else if (authState.user?.id) {
-        resolvedStoreId = await ensureMerchantStore(data.businessName);
+        resolvedStoreId =
+          (await ensureMerchantStore(data.businessName)) ||
+          (UUID_REGEX.test(activeStore?.id || '') ? activeStore.id : undefined);
       }
     } else {
       resolvedStoreId = data.storeId || activeStore?.id || 'store-1';
@@ -3896,7 +3909,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         );
         const mapped: SubscribedWebsite = {
           id: data.id || `site-${data.subdomain}`,
-          storeId: data.storeId || data.store_id || 'store-tenant',
+          storeId: data.storeId || data.store_id || '',
           businessName: data.businessName || data.business_name || 'Business',
           ownerName: data.ownerName || 'Merchant',
           email: data.email ?? data.config?.email ?? '',
@@ -5484,6 +5497,147 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     showToast(`Support ticket #${newTicket.ticketNumber} created!`, 'success');
   };
 
+  const refreshSupportTickets = useCallback(async () => {
+    if (!isSupabaseConfigured || !supabase || !user?.id) return;
+    const ticketsRes = await fetchSupportTicketsFromDb();
+    if (!ticketsRes.error && ticketsRes.data) {
+      setSupportTickets(ticketsRes.data);
+    }
+  }, [user?.id]);
+
+  const submitPublicCustomerInquiry = async (
+    input: PublicCustomerInquiryInput
+  ): Promise<{ success: boolean; message: string; ticketNumber?: string; code?: string }> => {
+    const validation = validatePublicCustomerInquiryInput(input);
+    if (!validation.valid) {
+      return {
+        success: false,
+        message: validation.error || 'Please review your inquiry details and try again.',
+        code: 'INVALID_INPUT',
+      };
+    }
+
+    if (isSupabaseConfigured) {
+      const { data, error, code } = await submitPublicWebsiteInquiryInDb(input);
+      if (error || !data) {
+        return {
+          success: false,
+          message: error?.message || 'Unable to send your message right now.',
+          code,
+        };
+      }
+
+      if (user?.id) {
+        const matchingSite = subscribedWebsites.find(
+          (w) => w.subdomain.toLowerCase() === input.subdomain.trim().toLowerCase()
+        );
+        if (matchingSite) {
+          void refreshSupportTickets();
+        }
+      }
+
+      return {
+        success: true,
+        message: `Inquiry #${data.ticketNumber} received!`,
+        ticketNumber: data.ticketNumber,
+        code,
+      };
+    }
+
+    // Offline local demo mode only (when Supabase is not configured)
+    const cleanSub = input.subdomain.trim().toLowerCase();
+    const targetSite = subscribedWebsites.find((w) => w.subdomain.toLowerCase() === cleanSub);
+    if (!targetSite || !isWebsiteTrulyLive(targetSite)) {
+      return {
+        success: false,
+        message: 'This website is not currently accepting inquiries.',
+        code: 'WEBSITE_NOT_AVAILABLE',
+      };
+    }
+    if (!targetSite.storeId) {
+      return {
+        success: false,
+        message: 'This website is not linked to an active merchant store yet.',
+        code: 'STORE_NOT_LINKED',
+      };
+    }
+
+    const ticketNum = `INQ-${Date.now().toString().slice(-6)}`;
+    const today = new Date().toISOString().split('T')[0];
+    const demoTicket: SupportTicket = {
+      id: `inq-${Date.now()}`,
+      ticketNumber: ticketNum,
+      subject:
+        (input.subject || '').trim() ||
+        (input.productName
+          ? `Product Inquiry: ${input.productName}`
+          : `Website Inquiry from ${input.customerName.trim()}`),
+      category: 'Website Service',
+      priority: 'medium',
+      status: 'open',
+      createdAt: today,
+      updatedAt: today,
+      messages: [
+        {
+          id: `msg-${Date.now()}`,
+          sender: input.customerName.trim(),
+          text: input.message.trim(),
+          timestamp: new Date().toISOString(),
+          isStaff: false,
+          inquiryMeta: {
+            source: 'public_website_inquiry',
+            websiteId: targetSite.id,
+            storeId: targetSite.storeId,
+            subdomain: cleanSub,
+            customerName: input.customerName.trim(),
+            customerPhone: input.customerPhone?.trim() || undefined,
+            customerEmail: input.customerEmail?.trim() || undefined,
+            productName: input.productName?.trim() || undefined,
+            productId: input.productId || undefined,
+          },
+        },
+      ],
+    };
+    setSupportTickets((prev) => [demoTicket, ...prev]);
+
+    return {
+      success: true,
+      message: `Inquiry #${ticketNum} received!`,
+      ticketNumber: ticketNum,
+      code: 'INQUIRY_CONFIRMED',
+    };
+  };
+
+  const resolveSupportTicket = (
+    ticketId: string,
+    nextStatus: SupportTicket['status'] = 'resolved'
+  ) => {
+    const prevSnapshot = supportTickets;
+    setSupportTickets((prev) =>
+      prev.map((t) =>
+        t.id === ticketId
+          ? { ...t, status: nextStatus, updatedAt: new Date().toISOString().split('T')[0] }
+          : t
+      )
+    );
+
+    if (isSupabaseConfigured && user?.id && UUID_REGEX.test(ticketId)) {
+      void (async () => {
+        const { data, error } = await updateSupportTicketInDb(ticketId, { status: nextStatus });
+        if (error || !data) {
+          setSupportTickets(prevSnapshot);
+          showToast(error?.message || 'Failed to update status', 'error');
+          return;
+        }
+        setSupportTickets((prev) => prev.map((t) => (t.id === ticketId ? data : t)));
+        showToast(nextStatus === 'resolved' ? 'Marked as resolved' : 'Re-opened inquiry', 'success');
+      })();
+      return;
+    }
+
+    showToast(nextStatus === 'resolved' ? 'Marked as resolved' : 'Re-opened inquiry', 'success');
+  };
+
   const replySupportTicket = (ticketId: string, text: string) => {
     const target = supportTickets.find((t) => t.id === ticketId);
     if (!target) return;
@@ -5806,6 +5960,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         refreshStoreOrders,
         addOrder,
         submitPublicCustomerOrder,
+        submitPublicCustomerInquiry,
         updateOrderStatus,
         updateOrderPaymentStatus,
         updateOrderTracking,
@@ -5884,8 +6039,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         addTeamMember,
         removeTeamMember,
         supportTickets,
+        refreshSupportTickets,
         createSupportTicket,
         replySupportTicket,
+        resolveSupportTicket,
         notifications,
         markNotificationRead,
         markAllNotificationsRead,

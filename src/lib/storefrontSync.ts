@@ -693,3 +693,54 @@ export function extractOrderMetadataFromItems(items: OrderItem[] | null | undefi
   if (!firstMeta || typeof firstMeta !== 'object') return {};
   return firstMeta;
 }
+
+export interface PublicCustomerInquiryInput {
+  subdomain: string;
+  websiteId?: string;
+  inquiryAttemptId: string;
+  customerName: string;
+  customerPhone?: string;
+  customerEmail?: string;
+  subject?: string;
+  message: string;
+  productName?: string;
+  productId?: string;
+}
+
+export function validatePublicCustomerInquiryInput(
+  input: PublicCustomerInquiryInput
+): { valid: boolean; error?: string } {
+  if (!input || typeof input !== 'object') {
+    return { valid: false, error: 'Invalid inquiry payload.' };
+  }
+  const subdomain = (input.subdomain || '').trim().toLowerCase();
+  if (!subdomain || subdomain.length < 3) {
+    return { valid: false, error: 'Invalid storefront identifier.' };
+  }
+  const name = (input.customerName || '').trim();
+  if (name.length < 2) {
+    return { valid: false, error: 'Please enter your name.' };
+  }
+  const phone = normalizeCustomerPhone(input.customerPhone || '');
+  const email = (input.customerEmail || '').trim();
+  if (!phone && !email) {
+    return {
+      valid: false,
+      error: 'Please enter your phone number or email address so we can reply to you.',
+    };
+  }
+  if (phone && !BD_OR_INTL_PHONE_REGEX.test(phone)) {
+    return {
+      valid: false,
+      error: 'Please enter a valid mobile number (e.g., 017XXXXXXXX or +88017XXXXXXXX).',
+    };
+  }
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return { valid: false, error: 'Please enter a valid email address.' };
+  }
+  const message = (input.message || '').trim();
+  if (message.length < 3) {
+    return { valid: false, error: 'Please enter your message or question (at least 3 characters).' };
+  }
+  return { valid: true };
+}

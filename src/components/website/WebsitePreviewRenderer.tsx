@@ -6,9 +6,11 @@ import {
   WebsiteProductItem,
 } from '../../types';
 import {
+  PublicCustomerInquiryInput,
   PublicCustomerOrderInput,
   buildGoogleMapsDirectionsUrl,
   validateAndNormalizeGoogleMapsUrl,
+  validatePublicCustomerInquiryInput,
   validatePublicCustomerOrderInput,
 } from '../../lib/storefrontSync';
 import {
@@ -87,6 +89,9 @@ interface WebsitePreviewRendererProps {
   onSubmitOrder?: (
     input: PublicCustomerOrderInput
   ) => Promise<{ success: boolean; message: string; order?: Order; code?: string }>;
+  onSubmitInquiry?: (
+    input: PublicCustomerInquiryInput
+  ) => Promise<{ success: boolean; message: string; ticketNumber?: string; code?: string }>;
   onOrderPlaced?: (order: Order) => void;
 }
 
@@ -95,6 +100,13 @@ function createCheckoutAttemptId(): string {
     return `chk-${crypto.randomUUID()}`;
   }
   return `chk-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function createInquiryAttemptId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `inq-${crypto.randomUUID()}`;
+  }
+  return `inq-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function buildDefaultSections(site: Partial<SubscribedWebsite>): WebsiteSectionConfig[] {
@@ -196,11 +208,28 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
   isPublicView = false,
   onSelectSection,
   onSubmitOrder,
+  onSubmitInquiry,
   onOrderPlaced,
 }) => {
   const [inquiryName, setInquiryName] = useState('');
   const [inquiryContact, setInquiryContact] = useState('');
+  const [inquiryEmail, setInquiryEmail] = useState('');
+  const [inquirySubject, setInquirySubject] = useState('');
   const [inquiryNote, setInquiryNote] = useState('');
+  const [inquiryProductContext, setInquiryProductContext] = useState<{
+    name: string;
+    productId?: string;
+  } | null>(null);
+  const [inquiryAttemptId, setInquiryAttemptId] = useState<string>(() => createInquiryAttemptId());
+  const [isSubmittingInquiry, setIsSubmittingInquiry] = useState(false);
+  const [inquiryFormError, setInquiryFormError] = useState<string | null>(null);
+  const [confirmedInquiry, setConfirmedInquiry] = useState<{
+    ticketNumber: string;
+    customerName: string;
+    subject: string;
+  } | null>(null);
+  const inquiryLockRef = useRef(false);
+  const contactSectionRef = useRef<HTMLElement | null>(null);
   const [openFaqId, setOpenFaqId] = useState<string | null>(null);
 
   // Resilient image error states (reset whenever URL changes)
@@ -592,6 +621,89 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
     } finally {
       setIsSubmittingOrder(false);
       submittingLockRef.current = false;
+    }
+  };
+
+  const handleOpenProductInquiry = (item: WebsiteProductItem) => {
+    const pid = (item.productId || item.id || '').trim();
+    setConfirmedInquiry(null);
+    setInquiryFormError(null);
+    setInquiryProductContext({
+      name: item.name,
+      productId: PRODUCT_UUID_REGEX.test(pid) ? pid : undefined,
+    });
+    setInquirySubject(`Inquiry about ${item.name}`);
+    setInquiryAttemptId(createInquiryAttemptId());
+    if (contactSectionRef.current) {
+      contactSectionRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  };
+
+  const handleSubmitCustomerInquiry = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (inquiryLockRef.current || isSubmittingInquiry) return;
+
+    setInquiryFormError(null);
+
+    if (!isPublicView || !onSubmitInquiry) {
+      setInquiryFormError(
+        'Preview Mode: Customer inquiries are delivered directly to your Merchant Inbox once your website is published live.'
+      );
+      return;
+    }
+
+    const payload: PublicCustomerInquiryInput = {
+      subdomain,
+      websiteId: site.id,
+      inquiryAttemptId,
+      customerName: inquiryName.trim(),
+      customerPhone: inquiryContact.trim() || undefined,
+      customerEmail: inquiryEmail.trim() || undefined,
+      subject: inquirySubject.trim() || undefined,
+      message: inquiryNote.trim(),
+      productName: inquiryProductContext?.name || undefined,
+      productId: inquiryProductContext?.productId || undefined,
+    };
+
+    const validation = validatePublicCustomerInquiryInput(payload);
+    if (!validation.valid) {
+      setInquiryFormError(validation.error || 'Please check all required fields and try again.');
+      return;
+    }
+
+    inquiryLockRef.current = true;
+    setIsSubmittingInquiry(true);
+    try {
+      const result = await onSubmitInquiry(payload);
+      if (!result.success || !result.ticketNumber) {
+        setInquiryFormError(
+          result.message || 'Unable to send your message right now. Please try again.'
+        );
+        return;
+      }
+
+      setConfirmedInquiry({
+        ticketNumber: result.ticketNumber,
+        customerName: payload.customerName,
+        subject:
+          payload.subject ||
+          (payload.productName
+            ? `Product Inquiry: ${payload.productName}`
+            : `Website Inquiry from ${payload.customerName}`),
+      });
+      setInquiryNote('');
+      setInquirySubject('');
+      setInquiryProductContext(null);
+      setInquiryAttemptId(createInquiryAttemptId());
+    } catch (err: unknown) {
+      setInquiryFormError(
+        err instanceof Error
+          ? err.message
+          : 'Network error while sending your message. Please try again.'
+      );
+    } finally {
+      setIsSubmittingInquiry(false);
+      inquiryLockRef.current = false;
     }
   };
 
@@ -1499,18 +1611,26 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                                 </div>
                               )
                             ) : (
-                              <div className="flex items-center justify-between">
-                                <span className="text-[11px] text-slate-500">Direct Inquiry</span>
-                                <a
-                                  href={productOrderHref}
-                                  target={productOrderHref.startsWith('http') ? '_blank' : undefined}
-                                  rel={productOrderHref.startsWith('http') ? 'noreferrer' : undefined}
-                                  className="text-xs font-semibold inline-flex items-center gap-1 hover:underline"
+                              <div className="flex items-center justify-between gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenProductInquiry(item)}
+                                  className="text-xs font-semibold inline-flex items-center gap-1 hover:underline cursor-pointer"
                                   style={{ color: brandColor }}
                                 >
-                                  <span>{hasWhatsapp ? 'Inquire on WhatsApp' : 'Contact Us'}</span>
+                                  <span>Inquire Now</span>
                                   <ChevronRight className="w-3.5 h-3.5" />
-                                </a>
+                                </button>
+                                {hasWhatsapp && (
+                                  <a
+                                    href={productOrderHref}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="text-[11px] font-medium text-emerald-700 hover:underline"
+                                  >
+                                    WhatsApp
+                                  </a>
+                                )}
                               </div>
                             )}
                           </div>
@@ -2068,9 +2188,6 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
       }
 
       case 'contact': {
-        if (!hasAnyDirectContact && isPublicView) {
-          return null;
-        }
         const locConfig = themeSettings.location;
         const effectiveAddr = (locConfig?.address || address || '').trim();
         const locShareUrl = (locConfig?.mapsShareUrl || '').trim();
@@ -2084,7 +2201,12 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
         const showMapCard = Boolean(dirUrl || effectiveAddr || locShareUrl);
 
         return (
-          <section key={section.id} id="contact" className="py-12 px-4 sm:px-6 max-w-5xl mx-auto space-y-6">
+          <section
+            ref={contactSectionRef}
+            key={section.id}
+            id="contact"
+            className="py-12 px-4 sm:px-6 max-w-5xl mx-auto space-y-6"
+          >
             <div className="text-center space-y-1">
               <h3 className="text-xl sm:text-2xl font-extrabold tracking-tight" style={{ color: textColor }}>
                 {section.title || 'Get in Touch'}
@@ -2092,12 +2214,19 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
               {section.subtitle && <p className="text-xs text-slate-500">{section.subtitle}</p>}
             </div>
 
-            <div className={`grid grid-cols-1 ${address ? 'md:grid-cols-2' : 'max-w-xl mx-auto'} gap-6`}>
+            <div className={`grid grid-cols-1 ${showMapCard ? 'md:grid-cols-2' : 'max-w-xl mx-auto'} gap-6`}>
               <div className="p-6 rounded-2xl bg-white border border-slate-200 shadow-xs space-y-4">
-                <h4 className="text-xs font-bold text-slate-900">Direct Contact</h4>
+                <div className="flex items-center justify-between gap-2">
+                  <h4 className="text-xs font-bold text-slate-900">Contact &amp; Customer Inquiry</h4>
+                  {inquiryProductContext && (
+                    <span className="text-[11px] font-medium text-blue-700 bg-blue-50 px-2 py-0.5 rounded-md">
+                      Re: {inquiryProductContext.name}
+                    </span>
+                  )}
+                </div>
 
                 {hasAnyDirectContact ? (
-                  <div className="space-y-2.5 text-xs text-slate-600">
+                  <div className="space-y-2 text-xs text-slate-600 pb-2 border-b border-slate-100">
                     {phone && (
                       <a href={`tel:${phone}`} className="flex items-center gap-2.5 hover:text-slate-900">
                         <Phone className="w-3.5 h-3.5 shrink-0" style={{ color: brandColor }} />
@@ -2117,69 +2246,148 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                       </div>
                     )}
                   </div>
-                ) : (
+                ) : !isPublicView ? (
                   <p className="text-xs text-slate-400">
-                    Add your phone number, WhatsApp, email, or store address in Business Info to display direct contact options here.
+                    Add your phone number, WhatsApp, email, or store address in Business Info to display direct contact options above.
                   </p>
-                )}
+                ) : null}
 
-                {hasWhatsapp && (
-                  <div className="pt-3 border-t border-slate-100 space-y-2.5 text-xs">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {confirmedInquiry ? (
+                  <div className="p-4 rounded-xl border border-emerald-200 bg-emerald-50/60 space-y-2.5 text-xs">
+                    <div className="flex items-start gap-2.5">
+                      <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                      <div className="space-y-0.5">
+                        <p className="font-bold text-slate-900">Message Sent to {businessName}</p>
+                        <p className="text-slate-600">
+                          Thank you, <strong>{confirmedInquiry.customerName}</strong>. Your inquiry ({confirmedInquiry.ticketNumber}) has been delivered to our team.
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmedInquiry(null)}
+                      className={`px-3 py-1.5 ${buttonRadiusClass} border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-800 cursor-pointer`}
+                    >
+                      Send Another Inquiry
+                    </button>
+                  </div>
+                ) : (
+                  <form onSubmit={(e) => void handleSubmitCustomerInquiry(e)} className="space-y-2.5 text-xs">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                       <div>
                         <label className="block text-[11px] font-medium text-slate-600 mb-0.5">
-                          Your Name
+                          Your Name <span className="text-rose-500">*</span>
                         </label>
                         <input
                           type="text"
+                          required
                           value={inquiryName}
                           onChange={(e) => setInquiryName(e.target.value)}
-                          placeholder="Your name"
-                          className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 text-slate-800 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+                          placeholder="Your full name"
+                          className="w-full px-2.5 py-2 rounded-lg border border-slate-200 bg-slate-50 text-slate-800 text-xs focus:bg-white focus:ring-1 focus:ring-blue-500 outline-none"
                         />
                       </div>
                       <div>
                         <label className="block text-[11px] font-medium text-slate-600 mb-0.5">
-                          Phone / WhatsApp
+                          Mobile Number <span className="text-rose-500">*</span>
                         </label>
                         <input
-                          type="text"
+                          type="tel"
                           value={inquiryContact}
                           onChange={(e) => setInquiryContact(e.target.value)}
-                          placeholder="+880 1..."
-                          className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 text-slate-800 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+                          placeholder="017XXXXXXXX"
+                          className="w-full px-2.5 py-2 rounded-lg border border-slate-200 bg-slate-50 text-slate-800 font-mono text-xs focus:bg-white focus:ring-1 focus:ring-blue-500 outline-none"
                         />
                       </div>
                     </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <div>
+                        <label className="block text-[11px] font-medium text-slate-600 mb-0.5">
+                          Email (Optional)
+                        </label>
+                        <input
+                          type="email"
+                          value={inquiryEmail}
+                          onChange={(e) => setInquiryEmail(e.target.value)}
+                          placeholder="you@example.com"
+                          className="w-full px-2.5 py-2 rounded-lg border border-slate-200 bg-slate-50 text-slate-800 text-xs focus:bg-white focus:ring-1 focus:ring-blue-500 outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-medium text-slate-600 mb-0.5">
+                          Subject (Optional)
+                        </label>
+                        <input
+                          type="text"
+                          value={inquirySubject}
+                          onChange={(e) => setInquirySubject(e.target.value)}
+                          placeholder="Product question, pricing, bulk order..."
+                          className="w-full px-2.5 py-2 rounded-lg border border-slate-200 bg-slate-50 text-slate-800 text-xs focus:bg-white focus:ring-1 focus:ring-blue-500 outline-none"
+                        />
+                      </div>
+                    </div>
+
                     <div>
                       <label className="block text-[11px] font-medium text-slate-600 mb-0.5">
-                        Message / Inquiry
+                        Message / Question <span className="text-rose-500">*</span>
                       </label>
-                      <input
-                        type="text"
+                      <textarea
+                        rows={3}
+                        required
                         value={inquiryNote}
                         onChange={(e) => setInquiryNote(e.target.value)}
-                        placeholder="Have a question for our team?"
-                        className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 text-slate-800 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+                        placeholder="Write your message or question for our team..."
+                        className="w-full px-2.5 py-2 rounded-lg border border-slate-200 bg-slate-50 text-slate-800 text-xs focus:bg-white focus:ring-1 focus:ring-blue-500 outline-none"
                       />
                     </div>
-                    <a
-                      href={`https://wa.me/${whatsappDigits}?text=${encodeURIComponent(
-                        `Hello ${businessName}, I am contacting you from ${displayDomain}.\nName: ${
-                          inquiryName || 'Visitor'
-                        }\nPhone: ${inquiryContact || 'Not specified'}\nMessage: ${
-                          inquiryNote || 'I would like to inquire about your offerings.'
-                        }`
-                      )}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className={`w-full py-2.5 ${buttonRadiusClass} text-white font-semibold text-xs shadow-xs transition-opacity hover:opacity-90 flex items-center justify-center gap-1.5`}
-                      style={{ backgroundColor: brandColor }}
-                    >
-                      <MessageSquare className="w-3.5 h-3.5" />
-                      <span>Send Message on WhatsApp</span>
-                    </a>
-                  </div>
+
+                    {inquiryFormError && (
+                      <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 flex items-start gap-2">
+                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
+                        <span className="leading-relaxed">{inquiryFormError}</span>
+                      </div>
+                    )}
+
+                    <div className="flex flex-col sm:flex-row gap-2 pt-0.5">
+                      <button
+                        type="submit"
+                        disabled={isSubmittingInquiry}
+                        className={`flex-1 py-2.5 px-4 ${buttonRadiusClass} text-white font-semibold text-xs shadow-xs transition-opacity hover:opacity-90 disabled:opacity-50 flex items-center justify-center gap-1.5 cursor-pointer`}
+                        style={{ backgroundColor: brandColor }}
+                      >
+                        {isSubmittingInquiry ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            <span>Sending Inquiry...</span>
+                          </>
+                        ) : (
+                          <>
+                            <MessageSquare className="w-3.5 h-3.5" />
+                            <span>Send Message</span>
+                          </>
+                        )}
+                      </button>
+
+                      {hasWhatsapp && (
+                        <a
+                          href={`https://wa.me/${whatsappDigits}?text=${encodeURIComponent(
+                            `Hello ${businessName}, I am contacting you from ${displayDomain}.\nName: ${
+                              inquiryName || 'Visitor'
+                            }\nPhone: ${inquiryContact || 'Not specified'}\nMessage: ${
+                              inquiryNote || 'I would like to inquire about your offerings.'
+                            }`
+                          )}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className={`py-2.5 px-3.5 ${buttonRadiusClass} border border-emerald-600 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 font-semibold text-xs transition-colors flex items-center justify-center gap-1.5`}
+                        >
+                          <MessageSquare className="w-3.5 h-3.5" />
+                          <span>WhatsApp</span>
+                        </a>
+                      )}
+                    </div>
+                  </form>
                 )}
               </div>
 
@@ -2484,7 +2692,7 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                     Order Online
                   </a>
                 )}
-                {hasContactSection && hasAnyDirectContact && (
+                {hasContactSection && (
                   <a href="#contact" className="hover:text-slate-900 hover:underline underline-offset-4">
                     Contact
                   </a>
