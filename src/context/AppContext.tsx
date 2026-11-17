@@ -174,6 +174,12 @@ import {
   resolveEffectiveTheme,
   applyResolvedThemeToDocument,
 } from '../lib/theme';
+import {
+  StoreWorkspaceCoordinator,
+  StoreWorkspaceResolution,
+  StoreWorkspaceStatus,
+  resolveTargetStoreIdForProduct,
+} from '../lib/storeWorkspace';
 
 export interface ToastMessage {
   id: string;
@@ -207,6 +213,10 @@ interface AppContextType {
   stores: Store[];
   activeStore: Store;
   activeStoreId: string;
+  isStoreInitializing: boolean;
+  storeInitStatus: StoreWorkspaceStatus;
+  storeInitError: string | null;
+  retryStoreInitialization: () => Promise<string | undefined>;
   setActiveStoreId: (id: string) => void;
   updateActiveStore: (updated: Partial<Store>) => void;
 
@@ -480,7 +490,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [activeStoreId, setActiveStoreIdState] = useState<string>(() =>
     isSupabaseConfigured ? '' : getStored('activeStoreId', '')
   );
-  const syncingStoresUserRef = useRef<string | null>(null);
+  const [isStoreInitializing, setIsStoreInitializing] = useState<boolean>(false);
+  const [storeInitStatus, setStoreInitStatus] = useState<StoreWorkspaceStatus>(() =>
+    isSupabaseConfigured ? 'idle' : 'ready'
+  );
+  const [storeInitError, setStoreInitError] = useState<string | null>(null);
+
+  const userRef = useRef<User | null>(user);
+  const isAuthLoadingRef = useRef<boolean>(isAuthLoading);
+  const storesRef = useRef<Store[]>(stores);
+  const activeStoreIdRef = useRef<string>(activeStoreId);
+
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
+  useEffect(() => {
+    isAuthLoadingRef.current = isAuthLoading;
+  }, [isAuthLoading]);
+  useEffect(() => {
+    storesRef.current = stores;
+  }, [stores]);
+  useEffect(() => {
+    activeStoreIdRef.current = activeStoreId;
+  }, [activeStoreId]);
 
   // Onboarding
   const [onboarding, setOnboarding] = useState<OnboardingData>(() => getStored('onboarding', INITIAL_ONBOARDING));
@@ -489,9 +521,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setStored('onboarding', onboarding);
   }, [onboarding]);
 
+  const onboardingRef = useRef<OnboardingData>(onboarding);
+  useEffect(() => {
+    onboardingRef.current = onboarding;
+  }, [onboarding]);
+
   const updateOnboarding = (data: Partial<OnboardingData>) => {
     setOnboarding((prev) => ({ ...prev, ...data }));
   };
+
+  const storeCoordinatorRef = useRef<StoreWorkspaceCoordinator | null>(null);
+  if (!storeCoordinatorRef.current) {
+    storeCoordinatorRef.current = new StoreWorkspaceCoordinator({
+      fetchStores: fetchUserStoresFromDb,
+      createStore: createStoreInDb,
+      linkUserProfileStore: async (uid, sid) => {
+        await upsertUserProfile({ id: uid, store_id: sid });
+      },
+      onStateChange: (snapshot) => {
+        setIsStoreInitializing(snapshot.isInitializing);
+        setStoreInitStatus(snapshot.status);
+        setStoreInitError(snapshot.error);
+        if (isSupabaseConfigured) {
+          storesRef.current = snapshot.stores;
+          activeStoreIdRef.current = snapshot.activeStoreId;
+          setStores(snapshot.stores);
+          setActiveStoreIdState(snapshot.activeStoreId);
+        }
+      },
+    });
+  }
 
   // Helper to construct User object strictly from Supabase auth user + authoritative public.profiles row
   const buildUserFromSession = async (sessionUser: any): Promise<User> => {
@@ -565,8 +624,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const clearAuthenticatedSessionState = useCallback(() => {
-    syncingStoresUserRef.current = null;
     verifiedAdminUserIdRef.current = null;
+    storeCoordinatorRef.current?.resetForUnauthenticated();
     setUser(null);
     setRole('merchant');
     setPaymentsLoadError(null);
@@ -574,6 +633,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (isSupabaseConfigured) {
       setStores([]);
       setActiveStoreIdState('');
+      setIsStoreInitializing(false);
+      setStoreInitStatus('idle');
+      setStoreInitError(null);
       setProducts([]);
       setOrders([]);
       setCustomers([]);
@@ -609,6 +671,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } catch {}
   }, []);
 
+  const applyStableUserState = useCallback((parsedUser: User) => {
+    storeCoordinatorRef.current?.syncUserSession(parsedUser.id);
+    setUser((prev) => {
+      if (
+        prev &&
+        prev.id === parsedUser.id &&
+        prev.name === parsedUser.name &&
+        prev.email === parsedUser.email &&
+        prev.role === parsedUser.role &&
+        prev.storeId === parsedUser.storeId
+      ) {
+        return prev;
+      }
+      return parsedUser;
+    });
+    setRole((prevRole) => (prevRole === parsedUser.role ? prevRole : parsedUser.role));
+  }, []);
+
   // Supabase Auth Listener & Persistent Session Initialization
   useEffect(() => {
     if (isSupabaseConfigured && supabase) {
@@ -621,8 +701,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (session?.user) {
             try {
               const parsedUser = await buildUserFromSession(session.user);
-              setUser(parsedUser);
-              setRole(parsedUser.role);
+              applyStableUserState(parsedUser);
             } catch (e) {
               console.error('Failed to parse Supabase session user:', e);
               clearAuthenticatedSessionState();
@@ -630,9 +709,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           } else {
             clearAuthenticatedSessionState();
           }
+          isAuthLoadingRef.current = false;
           setIsAuthLoading(false);
         })
         .catch(() => {
+          isAuthLoadingRef.current = false;
           setIsAuthLoading(false);
         });
 
@@ -644,12 +725,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         } else if (session?.user) {
           try {
             const parsedUser = await buildUserFromSession(session.user);
-            setUser(parsedUser);
-            setRole(parsedUser.role);
+            applyStableUserState(parsedUser);
           } catch (e) {
             console.error('Error during onAuthStateChange user sync:', e);
           }
         }
+        isAuthLoadingRef.current = false;
         setIsAuthLoading(false);
       });
 
@@ -657,9 +738,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         subscription.unsubscribe();
       };
     } else {
+      isAuthLoadingRef.current = false;
       setIsAuthLoading(false);
     }
-  }, [clearAuthenticatedSessionState]);
+  }, [applyStableUserState, clearAuthenticatedSessionState]);
 
   useEffect(() => {
     if (!isSupabaseConfigured) {
@@ -774,7 +856,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { user: null, needsEmailConfirmation, error: new Error(`Account created in Auth, but profile setup failed: ${profileError.message}`) };
     }
 
-    syncingStoresUserRef.current = authUser.id;
+    storeCoordinatorRef.current?.syncUserSession(authUser.id);
     const { data: createdStore, error: storeErr } = await createStoreInDb({
       name: businessName.trim() || `${name.trim()}'s Store`,
       category: 'General E-Commerce',
@@ -783,16 +865,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (storeErr) {
       console.warn('[GoAMAAS] Initial store creation warning during signup:', storeErr.message);
-      syncingStoresUserRef.current = null;
     }
 
     const resolvedStoreId = createdStore?.id || '';
-    if (resolvedStoreId) {
+    if (resolvedStoreId && createdStore) {
       await upsertUserProfile({
         id: authUser.id,
         store_id: resolvedStoreId,
       });
-      setStores([createdStore!]);
+      storeCoordinatorRef.current?.seedCreatedStore(createdStore);
+      setStores([createdStore]);
       setActiveStoreIdState(resolvedStoreId);
     }
 
@@ -876,71 +958,122 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [stores, activeStoreId]);
 
-  // Synchronize authenticated user's stores with public.stores in PostgreSQL
-  useEffect(() => {
-    if (!isSupabaseConfigured || !supabase || !user?.id) return;
-
-    let cancelled = false;
-    (async () => {
-      const { data: dbStores, error } = await fetchUserStoresFromDb();
-      if (cancelled) return;
-
-      if (error) {
-        console.warn('[GoAMAAS] Failed to load stores from Supabase:', error.message);
-        return;
+  // Single-flight store workspace initialization after auth & profile resolve
+  const resolveMerchantStoreForAction = useCallback(
+    async (
+      preferredName?: string,
+      options?: { forceRefresh?: boolean; allowAutoProvision?: boolean }
+    ): Promise<StoreWorkspaceResolution> => {
+      if (!isSupabaseConfigured || !supabase) {
+        const localStore =
+          storesRef.current.find((s) => s.id === activeStoreIdRef.current) ||
+          storesRef.current[0];
+        return {
+          storeId: localStore?.id || 'store-1',
+          stores: storesRef.current,
+          status: 'ready',
+          reason: 'resolved',
+        };
       }
 
-      if (dbStores && dbStores.length > 0) {
-        syncingStoresUserRef.current = user.id;
-        setStores(dbStores);
-        const preferred =
-          user.storeId && dbStores.some((s) => s.id === user.storeId)
-            ? user.storeId
-            : dbStores[0].id;
-        setActiveStoreIdState((prev) =>
-          prev && dbStores.some((s) => s.id === prev) ? prev : preferred
-        );
-        return;
+      let currentUser = userRef.current;
+      if (!currentUser?.id && isAuthLoadingRef.current) {
+        // Auth bootstrap still in flight (e.g. page refresh or OAuth handoff); verify active session directly
+        const authState = await ensureActiveSupabaseSession();
+        if (authState.user) {
+          currentUser = {
+            id: authState.user.id,
+            name:
+              (authState.user.user_metadata?.full_name as string) ||
+              (authState.user.user_metadata?.name as string) ||
+              authState.user.email?.split('@')[0] ||
+              'Merchant',
+            email: authState.user.email || '',
+            role: 'merchant',
+            storeId: '',
+          };
+          storeCoordinatorRef.current?.syncUserSession(currentUser.id);
+        } else {
+          return {
+            stores: [],
+            status: 'loading',
+            reason: 'auth_loading',
+            error: 'Authentication is still initializing. Please try again in a moment.',
+          };
+        }
       }
 
-      // Never auto-provision a default merchant store for platform admin sessions, /admin routes, or OAuth callback handoff
+      if (!currentUser?.id) {
+        return {
+          stores: [],
+          status: 'idle',
+          reason: 'unauthenticated',
+          error: 'Please sign in to access your store workspace.',
+        };
+      }
+
       const isOnAdminRoute =
         typeof window !== 'undefined' &&
         (window.location.pathname === '/admin' ||
           window.location.pathname.startsWith('/admin/') ||
-          window.location.pathname === '/auth/callback' ||
           Boolean(peekAdminOAuthIntent()));
-      if (user.role === 'admin' || isOnAdminRoute) return;
 
-      // Auto-provision default store once if authenticated user has zero stores in DB
-      if (syncingStoresUserRef.current === user.id) return;
-      syncingStoresUserRef.current = user.id;
+      const coordinator = storeCoordinatorRef.current!;
+      const ob = onboardingRef.current;
+      const websiteStoreIds = subscribedWebsitesRef.current
+        .map((w) => w.storeId)
+        .filter((sid): sid is string => Boolean(sid && UUID_REGEX.test(sid)));
 
-      const defaultStoreName =
-        onboarding.businessName?.trim() ||
-        (user.name ? `${user.name}'s Store` : 'My Store');
-      const { data: created, error: createErr } = await createStoreInDb({
-        name: defaultStoreName,
-        category: onboarding.category || 'General E-Commerce',
-        currency: onboarding.currency || '৳',
-        phone: onboarding.phone || '',
+      return coordinator.initialize({
+        userId: currentUser.id,
+        userName: currentUser.name,
+        preferredName,
+        profileStoreId: currentUser.storeId,
+        websiteStoreIds,
+        userRole: currentUser.role,
+        isAdminRoute: isOnAdminRoute,
+        allowAutoProvision: options?.allowAutoProvision !== false,
+        forceRefresh: options?.forceRefresh,
+        defaultCategory: ob.category || 'General E-Commerce',
+        defaultCurrency: ob.currency || '৳',
+        defaultPhone: ob.phone || '',
+        defaultAddress: ob.city || '',
       });
-      if (cancelled) return;
+    },
+    []
+  );
 
-      if (!createErr && created) {
-        setStores([created]);
-        setActiveStoreIdState(created.id);
-        await upsertUserProfile({ id: user.id, store_id: created.id });
-      } else if (createErr) {
-        syncingStoresUserRef.current = null;
-        console.warn('[GoAMAAS] Could not auto-provision default store:', createErr.message);
-      }
-    })();
+  // Synchronize authenticated user's stores with public.stores in PostgreSQL after auth completes
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase || isAuthLoading || !user?.id) {
+      return;
+    }
 
-    return () => {
-      cancelled = true;
-    };
-  }, [user?.id]);
+    const isOnAdminRoute =
+      typeof window !== 'undefined' &&
+      (window.location.pathname === '/admin' ||
+        window.location.pathname.startsWith('/admin/') ||
+        Boolean(peekAdminOAuthIntent()));
+
+    void resolveMerchantStoreForAction(onboardingRef.current.businessName, {
+      allowAutoProvision: user.role !== 'admin' && !isOnAdminRoute,
+    });
+  }, [isAuthLoading, user?.id, user?.role, user?.storeId, resolveMerchantStoreForAction]);
+
+  const retryStoreInitialization = useCallback(async (): Promise<string | undefined> => {
+    const res = await resolveMerchantStoreForAction(onboardingRef.current.businessName, {
+      forceRefresh: true,
+      allowAutoProvision: true,
+    });
+    if (res.status === 'ready' && res.storeId) {
+      showToast('Store workspace is ready.', 'success');
+      return res.storeId;
+    }
+    if (res.error) {
+      showToast(res.error, 'error');
+    }
+    return undefined;
+  }, [resolveMerchantStoreForAction, showToast]);
 
   // Clean fallback store to prevent undefined errors in UI components while loading
   const fallbackStore: Store = {
@@ -957,8 +1090,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const activeStore = stores.find((s) => s.id === activeStoreId) || stores[0] || fallbackStore;
 
   const setActiveStoreId = (id: string) => {
+    storeCoordinatorRef.current?.selectActiveStore(id);
     setActiveStoreIdState(id);
-    const target = stores.find((s) => s.id === id);
+    const target = storesRef.current.find((s) => s.id === id) || stores.find((s) => s.id === id);
     if (target) {
       showToast(`Switched active store to "${target.name}"`, 'info');
     }
@@ -981,11 +1115,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (error) {
             showToast(`Failed to save store settings: ${error.message}`, 'error');
             const { data: refreshed } = await fetchUserStoresFromDb();
-            if (refreshed) setStores(refreshed);
+            if (refreshed) {
+              storeCoordinatorRef.current?.applyStoresFromExternalUpdate(refreshed, targetStoreId);
+            }
             return;
           }
           if (saved) {
-            setStores((prev) => prev.map((s) => (s.id === saved.id ? saved : s)));
+            const nextStores = storesRef.current.map((s) => (s.id === saved.id ? saved : s));
+            storeCoordinatorRef.current?.applyStoresFromExternalUpdate(nextStores, saved.id);
           }
           showToast('Store settings updated successfully', 'success');
         } else {
@@ -1001,6 +1138,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             showToast(`Failed to create store in database: ${error?.message || 'Unknown error'}`, 'error');
             return;
           }
+          storeCoordinatorRef.current?.seedCreatedStore(created);
           setStores([created]);
           setActiveStoreIdState(created.id);
           await upsertUserProfile({ id: user.id, store_id: created.id });
@@ -1040,11 +1178,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (validStoreId) {
         const { data: savedStore } = await updateStoreInDb(validStoreId, storePatch);
         if (savedStore) {
-          setStores((prev) =>
-            prev.some((s) => s.id === savedStore.id)
-              ? prev.map((s) => (s.id === savedStore.id ? savedStore : s))
-              : [savedStore, ...prev]
-          );
+          const nextStores = storesRef.current.some((s) => s.id === savedStore.id)
+            ? storesRef.current.map((s) => (s.id === savedStore.id ? savedStore : s))
+            : [savedStore, ...storesRef.current];
+          storeCoordinatorRef.current?.applyStoresFromExternalUpdate(nextStores, savedStore.id);
         }
       } else {
         const { data: createdStore } = await createStoreInDb({
@@ -1056,6 +1193,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
         if (createdStore) {
           validStoreId = createdStore.id;
+          storeCoordinatorRef.current?.seedCreatedStore(createdStore);
           setStores((prev) => [createdStore, ...prev.filter((s) => s.id !== createdStore.id)]);
           setActiveStoreIdState(createdStore.id);
         }
@@ -1097,46 +1235,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const ensureMerchantStore = useCallback(
     async (preferredName?: string): Promise<string | undefined> => {
-      if (!isSupabaseConfigured || !supabase || !user?.id) {
-        return activeStore?.id;
-      }
-      if (
-        activeStoreId &&
-        UUID_REGEX.test(activeStoreId) &&
-        stores.some((s) => s.id === activeStoreId)
-      ) {
-        return activeStoreId;
-      }
-      const existingValid = stores.find((s) => UUID_REGEX.test(s.id));
-      if (existingValid) {
-        setActiveStoreIdState(existingValid.id);
-        return existingValid.id;
-      }
-      const { data: dbStores } = await fetchUserStoresFromDb();
-      if (dbStores && dbStores.length > 0) {
-        setStores(dbStores);
-        const preferredDbStore =
-          (user.storeId && dbStores.find((s) => s.id === user.storeId && UUID_REGEX.test(s.id))) ||
-          dbStores.find((s) => UUID_REGEX.test(s.id));
-        if (preferredDbStore) {
-          setActiveStoreIdState(preferredDbStore.id);
-          return preferredDbStore.id;
-        }
-      }
-      const { data: createdStore, error } = await createStoreInDb({
-        name: (preferredName || '').trim() || `${user.name || 'Merchant'}'s Store`,
-        category: 'General',
-        currency: '৳',
+      const resolution = await resolveMerchantStoreForAction(preferredName, {
+        allowAutoProvision: true,
       });
-      if (error || !createdStore) {
-        return undefined;
-      }
-      setStores((prev) => [createdStore, ...prev.filter((s) => s.id !== createdStore.id)]);
-      setActiveStoreIdState(createdStore.id);
-      void upsertUserProfile({ id: user.id, store_id: createdStore.id });
-      return createdStore.id;
+      return resolution.storeId;
     },
-    [activeStore?.id, activeStoreId, stores, user?.id, user?.name, user?.storeId]
+    [resolveMerchantStoreForAction]
   );
 
   const [subscribedWebsites, setSubscribedWebsites] = useState<SubscribedWebsite[]>(() =>
@@ -1316,17 +1420,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     if (isSupabaseConfigured && user?.id) {
-      const linkedWebsiteStoreId = normalizedInput.websiteId
-        ? subscribedWebsites.find((w) => w.id === normalizedInput.websiteId)?.storeId
-        : undefined;
-      const resolvedStoreId =
-        linkedWebsiteStoreId && UUID_REGEX.test(linkedWebsiteStoreId)
-          ? linkedWebsiteStoreId
-          : await ensureMerchantStore();
-      if (!resolvedStoreId || !UUID_REGEX.test(resolvedStoreId)) {
-        showToast('Store workspace is still initializing. Please try again in a moment.', 'warning');
+      const storeResolution = await resolveMerchantStoreForAction(
+        onboardingRef.current.businessName,
+        { allowAutoProvision: true }
+      );
+      if (storeResolution.reason === 'stale') {
         return null;
       }
+      const linkedWebsiteStoreId = normalizedInput.websiteId
+        ? subscribedWebsitesRef.current.find((w) => w.id === normalizedInput.websiteId)?.storeId
+        : undefined;
+      const resolvedStoreId = resolveTargetStoreIdForProduct({
+        linkedWebsiteStoreId,
+        availableStores:
+          storeResolution.stores.length > 0 ? storeResolution.stores : storesRef.current,
+        resolvedStoreId: storeResolution.storeId,
+      });
+
+      if (!resolvedStoreId || !UUID_REGEX.test(resolvedStoreId)) {
+        if (storeResolution.reason === 'auth_loading' || storeResolution.status === 'loading') {
+          showToast(
+            'Store workspace is still initializing. Please try again in a moment.',
+            'warning'
+          );
+        } else if (storeResolution.reason === 'unauthenticated') {
+          showToast('Please sign in again to create products.', 'error');
+        } else {
+          showToast(
+            storeResolution.error ||
+              'Unable to resolve your store workspace. Please click Retry Workspace Setup and try again.',
+            'error'
+          );
+        }
+        return null;
+      }
+
       const { data, error } = await createProductInDb(resolvedStoreId, normalizedInput);
       if (error || !data) {
         showToast(error?.message || 'Failed to add product to database', 'error');
@@ -1344,39 +1472,57 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isFeatured: normalizedInput.isFeatured ?? data.isFeatured,
       };
 
+      setProducts((prev) => [enrichedProduct, ...prev.filter((p) => p.id !== enrichedProduct.id)]);
       setProductSyncStatusMap((prev) => ({ ...prev, [enrichedProduct.id]: 'saved' }));
 
       // Automatically sync active visible products & extended metadata with merchant's storefront
+      // Storefront sync failures never block or roll back an already-persisted product.
+      let syncWarningMessage: string | null = null;
+      const currentWebsites = subscribedWebsitesRef.current;
       if (
         enrichedProduct.websiteId ||
         enrichedProduct.image ||
         enrichedProduct.discountPrice !== undefined ||
-        (enrichedProduct.status === 'active' && enrichedProduct.isVisible !== false && subscribedWebsites.length > 0)
+        (enrichedProduct.status === 'active' &&
+          enrichedProduct.isVisible !== false &&
+          currentWebsites.length > 0)
       ) {
-        const syncRes = await syncProductCatalogStateToWebsite(enrichedProduct, {
-          targetWebsiteId: enrichedProduct.websiteId,
-          forcePublish: Boolean(
-            enrichedProduct.status === 'active' &&
-              enrichedProduct.isVisible !== false &&
-              (enrichedProduct.websiteId || subscribedWebsites.length > 0)
-          ),
-        });
-        if (!syncRes.success) {
-          showToast(
-            syncRes.error?.message ||
-              'Product saved to inventory, but website storefront sync failed. Click Retry Sync.',
-            'warning'
-          );
+        try {
+          const syncRes = await syncProductCatalogStateToWebsite(enrichedProduct, {
+            targetWebsiteId: enrichedProduct.websiteId,
+            forcePublish: Boolean(
+              enrichedProduct.status === 'active' &&
+                enrichedProduct.isVisible !== false &&
+                (enrichedProduct.websiteId || currentWebsites.length > 0)
+            ),
+          });
+          if (!syncRes.success) {
+            syncWarningMessage =
+              syncRes.error?.message ||
+              'Product saved to inventory, but website storefront sync failed. Click Retry Sync.';
+            setProductSyncStatusMap((prev) => ({ ...prev, [enrichedProduct.id]: 'error' }));
+          }
+        } catch (syncErr: unknown) {
+          syncWarningMessage =
+            syncErr instanceof Error
+              ? syncErr.message
+              : 'Product saved to inventory, but website storefront sync failed. Click Retry Sync.';
+          setProductSyncStatusMap((prev) => ({ ...prev, [enrichedProduct.id]: 'error' }));
         }
       }
 
-      setProducts((prev) => [enrichedProduct, ...prev.filter((p) => p.id !== enrichedProduct.id)]);
-      showToast(
-        enrichedProduct.status === 'active' && enrichedProduct.isVisible !== false && subscribedWebsites.length > 0
-          ? `Added "${enrichedProduct.name}" and synced with your website`
-          : `Added product "${enrichedProduct.name}"`,
-        'success'
-      );
+      if (syncWarningMessage) {
+        showToast(syncWarningMessage, 'warning');
+      } else {
+        showToast(
+          enrichedProduct.status === 'active' &&
+            enrichedProduct.isVisible !== false &&
+            currentWebsites.length > 0
+            ? `Added "${enrichedProduct.name}" and synced with your website`
+            : `Added product "${enrichedProduct.name}"`,
+          'success'
+        );
+      }
       return enrichedProduct;
     }
 
@@ -1941,12 +2087,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     custData: Omit<Customer, 'id' | 'totalSpent' | 'ordersCount' | 'lastOrderDate' | 'createdAt'>
   ) => {
     if (isSupabaseConfigured && user?.id) {
-      if (!UUID_REGEX.test(activeStore.id)) {
-        showToast('Store workspace is still initializing. Please try again in a moment.', 'warning');
-        return;
-      }
       void (async () => {
-        const { data, error } = await createCustomerInDb(activeStore.id, {
+        const storeResolution = await resolveMerchantStoreForAction(undefined, {
+          allowAutoProvision: true,
+        });
+        const targetStoreId = storeResolution.storeId;
+        if (!targetStoreId || !UUID_REGEX.test(targetStoreId)) {
+          showToast(
+            storeResolution.error ||
+              'Unable to resolve your store workspace. Please retry workspace setup and try again.',
+            storeResolution.status === 'loading' ? 'warning' : 'error'
+          );
+          return;
+        }
+        const { data, error } = await createCustomerInDb(targetStoreId, {
           name: custData.name,
           phone: custData.phone,
           email: custData.email,
@@ -2060,12 +2214,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const orderNum = `ORD-${Date.now().toString().slice(-6)}-${Math.random().toString(36).slice(2, 4).toUpperCase()}`;
 
     if (isSupabaseConfigured && user?.id) {
-      if (!UUID_REGEX.test(activeStore.id)) {
-        showToast('Store workspace is still initializing. Please try again in a moment.', 'warning');
-        return;
-      }
       void (async () => {
-        const { data: createdOrder, error } = await createOrderInDb(activeStore.id, orderNum, orderData);
+        const storeResolution = await resolveMerchantStoreForAction(undefined, {
+          allowAutoProvision: true,
+        });
+        const targetStoreId = storeResolution.storeId;
+        if (!targetStoreId || !UUID_REGEX.test(targetStoreId)) {
+          showToast(
+            storeResolution.error ||
+              'Unable to resolve your store workspace. Please retry workspace setup and try again.',
+            storeResolution.status === 'loading' ? 'warning' : 'error'
+          );
+          return;
+        }
+        const { data: createdOrder, error } = await createOrderInDb(targetStoreId, orderNum, orderData);
         if (error || !createdOrder) {
           showToast(error?.message || 'Failed to create order in database', 'error');
           return;
@@ -2095,7 +2257,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 targetWebsiteId: mergedProd.websiteId,
               });
               const { data: logRow } = await createInventoryMovementInDb({
-                storeId: activeStore.id,
+                storeId: targetStoreId,
                 productId: mergedProd.id,
                 productName: mergedProd.name,
                 type: 'sale',
@@ -2124,7 +2286,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             ordersCount: existingCustomer.ordersCount + 1,
           });
         } else {
-          const { data: newCust } = await createCustomerInDb(activeStore.id, {
+          const { data: newCust } = await createCustomerInDb(targetStoreId, {
             name: orderData.customerName,
             phone: normalizeCustomerPhone(orderData.customerPhone),
             email: orderData.customerEmail,
@@ -2713,7 +2875,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [websitesLoadError, setWebsitesLoadError] = useState<string | null>(null);
 
   const refreshSubscribedWebsites = useCallback(async () => {
-    if (!isSupabaseConfigured || !supabase || !user) return;
+    if (!isSupabaseConfigured || !supabase || !userRef.current?.id) return;
     setIsWebsitesLoading(true);
     try {
       const { data, error } = await fetchUserSubscribedWebsitesFromDb();
@@ -2731,13 +2893,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } finally {
       setIsWebsitesLoading(false);
     }
-  }, [user]);
+  }, []);
 
   useEffect(() => {
-    if (user && isSupabaseConfigured) {
-      refreshSubscribedWebsites();
+    if (!isAuthLoading && user?.id && isSupabaseConfigured) {
+      void refreshSubscribedWebsites();
     }
-  }, [user, activeStoreId, refreshSubscribedWebsites]);
+  }, [isAuthLoading, user?.id, refreshSubscribedWebsites]);
 
   const checkSubdomainAvailabilityAsync = async (
     rawSubdomain: string,
@@ -5202,12 +5364,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const addTeamMember = (member: Omit<TeamMember, 'id' | 'joinedAt'>) => {
     if (isSupabaseConfigured && user?.id) {
-      if (!UUID_REGEX.test(activeStore.id)) {
-        showToast('Store workspace is still initializing. Please try again in a moment.', 'warning');
-        return;
-      }
       void (async () => {
-        const { data, error } = await inviteStoreMemberInDb(activeStore.id, {
+        const storeResolution = await resolveMerchantStoreForAction(undefined, {
+          allowAutoProvision: true,
+        });
+        const targetStoreId = storeResolution.storeId;
+        if (!targetStoreId || !UUID_REGEX.test(targetStoreId)) {
+          showToast(
+            storeResolution.error ||
+              'Unable to resolve your store workspace. Please retry workspace setup and try again.',
+            storeResolution.status === 'loading' ? 'warning' : 'error'
+          );
+          return;
+        }
+        const { data, error } = await inviteStoreMemberInDb(targetStoreId, {
           name: member.name,
           email: member.email,
           role: member.role,
@@ -5363,6 +5533,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     initialOrdersHydratedRef.current = false;
   }, [user?.id]);
 
+  const merchantStoreIdsKey = merchantStoreIds.join(',');
+
   // Synchronize store-scoped tables across ALL merchant stores & websites (products, orders, customers, inventory_movements, store_members)
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase || !user?.id || merchantStoreIds.length === 0) {
@@ -5372,12 +5544,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let cancelled = false;
     setIsOrdersLoading(true);
     (async () => {
+      const storeIdsSnapshot = [...merchantStoreIds];
+      const activeIdSnapshot = UUID_REGEX.test(activeStore.id)
+        ? activeStore.id
+        : storeIdsSnapshot[0];
+
       const [prodResults, ordRes, custRes, invRes, teamRes] = await Promise.all([
-        Promise.all(merchantStoreIds.map((sid) => fetchStoreProductsFromDb(sid))),
-        fetchOrdersForStoresFromDb(merchantStoreIds),
-        fetchCustomersForStoresFromDb(merchantStoreIds),
-        fetchInventoryMovementsForStoresFromDb(merchantStoreIds),
-        fetchStoreMembersFromDb(activeStore.id),
+        Promise.all(storeIdsSnapshot.map((sid) => fetchStoreProductsFromDb(sid))),
+        fetchOrdersForStoresFromDb(storeIdsSnapshot),
+        fetchCustomersForStoresFromDb(storeIdsSnapshot),
+        fetchInventoryMovementsForStoresFromDb(storeIdsSnapshot),
+        fetchStoreMembersFromDb(activeIdSnapshot),
       ]);
       if (cancelled) return;
       setIsOrdersLoading(false);
@@ -5390,7 +5567,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         }
       }
-      setProducts(mergeStoreProductsWithWebsites(Array.from(mergedProdMap.values()), subscribedWebsites));
+      setProducts(
+        mergeStoreProductsWithWebsites(
+          Array.from(mergedProdMap.values()),
+          subscribedWebsitesRef.current
+        )
+      );
 
       if (ordRes.error) {
         setOrdersLoadError(ordRes.error.message || 'Unable to load store orders.');
@@ -5406,7 +5588,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => {
       cancelled = true;
     };
-  }, [user?.id, activeStore.id, merchantStoreIds, subscribedWebsites, applyIncomingOrdersAndDetectNew]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, activeStore.id, merchantStoreIdsKey, applyIncomingOrdersAndDetectNew]);
+
+  // Keep local product metadata merged whenever website catalog metadata refreshes
+  useEffect(() => {
+    if (!isSupabaseConfigured || subscribedWebsites.length === 0) return;
+    setProducts((prev) =>
+      prev.length > 0 ? mergeStoreProductsWithWebsites(prev, subscribedWebsites) : prev
+    );
+  }, [subscribedWebsites]);
 
   // Multi-store Realtime order listener + resilient adaptive polling fallback + focus/visibility re-sync
   useEffect(() => {
@@ -5586,6 +5777,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         stores,
         activeStore,
         activeStoreId,
+        isStoreInitializing,
+        storeInitStatus,
+        storeInitError,
+        retryStoreInitialization,
         setActiveStoreId,
         updateActiveStore,
         onboarding,

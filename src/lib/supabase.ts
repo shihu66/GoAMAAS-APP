@@ -2383,29 +2383,17 @@ export async function uploadWebsiteAssetToStorage(params: {
   }
 
   try {
-    let {
-      data: { session },
-      error: sessionErr,
-    } = await supabase.auth.getSession();
-    if (!session?.access_token) {
-      const refreshed = await supabase.auth.refreshSession();
-      session = refreshed.data.session;
-      sessionErr = refreshed.error;
-    }
-
-    const {
-      data: { user },
-      error: authErr,
-    } = await supabase.auth.getUser();
-
-    if (sessionErr || authErr || !session?.access_token || !user) {
+    const authState = await ensureActiveSupabaseSession();
+    if (authState.error || !authState.session?.access_token || !authState.user) {
       return {
         publicUrl: null,
-        error: new Error('Authentication required: please sign in to upload website assets.'),
+        error:
+          authState.error ||
+          new Error('Authentication required: please sign in to upload website assets.'),
       };
     }
 
-    const ownerUid = session.user?.id || user.id;
+    const ownerUid = authState.session.user?.id || authState.user.id;
 
     const rawName = (file.name || 'image.png').toLowerCase();
     const dotIdx = rawName.lastIndexOf('.');
@@ -3523,12 +3511,16 @@ export async function fetchUserStoresFromDb(): Promise<{ data: Store[] | null; e
     return { data: null, error: null };
   }
   try {
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) {
-      return { data: [], error: null };
+    const authState = await ensureActiveSupabaseSession();
+    if (authState.error || !authState.user) {
+      return {
+        data: null,
+        error:
+          authState.error ||
+          new Error('Unable to verify your login session while loading stores. Please sign in and retry.'),
+      };
     }
+    const user = authState.user;
 
     const { data, error } = await supabase
       .from('stores')
@@ -3539,7 +3531,14 @@ export async function fetchUserStoresFromDb(): Promise<{ data: Store[] | null; e
       return { data: null, error: new Error(error.message || 'Failed to fetch stores') };
     }
 
-    return { data: ((data as RawStoreRow[]) || []).map(mapDatabaseRowToStore), error: null };
+    const rows = ((data as RawStoreRow[]) || []).slice().sort((a, b) => {
+      const aOwned = a.owner_id === user.id ? 0 : 1;
+      const bOwned = b.owner_id === user.id ? 0 : 1;
+      if (aOwned !== bOwned) return aOwned - bOwned;
+      return String(a.created_at || '').localeCompare(String(b.created_at || ''));
+    });
+
+    return { data: rows.map(mapDatabaseRowToStore), error: null };
   } catch (err: unknown) {
     return {
       data: null,
@@ -3560,13 +3559,14 @@ export async function createStoreInDb(params: {
     return { data: null, error: new Error('Supabase is not configured') };
   }
   try {
-    const {
-      data: { user },
-      error: authErr,
-    } = await supabase.auth.getUser();
-    if (authErr || !user) {
-      return { data: null, error: new Error('Authentication required to create a store') };
+    const authState = await ensureActiveSupabaseSession();
+    if (authState.error || !authState.user) {
+      return {
+        data: null,
+        error: authState.error || new Error('Authentication required to create a store'),
+      };
     }
+    const user = authState.user;
 
     const cleanName = (params.name || '').trim() || 'My Store';
     const primarySlug = sanitizeStoreSlug(params.slug || cleanName, user.id.slice(0, 6));

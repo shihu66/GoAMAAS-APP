@@ -33,6 +33,7 @@ import {
   ArrowUp,
   ArrowDown,
   Camera,
+  AlertTriangle,
 } from 'lucide-react';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
@@ -57,6 +58,10 @@ export const ProductsPage: React.FC = () => {
     retryProductWebsiteSync,
     subscribedWebsites,
     activeStore,
+    isStoreInitializing,
+    storeInitStatus,
+    storeInitError,
+    retryStoreInitialization,
     addProduct,
     updateProduct,
     deleteProduct,
@@ -591,6 +596,50 @@ export const ProductsPage: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {isStoreInitializing && (
+        <div className="flex items-center gap-2.5 px-4 py-2.5 rounded-xl bg-blue-50/80 dark:bg-blue-950/30 border border-blue-200/80 dark:border-blue-900/50 text-xs text-blue-700 dark:text-blue-300">
+          <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+          <span>
+            {lang === 'bn'
+              ? 'আপনার স্টোর ওয়ার্কস্পেস প্রস্তুত হচ্ছে...'
+              : 'Preparing your store workspace...'}
+          </span>
+        </div>
+      )}
+
+      {!isStoreInitializing && (storeInitStatus === 'error' || storeInitStatus === 'missing') && (
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-4 py-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/60 text-xs text-amber-800 dark:text-amber-200">
+          <div className="flex items-start sm:items-center gap-2.5">
+            <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5 sm:mt-0" />
+            <div>
+              <p className="font-semibold">
+                {storeInitStatus === 'missing'
+                  ? lang === 'bn'
+                    ? 'স্টোর ওয়ার্কস্পেস পাওয়া যায়নি'
+                    : 'Store Workspace Not Created Yet'
+                  : lang === 'bn'
+                  ? 'স্টোর ওয়ার্কস্পেস লোড করতে সমস্যা হয়েছে'
+                  : 'Store Workspace Needs Attention'}
+              </p>
+              <p className="text-[11px] opacity-90 mt-0.5">
+                {storeInitError ||
+                  (lang === 'bn'
+                    ? 'পণ্য যোগ করার আগে আপনার স্টোর সেটআপ পুনরায় চেষ্টা করুন।'
+                    : 'Unable to load your active store right now. Click Retry Workspace Setup to recover.')}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => void retryStoreInitialization()}
+            className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>{lang === 'bn' ? 'আবার চেষ্টা করুন' : 'Retry Workspace Setup'}</span>
+          </button>
+        </div>
+      )}
 
       {/* Website Publishing State Segmented Filter */}
       <div className="flex items-center gap-1 overflow-x-auto pb-1 text-xs">
