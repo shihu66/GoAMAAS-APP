@@ -115,7 +115,7 @@ function buildDeterministicOrderNumber(subdomain: string, attemptId: string): st
 export default async function handler(req: RequestWithBody, res: ServerResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.setHeader('X-Content-Type-Options', 'nosniff');
 
   if (req.method === 'OPTIONS') {
@@ -410,13 +410,40 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       'Content-Type': 'application/json',
     };
 
+    // Optional authenticated customer verification (NEVER trust customerAuthUserId from request body)
+    let verifiedCustomerAuthUserId = '';
+    const authHeader = String(req.headers.authorization || '').trim();
+    if (authHeader.toLowerCase().startsWith('bearer ')) {
+      const bearerToken = authHeader.slice(7).trim();
+      if (bearerToken.length > 20) {
+        try {
+          const authUserResp = await fetch(`${supabaseUrl}/auth/v1/user`, {
+            method: 'GET',
+            headers: {
+              apikey: supabaseAnonKey,
+              Authorization: `Bearer ${bearerToken}`,
+            },
+          });
+          if (authUserResp.ok) {
+            const authUserJson = (await authUserResp.json()) as { id?: string };
+            if (authUserJson?.id && UUID_REGEX.test(String(authUserJson.id).trim())) {
+              verifiedCustomerAuthUserId = String(authUserJson.id).trim();
+            }
+          }
+        } catch {
+          // Proceed as guest if token validation network fails
+        }
+      }
+    }
+
     // Resolve authoritative websiteId, storeId, and verify strict owner/store linkage via service_role
     let storeId = String(site.storeId || site.store_id || '').trim();
     let websiteId = String(site.id || '').trim();
     let authoritativeSiteConfig: Record<string, any> | null = null;
+    let resolvedStoreRow: Record<string, any> | null = null;
 
     const siteSelectCols =
-      'id,store_id,user_id,status,payment_status,deployment_status,current_period_end,config';
+      'id,store_id,user_id,business_name,subdomain,full_domain,status,payment_status,deployment_status,current_period_end,config';
     let siteLookupResp = await fetch(
       `${supabaseUrl}/rest/v1/subscribed_websites?subdomain=eq.${encodeURIComponent(subdomain)}&select=${siteSelectCols}&limit=1`,
       { method: 'GET', headers: adminHeaders }
@@ -488,7 +515,7 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
 
         if (UUID_REGEX.test(candidateStoreId)) {
           const verifyStoreResp = await fetch(
-            `${supabaseUrl}/rest/v1/stores?id=eq.${encodeURIComponent(candidateStoreId)}&select=id,owner_id&limit=1`,
+            `${supabaseUrl}/rest/v1/stores?id=eq.${encodeURIComponent(candidateStoreId)}&select=id,owner_id,name,phone,address,logo_url&limit=1`,
             { method: 'GET', headers: adminHeaders }
           );
           if (!verifyStoreResp.ok) {
@@ -536,9 +563,10 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
           }
 
           storeId = String(matched.id).trim();
+          resolvedStoreRow = matched;
         } else {
           const ownerStoreResp = await fetch(
-            `${supabaseUrl}/rest/v1/stores?owner_id=eq.${encodeURIComponent(siteOwnerUserId)}&order=created_at.asc&limit=2&select=id,owner_id`,
+            `${supabaseUrl}/rest/v1/stores?owner_id=eq.${encodeURIComponent(siteOwnerUserId)}&order=created_at.asc&limit=2&select=id,owner_id,name,phone,address,logo_url`,
             { method: 'GET', headers: adminHeaders }
           );
           if (!ownerStoreResp.ok) {
@@ -557,6 +585,7 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
           });
 
           if (eligibleStores.length === 1) {
+            resolvedStoreRow = eligibleStores[0];
             storeId = String(eligibleStores[0].id).trim();
           } else if (eligibleStores.length > 1) {
             sendJson(res, 422, {
@@ -655,13 +684,17 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
             notes: firstMeta.orderNotes || undefined,
             subtotal: Number(row.subtotal) || 0,
             deliveryFee: Number(row.delivery_charge) || 0,
+            discount: Number(firstMeta.discountTotal) || 0,
             total: Number(row.total) || 0,
             status: row.status || 'pending',
+            statusHistory: Array.isArray(firstMeta.statusHistory) ? firstMeta.statusHistory : undefined,
             paymentStatus: row.payment_status || 'pending',
             paymentMethod: row.payment_method || paymentMethod,
             source: row.source || `Website (${subdomain}.amaas.xyz)`,
             websiteId,
             websiteSubdomain: subdomain,
+            customerAuthUserId: firstMeta.customerAuthUserId || undefined,
+            merchantBrandingSnapshot: firstMeta.merchantBrandingSnapshot || undefined,
             items: Array.isArray(row.items) ? row.items : [],
             createdAt: row.created_at,
           },
@@ -892,6 +925,40 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
     ].filter(Boolean);
 
     const formattedShippingAddress = addressSegments.join(' | ');
+    const orderPlacedAtIso = new Date().toISOString();
+
+    const discountTotal = verifiedLines.reduce(
+      (sum, line) => sum + Math.max(0, line.originalPrice - line.unitPrice) * line.quantity,
+      0
+    );
+
+    const cfg = authoritativeSiteConfig || {};
+    const cfgTheme = cfg.themeSettings && typeof cfg.themeSettings === 'object' ? cfg.themeSettings : {};
+    const cfgLoc = cfgTheme.location && typeof cfgTheme.location === 'object' ? cfgTheme.location : {};
+    const customDomain = String(cfg.customDomain || site.customDomain || '').trim().toLowerCase();
+    const merchantBrandingSnapshot = {
+      businessName:
+        String(
+          cfg.businessName ||
+            siteRow?.business_name ||
+            site.businessName ||
+            resolvedStoreRow?.name ||
+            ''
+        ).trim() || `${subdomain.toUpperCase()} Store`,
+      logoUrl: String(cfg.logoUrl || site.logoUrl || resolvedStoreRow?.logo_url || '').trim() || undefined,
+      brandColor:
+        String(cfgTheme.primaryColor || cfg.brandColor || site.brandColor || '#2563EB').trim() ||
+        '#2563EB',
+      phone: String(cfg.phone || site.phone || resolvedStoreRow?.phone || '').trim() || undefined,
+      email: String(cfg.email || site.email || '').trim() || undefined,
+      address:
+        String(cfgLoc.address || cfg.address || site.address || resolvedStoreRow?.address || '').trim() ||
+        undefined,
+      websiteUrl: customDomain ? `https://${customDomain}` : `https://${subdomain}.amaas.xyz`,
+      subdomain,
+    };
+
+    const initialStatusHistory = [{ status: 'pending', at: orderPlacedAtIso }];
 
     const orderItemsSnapshot = verifiedLines.map((line, index) => ({
       productId: line.productId,
@@ -913,6 +980,10 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
               deliveryMethod: deliverySpec.label,
               deliveryInstructions: deliveryInstructions || undefined,
               orderNotes: orderNotes || undefined,
+              ...(verifiedCustomerAuthUserId ? { customerAuthUserId: verifiedCustomerAuthUserId } : {}),
+              ...(discountTotal > 0 ? { discountTotal } : {}),
+              statusHistory: initialStatusHistory,
+              merchantBrandingSnapshot,
             },
           }
         : {}),
@@ -1101,15 +1172,19 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
         notes: orderNotes || undefined,
         subtotal,
         deliveryFee: deliveryCharge,
+        discount: discountTotal,
         total: grandTotal,
         status: savedOrder.status || 'pending',
+        statusHistory: initialStatusHistory,
         paymentStatus: savedOrder.payment_status || 'pending',
         paymentMethod: savedOrder.payment_method || paymentMethod,
         source: savedOrder.source || `Website (${subdomain}.amaas.xyz)`,
         websiteId,
         websiteSubdomain: subdomain,
+        customerAuthUserId: verifiedCustomerAuthUserId || undefined,
+        merchantBrandingSnapshot,
         items: orderItemsSnapshot,
-        createdAt: savedOrder.created_at || new Date().toISOString(),
+        createdAt: savedOrder.created_at || orderPlacedAtIso,
       },
     });
   } catch {

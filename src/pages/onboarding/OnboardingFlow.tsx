@@ -1,14 +1,15 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
 import { useLanguage } from '../../context/LanguageContext';
+import { UUID_REGEX } from '../../lib/supabase';
 import { GuidedWebsiteWizard } from '../../components/onboarding/GuidedWebsiteWizard';
 import { LanguageSwitcher } from '../../components/ui/LanguageSwitcher';
 import { ThemeSelector } from '../../components/ui/ThemeSelector';
 import { Sparkles, ArrowRight, CheckCircle2 } from 'lucide-react';
 
 export const OnboardingFlow: React.FC = () => {
-  const { completeOnboarding, activeStore, updateOnboarding } = useApp();
+  const { completeOnboarding, activeStore, stores, onboarding, updateOnboarding } = useApp();
   const { t } = useLanguage();
   const ob = t.workspace.onboarding;
   const navigate = useNavigate();
@@ -16,12 +17,14 @@ export const OnboardingFlow: React.FC = () => {
   const [mode, setMode] = useState<'welcome' | 'wizard'>('welcome');
   const [isSkipping, setIsSkipping] = useState(false);
 
+  const hasEstablishedStore = stores.some((s) => UUID_REGEX.test(s.id));
+
   const handleSkipForLater = async () => {
     if (isSkipping) return;
     setIsSkipping(true);
     try {
       await completeOnboarding({
-        businessName: activeStore?.name || 'My Business',
+        businessName: (hasEstablishedStore ? activeStore?.name : onboarding.businessName) || 'My Business',
         completed: true,
       });
       navigate('/dashboard');
@@ -44,6 +47,15 @@ export const OnboardingFlow: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
+          {onboarding.completed && hasEstablishedStore && (
+            <Link
+              to="/dashboard"
+              className="min-h-[34px] inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 transition-colors"
+            >
+              <span>Dashboard</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </Link>
+          )}
           <LanguageSwitcher size="sm" />
           <ThemeSelector compact />
         </div>

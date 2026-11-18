@@ -50,6 +50,7 @@ export const DashboardLayout: React.FC = () => {
     customers,
     supportTickets,
     subscribedWebsites,
+    hydrateMerchantWorkspace,
   } = useApp();
   const { lang, toggleLang, t } = useLanguage();
   const navText = t.workspace.nav;
@@ -64,6 +65,12 @@ export const DashboardLayout: React.FC = () => {
   const [moreToolsOpen, setMoreToolsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearchModal, setShowSearchModal] = useState(false);
+
+  useEffect(() => {
+    if (user?.id && stores.length === 0) {
+      void hydrateMerchantWorkspace();
+    }
+  }, [user?.id, stores.length, hydrateMerchantWorkspace]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {

@@ -466,8 +466,76 @@ export interface UserProfileRecord {
 }
 
 export const ADMIN_OAUTH_INTENT_KEY = 'goamaas_admin_oauth_intent_v1';
+export const MERCHANT_OAUTH_INTENT_KEY = 'goamaas_merchant_oauth_intent_v1';
+export const CUSTOMER_OAUTH_INTENT_KEY = 'goamaas_customer_oauth_intent_v1';
+export const CUSTOMER_PORTAL_SESSION_KEY = 'goamaas_customer_portal_session_v1';
 export const OAUTH_FLOW_SOURCE_KEY = 'goamaas_oauth_flow_source_v1';
 const ADMIN_OAUTH_INTENT_MAX_AGE_MS = 10 * 60 * 1000;
+
+export function isSafeInternalRedirectPath(path?: string | null): boolean {
+  if (!path || typeof path !== 'string') return false;
+  const trimmed = path.trim();
+  if (!trimmed.startsWith('/') || trimmed.startsWith('//')) return false;
+  if (
+    trimmed.startsWith('/login') ||
+    trimmed.startsWith('/register') ||
+    trimmed.startsWith('/auth/callback') ||
+    trimmed.startsWith('/admin')
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function clearMerchantOAuthIntentStorage(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.removeItem(MERCHANT_OAUTH_INTENT_KEY);
+  } catch {}
+  try {
+    window.localStorage.removeItem(MERCHANT_OAUTH_INTENT_KEY);
+  } catch {}
+}
+
+export function setMerchantOAuthIntent(nextPath = '/dashboard'): void {
+  if (typeof window === 'undefined') return;
+  const safeNext = isSafeInternalRedirectPath(nextPath) ? nextPath.trim() : '/dashboard';
+  const serialized = JSON.stringify({ nextPath: safeNext, createdAt: Date.now() });
+  setOAuthFlowSource('merchant');
+  try {
+    window.sessionStorage.setItem(MERCHANT_OAUTH_INTENT_KEY, serialized);
+  } catch {}
+  try {
+    window.localStorage.setItem(MERCHANT_OAUTH_INTENT_KEY, serialized);
+  } catch {}
+}
+
+export function peekMerchantOAuthIntent(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw =
+      window.sessionStorage.getItem(MERCHANT_OAUTH_INTENT_KEY) ||
+      window.localStorage.getItem(MERCHANT_OAUTH_INTENT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { nextPath?: string; createdAt?: number };
+    if (
+      typeof parsed.createdAt !== 'number' ||
+      Date.now() - parsed.createdAt > ADMIN_OAUTH_INTENT_MAX_AGE_MS
+    ) {
+      clearMerchantOAuthIntentStorage();
+      return null;
+    }
+    return isSafeInternalRedirectPath(parsed.nextPath) ? parsed.nextPath!.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+export function consumeMerchantOAuthIntent(): string | null {
+  const target = peekMerchantOAuthIntent();
+  clearMerchantOAuthIntentStorage();
+  return target;
+}
 
 function clearAdminOAuthIntentStorage(): void {
   if (typeof window === 'undefined') return;
@@ -483,7 +551,149 @@ function clearAdminOAuthIntentStorage(): void {
   }
 }
 
-function setOAuthFlowSource(source: 'admin' | 'merchant'): void {
+export interface CustomerOAuthIntentPayload {
+  subdomain: string;
+  returnPath: string;
+  createdAt: number;
+}
+
+export function clearCustomerOAuthIntentStorage(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.removeItem(CUSTOMER_OAUTH_INTENT_KEY);
+  } catch {}
+  try {
+    window.localStorage.removeItem(CUSTOMER_OAUTH_INTENT_KEY);
+  } catch {}
+}
+
+export function setCustomerOAuthIntent(subdomain: string, returnPath: string): void {
+  if (typeof window === 'undefined') return;
+  const cleanSub = (subdomain || '').trim().toLowerCase();
+  const safePath = returnPath && returnPath.startsWith('/') ? returnPath : '/';
+  const payload: CustomerOAuthIntentPayload = {
+    subdomain: cleanSub,
+    returnPath: safePath,
+    createdAt: Date.now(),
+  };
+  const serialized = JSON.stringify(payload);
+  setOAuthFlowSource('customer');
+  try {
+    window.sessionStorage.setItem(CUSTOMER_OAUTH_INTENT_KEY, serialized);
+  } catch {}
+  try {
+    window.localStorage.setItem(CUSTOMER_OAUTH_INTENT_KEY, serialized);
+  } catch {}
+}
+
+export function peekCustomerOAuthIntent(): CustomerOAuthIntentPayload | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw =
+      window.sessionStorage.getItem(CUSTOMER_OAUTH_INTENT_KEY) ||
+      window.localStorage.getItem(CUSTOMER_OAUTH_INTENT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<CustomerOAuthIntentPayload>;
+    if (
+      typeof parsed.createdAt !== 'number' ||
+      Date.now() - parsed.createdAt > ADMIN_OAUTH_INTENT_MAX_AGE_MS
+    ) {
+      clearCustomerOAuthIntentStorage();
+      return null;
+    }
+    const safeReturn =
+      typeof parsed.returnPath === 'string' && parsed.returnPath.startsWith('/')
+        ? parsed.returnPath
+        : '/';
+    return {
+      subdomain: String(parsed.subdomain || '').trim().toLowerCase(),
+      returnPath: safeReturn,
+      createdAt: parsed.createdAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function consumeCustomerOAuthIntent(): CustomerOAuthIntentPayload | null {
+  const target = peekCustomerOAuthIntent();
+  clearCustomerOAuthIntentStorage();
+  return target;
+}
+
+export function setCustomerPortalSessionActive(userId: string, subdomain?: string): void {
+  if (typeof window === 'undefined' || !userId) return;
+  const serialized = JSON.stringify({
+    userId,
+    subdomain: (subdomain || '').trim().toLowerCase(),
+    establishedAt: Date.now(),
+  });
+  try {
+    window.localStorage.setItem(CUSTOMER_PORTAL_SESSION_KEY, serialized);
+  } catch {}
+}
+
+export function isCustomerPortalSessionActive(userId?: string | null): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const raw = window.localStorage.getItem(CUSTOMER_PORTAL_SESSION_KEY);
+    if (!raw) return false;
+    const parsed = JSON.parse(raw) as { userId?: string };
+    if (!parsed?.userId) return false;
+    if (userId && parsed.userId !== userId) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function clearCustomerPortalSessionActive(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(CUSTOMER_PORTAL_SESSION_KEY);
+  } catch {}
+}
+
+export function isTenantSubdomainHost(): boolean {
+  if (typeof window === 'undefined') return false;
+  const host = window.location.hostname.toLowerCase();
+  let candidate = '';
+  if (host.endsWith('.amaas.xyz') && host !== 'amaas.xyz') {
+    candidate = host.slice(0, -'.amaas.xyz'.length);
+  } else if (host.endsWith('.localhost') && host !== 'localhost') {
+    candidate = host.slice(0, -'.localhost'.length);
+  }
+  if (!candidate || candidate.includes('.')) return false;
+  return validateSubdomainFormat(candidate).valid;
+}
+
+export function getMainAppOrigin(): string {
+  if (typeof window === 'undefined') return 'https://amaas.xyz';
+  const host = window.location.hostname.toLowerCase();
+  const protocol = window.location.protocol === 'http:' ? 'http:' : 'https:';
+  const port = window.location.port ? `:${window.location.port}` : '';
+  if (host.endsWith('.amaas.xyz') && host !== 'amaas.xyz') {
+    return isTenantSubdomainHost() ? `https://amaas.xyz` : window.location.origin;
+  }
+  if (host.endsWith('.localhost') && host !== 'localhost') {
+    return `${protocol}//localhost${port}`;
+  }
+  return window.location.origin;
+}
+
+export function isOnStorefrontCustomerPath(): boolean {
+  if (typeof window === 'undefined') return false;
+  const path = window.location.pathname || '/';
+  if (path.startsWith('/s/') || path.startsWith('/sites/') || path.startsWith('/site/')) {
+    return true;
+  }
+  if (isTenantSubdomainHost()) {
+    return !path.startsWith('/dashboard') && !path.startsWith('/admin') && !path.startsWith('/onboarding');
+  }
+  return false;
+}
+
+function setOAuthFlowSource(source: 'admin' | 'merchant' | 'customer'): void {
   if (typeof window === 'undefined') return;
   const serialized = JSON.stringify({ source, createdAt: Date.now() });
   try {
@@ -498,7 +708,7 @@ function setOAuthFlowSource(source: 'admin' | 'merchant'): void {
   }
 }
 
-export function consumeOAuthFlowSource(): 'admin' | 'merchant' | null {
+export function consumeOAuthFlowSource(): 'admin' | 'merchant' | 'customer' | null {
   if (typeof window === 'undefined') return null;
   let raw: string | null = null;
   try {
@@ -524,7 +734,7 @@ export function consumeOAuthFlowSource(): 'admin' | 'merchant' | null {
     ) {
       return null;
     }
-    if (parsed.source === 'admin' || parsed.source === 'merchant') {
+    if (parsed.source === 'admin' || parsed.source === 'merchant' || parsed.source === 'customer') {
       return parsed.source;
     }
     return null;
@@ -645,6 +855,9 @@ export async function checkGoogleOAuthProviderStatus(): Promise<{
 
 export interface SignInWithGoogleOptions {
   isAdminFlow?: boolean;
+  isCustomerFlow?: boolean;
+  subdomain?: string;
+  returnPath?: string;
   nextPath?: string;
   skipWindowRedirect?: boolean;
 }
@@ -689,10 +902,27 @@ export async function signInWithGoogle(
     const redirectTo = customRedirectTo || `${origin}/auth/callback`;
 
     if (options?.isAdminFlow) {
+      clearMerchantOAuthIntentStorage();
+      clearCustomerOAuthIntentStorage();
+      clearCustomerPortalSessionActive();
       setAdminOAuthIntent(options.nextPath || '/admin');
+    } else if (options?.isCustomerFlow) {
+      clearAdminOAuthIntentStorage();
+      clearMerchantOAuthIntentStorage();
+      setCustomerOAuthIntent(
+        options.subdomain || '',
+        options.returnPath || (options.subdomain ? `/s/${options.subdomain}?portal=account` : '/')
+      );
     } else {
       clearAdminOAuthIntentStorage();
-      setOAuthFlowSource('merchant');
+      clearCustomerOAuthIntentStorage();
+      clearCustomerPortalSessionActive();
+      if (options?.nextPath && isSafeInternalRedirectPath(options.nextPath)) {
+        setMerchantOAuthIntent(options.nextPath);
+      } else {
+        clearMerchantOAuthIntentStorage();
+        setOAuthFlowSource('merchant');
+      }
     }
 
     const queryParams: Record<string, string> = options?.isAdminFlow
@@ -4628,6 +4858,8 @@ function mapRowToOrder(row: RawOrderRow): Order {
   const rawItems = Array.isArray(row.items) ? row.items : [];
   const extractedMeta = extractOrderMetadataFromItems(rawItems);
 
+  const discountFromMeta = Number(extractedMeta?.discountTotal) || 0;
+
   return {
     id: row.id,
     storeId: row.store_id,
@@ -4635,12 +4867,16 @@ function mapRowToOrder(row: RawOrderRow): Order {
     customerName: row.customer_name,
     customerEmail: row.customer_email || '',
     customerPhone: row.customer_phone,
+    customerAuthUserId: extractedMeta?.customerAuthUserId || undefined,
     items: rawItems,
     subtotal: subtotal || Math.max(0, total - deliveryFee + derivedDiscount),
     total,
     deliveryFee,
-    discount: derivedDiscount,
+    discount: discountFromMeta || derivedDiscount,
     status: row.status || 'pending',
+    statusHistory: Array.isArray(extractedMeta?.statusHistory)
+      ? extractedMeta.statusHistory
+      : undefined,
     paymentStatus: row.payment_status || 'pending',
     paymentMethod: allowedMethod,
     shippingAddress: row.address || '',
@@ -4651,6 +4887,7 @@ function mapRowToOrder(row: RawOrderRow): Order {
     notes: extractedMeta?.orderNotes || undefined,
     websiteId: extractedMeta?.websiteId || undefined,
     websiteSubdomain: extractedMeta?.websiteSubdomain || extractedMeta?.subdomain || undefined,
+    merchantBrandingSnapshot: extractedMeta?.merchantBrandingSnapshot || undefined,
     courierName: row.courier_name || undefined,
     trackingCode: row.tracking_code || undefined,
     source: row.source || undefined,
@@ -4667,12 +4904,26 @@ export async function submitPublicWebsiteOrderInDb(
   availableStock?: number;
 }> {
   try {
+    const requestHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    };
+    if (isSupabaseConfigured && supabase) {
+      try {
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+        if (session?.access_token) {
+          requestHeaders.Authorization = `Bearer ${session.access_token}`;
+        }
+      } catch {
+        // Proceed as guest if session lookup fails
+      }
+    }
+
     const response = await fetch('/api/public-order', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
+      headers: requestHeaders,
       cache: 'no-store',
       body: JSON.stringify(input),
     });
@@ -4729,19 +4980,24 @@ export async function submitPublicWebsiteOrderInDb(
     }
 
     const srv = body.order;
+    const srvMeta = Array.isArray(srv.items) ? extractOrderMetadataFromItems(srv.items) : undefined;
     const mappedOrder: Order = {
       id: srv.id,
       orderNumber: srv.orderNumber || srv.order_number,
       customerName: srv.customerName || srv.customer_name,
       customerEmail: srv.customerEmail || srv.customer_email || '',
       customerPhone: srv.customerPhone || srv.customer_phone,
+      customerAuthUserId: (srv as any).customerAuthUserId || srvMeta?.customerAuthUserId || undefined,
       items: Array.isArray(srv.items) ? srv.items : [],
       subtotal: Number(srv.subtotal) || 0,
       total: Number(srv.total) || 0,
       deliveryFee:
         srv.deliveryFee !== undefined ? Number(srv.deliveryFee) : Number(srv.delivery_charge) || 0,
-      discount: 0,
+      discount: Number((srv as any).discount ?? srvMeta?.discountTotal) || 0,
       status: (srv.status as OrderStatus) || 'pending',
+      statusHistory: Array.isArray((srv as any).statusHistory)
+        ? (srv as any).statusHistory
+        : srvMeta?.statusHistory,
       paymentStatus: (srv.paymentStatus as PaymentStatus) || srv.payment_status || 'pending',
       paymentMethod:
         srv.paymentMethod === 'bKash' ||
@@ -4758,6 +5014,8 @@ export async function submitPublicWebsiteOrderInDb(
       notes: srv.notes || undefined,
       websiteId: srv.websiteId || undefined,
       websiteSubdomain: srv.websiteSubdomain || undefined,
+      merchantBrandingSnapshot:
+        (srv as any).merchantBrandingSnapshot || srvMeta?.merchantBrandingSnapshot || undefined,
       source: srv.source || undefined,
       createdAt: srv.createdAt || srv.created_at || new Date().toISOString(),
     };
@@ -4963,6 +5221,7 @@ export async function updateOrderInDb(
     paymentStatus: PaymentStatus;
     courierName: string;
     trackingCode: string;
+    items: OrderItem[];
   }>
 ): Promise<{ data: Order | null; error: Error | null }> {
   if (!isSupabaseConfigured || !supabase || !UUID_REGEX.test(orderId)) {
@@ -4981,6 +5240,7 @@ export async function updateOrderInDb(
     }
     if (updates.courierName !== undefined) payload.courier_name = updates.courierName;
     if (updates.trackingCode !== undefined) payload.tracking_code = updates.trackingCode;
+    if (updates.items !== undefined) payload.items = updates.items;
 
     const { data, error } = await supabase
       .from('orders')

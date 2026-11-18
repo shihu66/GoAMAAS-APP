@@ -29,6 +29,7 @@ import { Modal } from '../../components/ui/Modal';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { StatusBadge } from '../../components/ui/StatusBadge';
 import { TableSkeleton } from '../../components/ui/Skeleton';
+import { MerchantOrderInvoice } from '../../components/website/MerchantOrderInvoice';
 
 const DELIVERY_METHOD_LABELS: Record<string, string> = {
   inside_dhaka: 'Inside Dhaka Courier',
@@ -59,6 +60,8 @@ export const OrdersPage: React.FC = () => {
     updateOrderTracking,
     addOrder,
     products,
+    stores,
+    subscribedWebsites,
     showToast,
   } = useApp();
   const { lang, t } = useLanguage();
@@ -319,10 +322,6 @@ export const OrdersPage: React.FC = () => {
       );
     }
     setIsTrackingModalOpen(false);
-  };
-
-  const printInvoice = () => {
-    window.print();
   };
 
   return (
@@ -1216,123 +1215,15 @@ export const OrdersPage: React.FC = () => {
         </Modal>
       )}
 
-      {/* 2. Print-Friendly Invoice Modal */}
-      {selectedOrder && (
-        <Modal
-          isOpen={isInvoiceModalOpen}
+      {/* 2. Merchant-Branded Print-Friendly Invoice Modal */}
+      {selectedOrder && isInvoiceModalOpen && (
+        <MerchantOrderInvoice
+          order={selectedOrder}
+          websites={subscribedWebsites}
+          stores={stores}
+          lang={lang === 'bn' ? 'bn' : 'en'}
           onClose={() => setIsInvoiceModalOpen(false)}
-          title={`Customer Invoice — ${selectedOrder.orderNumber}`}
-          maxWidth="2xl"
-        >
-          <div className="p-6 bg-white text-slate-900 space-y-6 print:p-0">
-            <div className="flex justify-between items-start border-b pb-4">
-              <div>
-                <h2 className="text-xl font-bold tracking-tight">GoAMAAS Order Invoice</h2>
-                <p className="text-xs text-slate-500">Customer Purchase Receipt</p>
-                <p className="text-xs text-slate-500 mt-1 font-mono">
-                  Order #{selectedOrder.orderNumber}
-                </p>
-              </div>
-              <div className="text-right text-xs">
-                <span className="font-mono font-bold text-sm block">AMAAS COMMERCE</span>
-                <span className="text-slate-500">
-                  Date: {new Date(selectedOrder.createdAt).toLocaleDateString()}
-                </span>
-                <span className="block text-emerald-600 font-semibold uppercase mt-1">
-                  Payment: {selectedOrder.paymentStatus} ({selectedOrder.paymentMethod})
-                </span>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4 text-xs">
-              <div>
-                <span className="font-bold text-slate-600 uppercase text-[10px] block">
-                  Deliver To:
-                </span>
-                <p className="font-bold">{selectedOrder.customerName}</p>
-                <p>{selectedOrder.shippingAddress}</p>
-                <p>
-                  {selectedOrder.deliveryArea ? `${selectedOrder.deliveryArea}, ` : ''}
-                  {selectedOrder.city}
-                </p>
-                <p className="font-mono">{selectedOrder.customerPhone}</p>
-              </div>
-              <div className="text-right">
-                <span className="font-bold text-slate-600 uppercase text-[10px] block">
-                  Fulfillment:
-                </span>
-                <p className="font-semibold">
-                  {selectedOrder.courierName || 'Standard Courier Delivery'}
-                </p>
-                {selectedOrder.trackingCode && (
-                  <p className="font-mono text-blue-600">Tracking: {selectedOrder.trackingCode}</p>
-                )}
-              </div>
-            </div>
-
-            <table className="w-full text-left text-xs border">
-              <thead className="bg-slate-50 border-b">
-                <tr>
-                  <th className="p-2.5">Item Description</th>
-                  <th className="p-2.5 font-mono">SKU</th>
-                  <th className="p-2.5 text-right font-mono">Unit Price</th>
-                  <th className="p-2.5 text-right font-mono">Qty</th>
-                  <th className="p-2.5 text-right font-mono">Total</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y">
-                {selectedOrder.items.map((it, i) => (
-                  <tr key={i}>
-                    <td className="p-2.5 font-medium">{it.name}</td>
-                    <td className="p-2.5 font-mono text-slate-500">{it.sku || '—'}</td>
-                    <td className="p-2.5 text-right font-mono tabular-nums">
-                      ৳{it.price.toLocaleString()}
-                    </td>
-                    <td className="p-2.5 text-right font-mono tabular-nums">{it.quantity}</td>
-                    <td className="p-2.5 text-right font-mono font-bold tabular-nums">
-                      ৳{(it.price * it.quantity).toLocaleString()}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-
-            <div className="flex justify-end text-xs">
-              <div className="w-56 space-y-1">
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Delivery Fee:</span>
-                  <span className="font-mono tabular-nums">৳{selectedOrder.deliveryFee}</span>
-                </div>
-                <div className="flex justify-between font-bold text-sm pt-2 border-t">
-                  <span>Grand Total:</span>
-                  <span className="font-mono tabular-nums text-blue-600">
-                    ৳{selectedOrder.total.toLocaleString()}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <div className="border-t pt-4 text-center text-[10px] text-slate-400">
-              Thank you for your purchase!
-            </div>
-
-            <div className="flex justify-end gap-2 pt-2 print:hidden">
-              <button
-                onClick={() => setIsInvoiceModalOpen(false)}
-                className="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-xs text-slate-700 cursor-pointer"
-              >
-                Close
-              </button>
-              <button
-                onClick={printInvoice}
-                className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs flex items-center gap-1.5 cursor-pointer"
-              >
-                <Printer className="w-3.5 h-3.5" />
-                <span>Print Document</span>
-              </button>
-            </div>
-          </div>
-        </Modal>
+        />
       )}
 
       {/* 3. Assign Courier Tracking Modal */}

@@ -1,25 +1,42 @@
 import React, { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, useSearchParams, Link, useNavigate } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
 import { SubscribedWebsite } from '../../types';
-import { validateSubdomainFormat } from '../../lib/supabase';
+import {
+  supabase,
+  isSupabaseConfigured,
+  validateSubdomainFormat,
+  isTenantSubdomainHost,
+  getMainAppOrigin,
+} from '../../lib/supabase';
 import {
   isWebsiteSubscriptionExpired,
   isWebsiteTrulyLive,
 } from '../../lib/paymentWorkflow';
 import { WebsitePreviewRenderer } from '../../components/website/WebsitePreviewRenderer';
+import { CustomerPortalTab } from '../../components/website/CustomerPortalModal';
 import { Globe, ArrowLeft, Loader2, Sparkles } from 'lucide-react';
 
 export const PublicTenantWebsitePage: React.FC = () => {
   const { subdomain: paramSubdomain } = useParams<{ subdomain?: string }>();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const {
+    user,
     subscribedWebsites,
     resolvePublicWebsite,
     submitPublicCustomerOrder,
     submitPublicCustomerInquiry,
+    loginAsCustomerWithGoogle,
+    transitionCustomerToMerchantOnboarding,
+    logout,
   } = useApp();
   const [loading, setLoading] = useState(true);
   const [site, setSite] = useState<SubscribedWebsite | null>(null);
+  const [accessToken, setAccessToken] = useState<string | null>(null);
+
+  const initialPortalParam = searchParams.get('portal');
+  const initialOrderParam = searchParams.get('order');
 
   // Determine subdomain from URL param or actual window hostname (e.g. businessname.amaas.xyz or businessname.localhost)
   const resolvedSubdomain = (() => {
@@ -38,6 +55,31 @@ export const PublicTenantWebsitePage: React.FC = () => {
     }
     return null;
   })();
+
+  // Track current Supabase JWT access token for authenticated customer portal API calls
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase || !user?.id) {
+      setAccessToken(null);
+      return;
+    }
+    let cancelled = false;
+    supabase.auth.getSession().then(({ data }) => {
+      if (!cancelled) {
+        setAccessToken(data.session?.access_token || null);
+      }
+    });
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_evt, session) => {
+      if (!cancelled) {
+        setAccessToken(session?.access_token || null);
+      }
+    });
+    return () => {
+      cancelled = true;
+      subscription.unsubscribe();
+    };
+  }, [user?.id]);
 
   const resolvePublicWebsiteRef = React.useRef(resolvePublicWebsite);
   resolvePublicWebsiteRef.current = resolvePublicWebsite;
@@ -79,6 +121,39 @@ export const PublicTenantWebsitePage: React.FC = () => {
       cancelled = true;
     };
   }, [resolvedSubdomain, subscribedWebsites]);
+
+  const handleCustomerGoogleSignIn = async (tab?: CustomerPortalTab | 'cart') => {
+    const sub = site?.subdomain || resolvedSubdomain || '';
+    const targetTab = tab || 'account';
+    const isTenantHost =
+      typeof window !== 'undefined' &&
+      ((window.location.hostname.toLowerCase().endsWith('.amaas.xyz') &&
+        window.location.hostname.toLowerCase() !== 'amaas.xyz') ||
+        (window.location.hostname.toLowerCase().endsWith('.localhost') &&
+          window.location.hostname.toLowerCase() !== 'localhost'));
+    const returnPath = isTenantHost
+      ? `/?portal=${encodeURIComponent(targetTab)}`
+      : `/s/${encodeURIComponent(sub)}?portal=${encodeURIComponent(targetTab)}`;
+    await loginAsCustomerWithGoogle(sub, returnPath);
+  };
+
+  const handleStartBusinessFromCustomerPortal = async () => {
+    if (!user || !accessToken) {
+      if (isTenantSubdomainHost()) {
+        window.location.assign(`${getMainAppOrigin()}/login?redirect=%2Fonboarding`);
+      } else {
+        navigate('/login?redirect=%2Fonboarding');
+      }
+      return;
+    }
+
+    const result = await transitionCustomerToMerchantOnboarding();
+    if (result.status === 'cross_origin' && result.redirectUrl) {
+      window.location.assign(result.redirectUrl);
+      return;
+    }
+    navigate(result.targetPath);
+  };
 
   if (loading) {
     return (
@@ -147,6 +222,21 @@ export const PublicTenantWebsitePage: React.FC = () => {
         viewMode="desktop"
         isPublicView={true}
         showGraceBanner={false}
+        customerUser={user}
+        customerAccessToken={accessToken}
+        initialPortalParam={initialPortalParam}
+        initialOrderParam={initialOrderParam}
+        onCustomerGoogleSignIn={handleCustomerGoogleSignIn}
+        onCustomerSignOut={async () => {
+          await logout();
+          if (searchParams.has('portal') || searchParams.has('order')) {
+            const nextParams = new URLSearchParams(searchParams);
+            nextParams.delete('portal');
+            nextParams.delete('order');
+            setSearchParams(nextParams, { replace: true });
+          }
+        }}
+        onStartCustomerBusiness={handleStartBusinessFromCustomerPortal}
         onSubmitOrder={submitPublicCustomerOrder}
         onSubmitInquiry={submitPublicCustomerInquiry}
         onOrderPlaced={() => void refreshResolvedSite()}

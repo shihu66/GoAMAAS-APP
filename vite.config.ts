@@ -8,6 +8,7 @@ import resolveTenantHandler from './api/resolve-tenant.ts';
 import verifyPricingHandler from './api/verify-pricing.ts';
 import publicOrderHandler from './api/public-order.ts';
 import publicInquiryHandler from './api/public-inquiry.ts';
+import customerPortalHandler from './api/customer-portal.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -123,6 +124,22 @@ export default defineConfig(({ mode }) => {
                 ok: false,
                 code: 'INTERNAL_INQUIRY_ERROR',
                 error: 'Server error processing public website inquiry.',
+              })
+            );
+          }
+          return;
+        }
+        if (pathname === '/api/customer-portal') {
+          try {
+            await customerPortalHandler(req, res);
+          } catch {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(
+              JSON.stringify({
+                ok: false,
+                code: 'INTERNAL_PORTAL_ERROR',
+                error: 'Server error handling customer portal request.',
               })
             );
           }

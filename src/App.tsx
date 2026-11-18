@@ -102,9 +102,12 @@ export default function App() {
       <AppProvider>
         <BrowserRouter>
           {isTenantSubdomain && (
+          <OAuthCallbackRedirectBridge>
           <Routes>
+            <Route path="/auth/callback" element={<AuthCallbackPage />} />
             <Route path="*" element={<PublicTenantWebsitePage />} />
           </Routes>
+          </OAuthCallbackRedirectBridge>
         )}
         {!isTenantSubdomain && (
         <OAuthCallbackRedirectBridge>

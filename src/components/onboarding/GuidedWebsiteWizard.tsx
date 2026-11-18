@@ -8,7 +8,7 @@ import {
 } from '../../data/websiteTemplates';
 import { WebsitePreviewRenderer } from '../website/WebsitePreviewRenderer';
 import { validateAndNormalizeGoogleMapsUrl } from '../../lib/storefrontSync';
-import { compressImageFileToCompactDataUrl } from '../../lib/supabase';
+import { compressImageFileToCompactDataUrl, isSupabaseConfigured, UUID_REGEX } from '../../lib/supabase';
 import {
   SubscribedWebsite,
   WebsiteProductItem,
@@ -60,7 +60,9 @@ export const GuidedWebsiteWizard: React.FC<GuidedWebsiteWizardProps> = ({
 }) => {
   const {
     user,
+    stores,
     activeStore,
+    onboarding,
     websiteSubscriptionPlan,
     createSubscribedWebsite,
     addProduct,
@@ -72,10 +74,15 @@ export const GuidedWebsiteWizard: React.FC<GuidedWebsiteWizardProps> = ({
   const { t, lang } = useLanguage();
   const ob = t.workspace.onboarding;
 
+  const hasExistingStore = stores.length > 0 && UUID_REGEX.test(activeStore?.id || '');
+  const initialBusinessName = hasExistingStore
+    ? activeStore.name
+    : onboarding.businessName?.trim() || '';
+
   const [step, setStep] = useState<1 | 2 | 3 | 4 | 5 | 6>(1);
 
   // Step 1: Business Info
-  const [businessName, setBusinessName] = useState(activeStore?.name || '');
+  const [businessName, setBusinessName] = useState(initialBusinessName);
   const [selectedCategory, setSelectedCategory] = useState<CategorySpec>(CATEGORY_SPECS[0]);
   const [shortDescription, setShortDescription] = useState('');
 
@@ -109,7 +116,7 @@ export const GuidedWebsiteWizard: React.FC<GuidedWebsiteWizardProps> = ({
 
   // Step 5: Subdomain
   const [subdomain, setSubdomain] = useState(() =>
-    sanitizeSubdomainSlug(activeStore?.name || '')
+    sanitizeSubdomainSlug(initialBusinessName)
   );
   const [subdomainEdited, setSubdomainEdited] = useState(false);
   const [isCheckingSubdomain, setIsCheckingSubdomain] = useState(false);
@@ -505,27 +512,36 @@ export const GuidedWebsiteWizard: React.FC<GuidedWebsiteWizardProps> = ({
         themeSettings: previewWebsiteObject.themeSettings,
       });
 
-      // Also sync any manually entered products into the merchant catalog
-      for (let i = 0; i < validEnteredItems.length; i++) {
-        const it = validEnteredItems[i];
-        const numericPrice = Number(String(it.price).replace(/[^0-9.]/g, '')) || 0;
-        const numericStock = Number(it.stock) || 10;
-        await addProduct({
-          name: it.name.trim(),
-          sku: `SKU-${clean.toUpperCase().slice(0, 4)}-${101 + i}`,
-          category: selectedCategory.label,
-          price: numericPrice,
-          costPrice: Math.round(numericPrice * 0.6),
-          stock: numericStock,
-          lowStockThreshold: 5,
-          status: 'active',
-          description: it.description.trim() || `${it.name.trim()} available at ${businessName.trim()}`,
-          image: it.imageUrl,
-          websiteId: created.id,
-          isVisible: true,
-          sortOrder: i,
-          isFeatured: i === 0,
-        });
+      // Only invoke addProduct if createSubscribedWebsite did not already persist DB products
+      const alreadyCreatedInDb =
+        isSupabaseConfigured &&
+        Boolean(
+          created.servicesOrProducts?.some((sp) =>
+            UUID_REGEX.test(String(sp.productId || ''))
+          )
+        );
+      if (!alreadyCreatedInDb) {
+        for (let i = 0; i < validEnteredItems.length; i++) {
+          const it = validEnteredItems[i];
+          const numericPrice = Number(String(it.price).replace(/[^0-9.]/g, '')) || 0;
+          const numericStock = Number(it.stock) || 10;
+          await addProduct({
+            name: it.name.trim(),
+            sku: `SKU-${clean.toUpperCase().slice(0, 4)}-${101 + i}`,
+            category: selectedCategory.label,
+            price: numericPrice,
+            costPrice: Math.round(numericPrice * 0.6),
+            stock: numericStock,
+            lowStockThreshold: 5,
+            status: 'active',
+            description: it.description.trim() || `${it.name.trim()} available at ${businessName.trim()}`,
+            image: it.imageUrl,
+            websiteId: created.id,
+            isVisible: true,
+            sortOrder: i,
+            isFeatured: i === 0,
+          });
+        }
       }
 
       showToast(

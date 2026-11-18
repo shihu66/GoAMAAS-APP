@@ -76,7 +76,7 @@ export const LoginPage: React.FC = () => {
     }
 
     setGoogleLoading(true);
-    const { error } = await loginWithGoogle();
+    const { error } = await loginWithGoogle(undefined, { nextPath: redirectTarget });
     if (error) {
       setGoogleLoading(false);
       setErrorMessage(error.message);

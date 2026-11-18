@@ -7,9 +7,14 @@ import {
   getUserProfile,
   upsertUserProfile,
   consumeAdminOAuthIntent,
+  consumeMerchantOAuthIntent,
+  consumeCustomerOAuthIntent,
   consumeOAuthFlowSource,
+  isSafeInternalRedirectPath,
   getInitialOAuthUrlSnapshot,
   hydrateImplicitHashSessionIfNeeded,
+  setCustomerPortalSessionActive,
+  clearCustomerPortalSessionActive,
   signOutFromSupabase,
 } from '../../lib/supabase';
 import {
@@ -91,6 +96,7 @@ export const AuthCallbackPage: React.FC = () => {
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isAdminFlowState, setIsAdminFlowState] = useState<boolean>(false);
+  const [customerReturnTarget, setCustomerReturnTarget] = useState<string | null>(null);
 
   useEffect(() => {
     if (processedRef.current) return;
@@ -99,13 +105,21 @@ export const AuthCallbackPage: React.FC = () => {
     const initialSnapshot = getInitialOAuthUrlSnapshot();
     const nextFromQuery = (searchParams.get('next') || '').trim();
     const nextFromIntent = consumeAdminOAuthIntent();
+    const merchantNextIntent = consumeMerchantOAuthIntent();
+    const customerIntent = consumeCustomerOAuthIntent();
     const oauthFlowSource = consumeOAuthFlowSource();
     const effectiveNext = nextFromQuery || nextFromIntent || '';
     const isAdminAuthFlow =
       oauthFlowSource === 'admin' ||
       effectiveNext === '/admin' ||
       effectiveNext.startsWith('/admin/');
+    const isCustomerAuthFlow =
+      !isAdminAuthFlow &&
+      (oauthFlowSource === 'customer' || Boolean(customerIntent));
     setIsAdminFlowState(isAdminAuthFlow);
+    if (isCustomerAuthFlow && customerIntent?.returnPath) {
+      setCustomerReturnTarget(customerIntent.returnPath);
+    }
 
     const hashParams =
       typeof window !== 'undefined' && window.location.hash
@@ -327,24 +341,73 @@ export const AuthCallbackPage: React.FC = () => {
 
         // Dedicated /admin OAuth flow: strictly verify official email + email_verified + server-side admin role
         if (isAdminAuthFlow) {
+          clearCustomerPortalSessionActive();
           await handleVerifiedAdminFlow(effectiveNext || '/admin');
           return;
         }
 
+        // Dedicated Storefront Customer OAuth flow:
+        // Strictly scoped to the merchant storefront customer portal; NEVER grants merchant/admin dashboard access,
+        // NEVER modifies profiles.role, and NEVER triggers merchant store provisioning.
+        if (isCustomerAuthFlow) {
+          const userMeta = authenticatedUser.user_metadata || {};
+          const fullName =
+            userMeta.full_name ||
+            userMeta.name ||
+            authenticatedUser.email?.split('@')[0] ||
+            'Customer';
+          const email = authenticatedUser.email || '';
+          const avatarUrl =
+            typeof userMeta.avatar_url === 'string' && userMeta.avatar_url
+              ? userMeta.avatar_url
+              : typeof userMeta.picture === 'string' && userMeta.picture
+              ? userMeta.picture
+              : undefined;
+          const userId = authenticatedUser.id;
+          const targetReturn =
+            customerIntent?.returnPath ||
+            (customerIntent?.subdomain
+              ? `/s/${encodeURIComponent(customerIntent.subdomain)}?portal=account`
+              : '/');
+
+          setCustomerPortalSessionActive(userId, customerIntent?.subdomain || '');
+          setAuthenticatedUser(
+            {
+              id: userId,
+              name: fullName,
+              email,
+              avatar: avatarUrl,
+              role: 'merchant',
+              storeId: '',
+            },
+            { scope: 'customer' }
+          );
+
+          setStatus('success');
+          showToast(`Signed in as ${fullName}`, 'success');
+          setTimeout(() => {
+            navigate(targetReturn, { replace: true });
+          }, 250);
+          return;
+        }
+
         // Fallback recovery when browser/PWA storage boundary cleared OAuth intent during admin sign-in:
-        // If no explicit merchant intent was set and the Google account matches the authorized admin email,
+        // If no explicit merchant/customer intent was set and the Google account matches the authorized admin email,
         // enforce the full server-side admin verification (including reporting missing_admin_role separately).
         if (
           !nextFromQuery &&
+          !isCustomerAuthFlow &&
           oauthFlowSource !== 'merchant' &&
           isAuthorizedAdminEmail(authenticatedUser.email)
         ) {
+          clearCustomerPortalSessionActive();
           setIsAdminFlowState(true);
           await handleVerifiedAdminFlow('/admin');
           return;
         }
 
-        // Standard Customer / Merchant OAuth Flow
+        // Standard Merchant OAuth Flow
+        clearCustomerPortalSessionActive();
         const userMeta = authenticatedUser.user_metadata || {};
         const fullName =
           userMeta.full_name ||
@@ -352,6 +415,12 @@ export const AuthCallbackPage: React.FC = () => {
           authenticatedUser.email?.split('@')[0] ||
           'Merchant';
         const email = authenticatedUser.email || '';
+        const avatarUrl =
+          typeof userMeta.avatar_url === 'string' && userMeta.avatar_url
+            ? userMeta.avatar_url
+            : typeof userMeta.picture === 'string' && userMeta.picture
+            ? userMeta.picture
+            : undefined;
         const userId = authenticatedUser.id;
 
         const { profile } = await getUserProfile(userId);
@@ -384,20 +453,32 @@ export const AuthCallbackPage: React.FC = () => {
           }
         }
 
-        setAuthenticatedUser({
-          id: userId,
-          name: fullName,
-          email,
-          role: verifiedRole,
-          storeId: resolvedStoreId,
-        });
+        setAuthenticatedUser(
+          {
+            id: userId,
+            name: fullName,
+            email,
+            avatar: avatarUrl || profile?.avatar_url || undefined,
+            role: verifiedRole,
+            storeId: resolvedStoreId,
+          },
+          { scope: verifiedRole === 'admin' ? 'admin' : 'merchant' }
+        );
 
         setStatus('success');
         showToast(`Welcome, ${fullName}!`, 'success');
 
         setTimeout(() => {
           if (onboardingCompleted) {
-            navigate('/dashboard', { replace: true });
+            if (
+              merchantNextIntent &&
+              isSafeInternalRedirectPath(merchantNextIntent) &&
+              (merchantNextIntent !== '/onboarding' || !resolvedStoreId)
+            ) {
+              navigate(merchantNextIntent, { replace: true });
+            } else {
+              navigate('/dashboard', { replace: true });
+            }
           } else {
             navigate('/onboarding', { replace: true });
           }
@@ -477,10 +558,16 @@ export const AuthCallbackPage: React.FC = () => {
             </div>
             <div className="pt-2">
               <Link
-                to={isAdminFlowState ? '/admin/login' : '/login'}
+                to={
+                  isAdminFlowState
+                    ? '/admin/login'
+                    : customerReturnTarget || '/login'
+                }
                 className="w-full py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs transition-colors flex items-center justify-center gap-2"
               >
-                <span>Return to Sign In</span>
+                <span>
+                  {customerReturnTarget ? 'Return to Storefront' : 'Return to Sign In'}
+                </span>
                 <ArrowRight className="w-3.5 h-3.5" />
               </Link>
             </div>

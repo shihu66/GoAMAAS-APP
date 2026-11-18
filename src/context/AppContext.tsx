@@ -146,7 +146,17 @@ import {
   deleteWebsiteAssetFromStorage,
   submitPublicWebsiteOrderInDb,
   submitPublicWebsiteInquiryInDb,
+  clearCustomerPortalSessionActive,
+  clearCustomerOAuthIntentStorage,
+  isCustomerPortalSessionActive,
+  isOnStorefrontCustomerPath,
+  isTenantSubdomainHost,
+  getMainAppOrigin,
 } from '../lib/supabase';
+import {
+  appendStatusHistoryEntry,
+  buildOrderStatusHistory,
+} from '../lib/customerPortal';
 import {
   PublicCustomerInquiryInput,
   PublicCustomerOrderInput,
@@ -200,10 +210,22 @@ interface AppContextType {
   // Real Supabase Auth & User
   user: User | null;
   role: UserRole;
+  sessionScope: 'merchant' | 'admin' | 'customer';
+  isCustomerSessionOnly: boolean;
   isAuthenticated: boolean;
   isAuthLoading: boolean;
-  setAuthenticatedUser: (user: User) => void;
-  loginWithGoogle: (customRedirectTo?: string) => Promise<{ error: Error | null }>;
+  setAuthenticatedUser: (user: User, options?: { scope?: 'merchant' | 'admin' | 'customer' }) => void;
+  loginWithGoogle: (
+    customRedirectTo?: string,
+    options?: { nextPath?: string }
+  ) => Promise<{ error: Error | null }>;
+  loginAsCustomerWithGoogle: (subdomain: string, returnPath: string) => Promise<{ error: Error | null }>;
+  transitionCustomerToMerchantOnboarding: () => Promise<{
+    status: 'ready' | 'needs_auth' | 'cross_origin';
+    targetPath: string;
+    redirectUrl?: string;
+  }>;
+  hydrateMerchantWorkspace: () => Promise<void>;
   loginWithEmail: (email: string, password: string) => Promise<{ user: User | null; error: Error | null }>;
   registerWithEmail: (name: string, email: string, password: string, businessName: string) => Promise<{ user: User | null; needsEmailConfirmation: boolean; error: Error | null }>;
   requestPasswordReset: (email: string) => Promise<{ error: Error | null }>;
@@ -489,6 +511,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return stored ? { ...stored, role: 'merchant' } : null;
   });
   const [role, setRole] = useState<UserRole>('merchant');
+  const [sessionScope, setSessionScope] = useState<'merchant' | 'admin' | 'customer'>(() =>
+    isCustomerPortalSessionActive() ? 'customer' : 'merchant'
+  );
+  const sessionScopeRef = useRef<'merchant' | 'admin' | 'customer'>(sessionScope);
   const verifiedAdminUserIdRef = useRef<string | null>(null);
 
   // Real Stores (persisted in public.stores when Supabase is configured)
@@ -561,9 +587,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }
 
   // Helper to construct User object strictly from Supabase auth user + authoritative public.profiles row
-  const buildUserFromSession = async (sessionUser: any): Promise<User> => {
+  const buildUserFromSession = async (
+    sessionUser: any,
+    overrideScope?: 'merchant' | 'admin' | 'customer'
+  ): Promise<{ parsedUser: User; resolvedScope: 'merchant' | 'admin' | 'customer' }> => {
     const userId = sessionUser.id;
     const meta = sessionUser.user_metadata || {};
+    const avatarUrl =
+      typeof meta.avatar_url === 'string' && meta.avatar_url
+        ? meta.avatar_url
+        : typeof meta.picture === 'string' && meta.picture
+        ? meta.picture
+        : undefined;
+
+    const isCustomerContext =
+      overrideScope === 'customer' ||
+      (overrideScope === undefined && isCustomerPortalSessionActive(userId));
+
+    if (isCustomerContext) {
+      const custName =
+        (typeof meta.full_name === 'string' && meta.full_name.trim()) ||
+        (typeof meta.name === 'string' && meta.name.trim()) ||
+        sessionUser.email?.split('@')[0] ||
+        'Customer';
+      return {
+        parsedUser: {
+          id: userId,
+          name: custName,
+          email: sessionUser.email || '',
+          avatar: avatarUrl,
+          role: 'merchant',
+          storeId: '',
+        },
+        resolvedScope: 'customer',
+      };
+    }
+
     let { profile } = await getUserProfile(userId);
 
     const fullName =
@@ -618,21 +677,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const verifiedStoreId =
       profile?.store_id && UUID_REGEX.test(profile.store_id) ? profile.store_id : '';
 
-    if (profile?.onboarding_completed || meta.onboarding_completed) {
-      setOnboarding((prev) => ({ ...prev, completed: true }));
-    }
+    const dbOnboardingCompleted = Boolean(profile?.onboarding_completed || meta.onboarding_completed);
+    setOnboarding((prev) =>
+      prev.completed === dbOnboardingCompleted
+        ? prev
+        : { ...prev, completed: dbOnboardingCompleted }
+    );
 
     return {
-      id: userId,
-      name: fullName,
-      email: sessionUser.email || '',
-      role: verifiedRole,
-      storeId: verifiedStoreId,
+      parsedUser: {
+        id: userId,
+        name: fullName,
+        email: sessionUser.email || '',
+        avatar: avatarUrl || profile?.avatar_url || undefined,
+        role: verifiedRole,
+        storeId: verifiedStoreId,
+      },
+      resolvedScope: verifiedRole === 'admin' ? 'admin' : 'merchant',
     };
   };
 
   const clearAuthenticatedSessionState = useCallback(() => {
     verifiedAdminUserIdRef.current = null;
+    clearCustomerPortalSessionActive();
+    sessionScopeRef.current = 'merchant';
+    setSessionScope('merchant');
     storeCoordinatorRef.current?.resetForUnauthenticated();
     setUser(null);
     setRole('merchant');
@@ -661,6 +730,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setIsPricingCatalogLoading(false);
       setPricingCatalogError(null);
       setCurrentPlan('starter');
+      setOnboarding(INITIAL_ONBOARDING);
     }
     try {
       localStorage.removeItem('goamaas_user');
@@ -676,26 +746,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       localStorage.removeItem('goamaas_subscribedWebsites');
       localStorage.removeItem('goamaas_payment_requests');
       localStorage.removeItem('goamaas_service_trials');
+      if (isSupabaseConfigured) {
+        localStorage.removeItem('goamaas_onboarding');
+      }
     } catch {}
   }, []);
 
-  const applyStableUserState = useCallback((parsedUser: User) => {
-    storeCoordinatorRef.current?.syncUserSession(parsedUser.id);
-    setUser((prev) => {
-      if (
-        prev &&
-        prev.id === parsedUser.id &&
-        prev.name === parsedUser.name &&
-        prev.email === parsedUser.email &&
-        prev.role === parsedUser.role &&
-        prev.storeId === parsedUser.storeId
-      ) {
-        return prev;
+  const applyStableUserState = useCallback(
+    (parsedUser: User, nextScope: 'merchant' | 'admin' | 'customer' = 'merchant') => {
+      sessionScopeRef.current = nextScope;
+      setSessionScope(nextScope);
+      if (nextScope !== 'customer') {
+        storeCoordinatorRef.current?.syncUserSession(parsedUser.id);
       }
-      return parsedUser;
-    });
-    setRole((prevRole) => (prevRole === parsedUser.role ? prevRole : parsedUser.role));
-  }, []);
+      setUser((prev) => {
+        if (
+          prev &&
+          prev.id === parsedUser.id &&
+          prev.name === parsedUser.name &&
+          prev.email === parsedUser.email &&
+          prev.avatar === parsedUser.avatar &&
+          prev.role === parsedUser.role &&
+          prev.storeId === parsedUser.storeId
+        ) {
+          return prev;
+        }
+        return parsedUser;
+      });
+      setRole((prevRole) => (prevRole === parsedUser.role ? prevRole : parsedUser.role));
+    },
+    []
+  );
 
   // Supabase Auth Listener & Persistent Session Initialization
   useEffect(() => {
@@ -708,8 +789,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
           if (session?.user) {
             try {
-              const parsedUser = await buildUserFromSession(session.user);
-              applyStableUserState(parsedUser);
+              const { parsedUser, resolvedScope } = await buildUserFromSession(session.user);
+              applyStableUserState(parsedUser, resolvedScope);
             } catch (e) {
               console.error('Failed to parse Supabase session user:', e);
               clearAuthenticatedSessionState();
@@ -732,8 +813,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           clearAuthenticatedSessionState();
         } else if (session?.user) {
           try {
-            const parsedUser = await buildUserFromSession(session.user);
-            applyStableUserState(parsedUser);
+            const { parsedUser, resolvedScope } = await buildUserFromSession(session.user);
+            applyStableUserState(parsedUser, resolvedScope);
           } catch (e) {
             console.error('Error during onAuthStateChange user sync:', e);
           }
@@ -762,34 +843,72 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [user]);
 
-  const setAuthenticatedUser = useCallback((newUser: User) => {
-    const safeRole: UserRole =
-      isSupabaseConfigured &&
-      newUser.role === 'admin' &&
-      isAuthorizedAdminEmail(newUser.email)
-        ? 'admin'
-        : 'merchant';
-    if (safeRole === 'admin') {
-      verifiedAdminUserIdRef.current = newUser.id;
-    }
-    setUser((prev) => {
-      if (
-        prev &&
-        prev.id === newUser.id &&
-        prev.name === newUser.name &&
-        prev.email === newUser.email &&
-        prev.role === safeRole &&
-        prev.storeId === newUser.storeId
-      ) {
-        return prev;
+  const setAuthenticatedUser = useCallback(
+    (newUser: User, options?: { scope?: 'merchant' | 'admin' | 'customer' }) => {
+      const nextScope =
+        options?.scope ||
+        (isCustomerPortalSessionActive(newUser.id)
+          ? 'customer'
+          : newUser.role === 'admin'
+          ? 'admin'
+          : 'merchant');
+      const safeRole: UserRole =
+        nextScope !== 'customer' &&
+        isSupabaseConfigured &&
+        newUser.role === 'admin' &&
+        isAuthorizedAdminEmail(newUser.email)
+          ? 'admin'
+          : 'merchant';
+      sessionScopeRef.current = nextScope;
+      setSessionScope(nextScope);
+      if (safeRole === 'admin') {
+        verifiedAdminUserIdRef.current = newUser.id;
       }
-      return { ...newUser, role: safeRole };
-    });
-    setRole((prevRole) => (prevRole === safeRole ? prevRole : safeRole));
-  }, []);
+      setUser((prev) => {
+        if (
+          prev &&
+          prev.id === newUser.id &&
+          prev.name === newUser.name &&
+          prev.email === newUser.email &&
+          prev.avatar === newUser.avatar &&
+          prev.role === safeRole &&
+          prev.storeId === newUser.storeId
+        ) {
+          return prev;
+        }
+        return { ...newUser, role: safeRole };
+      });
+      setRole((prevRole) => (prevRole === safeRole ? prevRole : safeRole));
+    },
+    []
+  );
 
-  const loginWithGoogle = async (customRedirectTo?: string): Promise<{ error: Error | null }> => {
-    const result = await signInWithGoogle(customRedirectTo);
+  const loginWithGoogle = async (
+    customRedirectTo?: string,
+    options?: { nextPath?: string }
+  ): Promise<{ error: Error | null }> => {
+    clearCustomerPortalSessionActive();
+    clearCustomerOAuthIntentStorage();
+    const result = await signInWithGoogle(
+      customRedirectTo,
+      options?.nextPath ? { nextPath: options.nextPath } : undefined
+    );
+    if (result.error) {
+      showToast(result.error.message, 'error');
+      return { error: result.error };
+    }
+    return { error: null };
+  };
+
+  const loginAsCustomerWithGoogle = async (
+    subdomain: string,
+    returnPath: string
+  ): Promise<{ error: Error | null }> => {
+    const result = await signInWithGoogle(undefined, {
+      isCustomerFlow: true,
+      subdomain,
+      returnPath,
+    });
     if (result.error) {
       showToast(result.error.message, 'error');
       return { error: result.error };
@@ -805,6 +924,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { user: null, error: new Error(errorMsg) };
     }
 
+    clearCustomerPortalSessionActive();
+    clearCustomerOAuthIntentStorage();
+
     const { user: authUser, error } = await signInWithEmail(email, password);
     if (error || !authUser) {
       const err = error || new Error('Authentication failed');
@@ -812,9 +934,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { user: null, error: err };
     }
 
-    const parsedUser = await buildUserFromSession(authUser);
-    setUser(parsedUser);
-    setRole(parsedUser.role);
+    const { parsedUser, resolvedScope } = await buildUserFromSession(authUser, 'merchant');
+    applyStableUserState(parsedUser, resolvedScope);
     showToast(`Welcome back, ${parsedUser.name}!`, 'success');
     return { user: parsedUser, error: null };
   };
@@ -831,6 +952,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       showToast(errorMsg, 'error');
       return { user: null, needsEmailConfirmation: false, error: new Error(errorMsg) };
     }
+
+    clearCustomerPortalSessionActive();
+    clearCustomerOAuthIntentStorage();
 
     const { user: authUser, needsEmailConfirmation, error } = await signUpWithEmail(
       name,
@@ -1017,6 +1141,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
 
+      if (
+        sessionScopeRef.current === 'customer' ||
+        isCustomerPortalSessionActive(currentUser?.id) ||
+        isOnStorefrontCustomerPath()
+      ) {
+        return {
+          stores: [],
+          status: 'idle',
+          reason: 'unauthenticated',
+          error: 'Customer storefront sessions cannot initialize merchant store workspaces.',
+        };
+      }
+
       if (!currentUser?.id) {
         return {
           stores: [],
@@ -1063,16 +1200,119 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
+    if (
+      sessionScope === 'customer' ||
+      isCustomerPortalSessionActive(user.id) ||
+      isOnStorefrontCustomerPath()
+    ) {
+      return;
+    }
+
+    const pathname = typeof window !== 'undefined' ? window.location.pathname : '/';
     const isOnAdminRoute =
-      typeof window !== 'undefined' &&
-      (window.location.pathname === '/admin' ||
-        window.location.pathname.startsWith('/admin/') ||
-        Boolean(peekAdminOAuthIntent()));
+      pathname === '/admin' ||
+      pathname.startsWith('/admin/') ||
+      Boolean(peekAdminOAuthIntent());
+    const isOnPreOnboardingOrAuthRoute =
+      pathname === '/onboarding' ||
+      pathname.startsWith('/onboarding/') ||
+      pathname === '/auth/callback' ||
+      pathname === '/login' ||
+      pathname === '/register';
 
     void resolveMerchantStoreForAction(onboardingRef.current.businessName, {
-      allowAutoProvision: user.role !== 'admin' && !isOnAdminRoute,
+      allowAutoProvision:
+        user.role !== 'admin' && !isOnAdminRoute && !isOnPreOnboardingOrAuthRoute,
     });
-  }, [isAuthLoading, user?.id, user?.role, user?.storeId, resolveMerchantStoreForAction]);
+  }, [isAuthLoading, user?.id, user?.role, user?.storeId, sessionScope, resolveMerchantStoreForAction]);
+
+  const hydrateMerchantWorkspace = useCallback(async (): Promise<void> => {
+    if (!isSupabaseConfigured || !supabase || !userRef.current?.id) return;
+    if (
+      sessionScopeRef.current === 'customer' ||
+      isCustomerPortalSessionActive(userRef.current.id) ||
+      isOnStorefrontCustomerPath()
+    ) {
+      return;
+    }
+    const pathname = typeof window !== 'undefined' ? window.location.pathname : '/';
+    const isOnAdminRoute = pathname === '/admin' || pathname.startsWith('/admin/');
+    const isPreOnboardingRoute =
+      pathname === '/onboarding' || pathname.startsWith('/onboarding/');
+
+    await Promise.all([
+      resolveMerchantStoreForAction(onboardingRef.current.businessName, {
+        allowAutoProvision:
+          userRef.current.role !== 'admin' && !isOnAdminRoute && !isPreOnboardingRoute,
+      }),
+      (async () => {
+        const { data } = await fetchUserSubscribedWebsitesFromDb();
+        if (data) setSubscribedWebsites(data);
+      })(),
+    ]);
+  }, [resolveMerchantStoreForAction]);
+
+  const transitionCustomerToMerchantOnboarding = useCallback(async (): Promise<{
+    status: 'ready' | 'needs_auth' | 'cross_origin';
+    targetPath: string;
+    redirectUrl?: string;
+  }> => {
+    if (isTenantSubdomainHost()) {
+      const targetUrl = `${getMainAppOrigin()}/onboarding?from=customer_portal`;
+      return {
+        status: 'cross_origin',
+        targetPath: '/onboarding',
+        redirectUrl: targetUrl,
+      };
+    }
+
+    clearCustomerPortalSessionActive();
+    clearCustomerOAuthIntentStorage();
+
+    if (!isSupabaseConfigured || !supabase) {
+      sessionScopeRef.current = 'merchant';
+      setSessionScope('merchant');
+      const hasExistingStore = onboardingRef.current.completed && storesRef.current.length > 0;
+      return {
+        status: 'ready',
+        targetPath: hasExistingStore ? '/dashboard' : '/onboarding',
+      };
+    }
+
+    const authState = await ensureActiveSupabaseSession();
+    if (!authState.user) {
+      return {
+        status: 'needs_auth',
+        targetPath: '/login?redirect=%2Fonboarding',
+      };
+    }
+
+    const [{ parsedUser, resolvedScope }, { profile }] = await Promise.all([
+      buildUserFromSession(authState.user, 'merchant'),
+      getUserProfile(authState.user.id),
+    ]);
+    applyStableUserState(parsedUser, resolvedScope);
+
+    const storeResolution = await resolveMerchantStoreForAction(undefined, {
+      allowAutoProvision: false,
+      forceRefresh: true,
+    });
+
+    const { data: webData } = await fetchUserSubscribedWebsitesFromDb();
+    if (webData) {
+      setSubscribedWebsites(webData);
+    }
+
+    const meta = authState.user.user_metadata || {};
+    const isAlreadyOnboarded =
+      Boolean(profile?.onboarding_completed || meta.onboarding_completed) &&
+      storeResolution.stores.length > 0;
+
+    return {
+      status: 'ready',
+      targetPath: isAlreadyOnboarded ? '/dashboard' : '/onboarding',
+    };
+  }, [applyStableUserState, resolveMerchantStoreForAction]);
 
   const retryStoreInitialization = useCallback(async (): Promise<string | undefined> => {
     const res = await resolveMerchantStoreForAction(onboardingRef.current.businessName, {
@@ -1225,6 +1465,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
       if (authError) {
         console.error('Failed to update auth metadata onboarding status:', authError);
+      }
+
+      if (validStoreId) {
+        setUser((prev) => (prev ? { ...prev, storeId: validStoreId! } : prev));
       }
     } else {
       updateActiveStore(storePatch);
@@ -2541,6 +2785,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
+  const broadcastOrderTrackerUpdate = useCallback(
+    (orderId: string) => {
+      if (!isSupabaseConfigured || !supabase || !UUID_REGEX.test(orderId)) return;
+      try {
+        const sbClient = supabase;
+        const ch = sbClient.channel(`storefront-order-${orderId}`);
+        ch.subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            void ch
+              .send({
+                type: 'broadcast',
+                event: 'order_status_updated',
+                payload: {
+                  orderId,
+                  updatedAt: new Date().toISOString(),
+                },
+              })
+              .finally(() => {
+                setTimeout(() => {
+                  void sbClient.removeChannel(ch);
+                }, 400);
+              });
+          }
+        });
+      } catch {
+        // Non-fatal broadcast failure
+      }
+    },
+    []
+  );
+
   const updateOrderStatus = (id: string, status: OrderStatus) => {
     const targetOrder = orders.find((o) => o.id === id);
     if (!targetOrder || targetOrder.status === status) return;
@@ -2561,8 +2836,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     }
 
+    const nextStatusHistory = appendStatusHistoryEntry(
+      buildOrderStatusHistory(targetOrder),
+      status,
+      targetOrder.createdAt
+    );
+    const nextItems =
+      Array.isArray(targetOrder.items) && targetOrder.items.length > 0
+        ? targetOrder.items.map((item, idx) =>
+            idx === 0
+              ? {
+                  ...item,
+                  orderMeta: {
+                    ...(item.orderMeta || {}),
+                    statusHistory: nextStatusHistory,
+                  },
+                }
+              : item
+          )
+        : targetOrder.items;
+
     const prevSnapshot = orders;
-    setOrders((prev) => prev.map((o) => (o.id === id ? { ...o, status } : o)));
+    setOrders((prev) =>
+      prev.map((o) =>
+        o.id === id
+          ? {
+              ...o,
+              status,
+              statusHistory: nextStatusHistory,
+              items: nextItems,
+            }
+          : o
+      )
+    );
 
     if (isSupabaseConfigured && user?.id && UUID_REGEX.test(id)) {
       void (async () => {
@@ -2595,13 +2901,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         }
 
-        const { data, error } = await updateOrderInDb(id, { status });
+        const { data, error } = await updateOrderInDb(id, {
+          status,
+          ...(Array.isArray(nextItems) && nextItems.length > 0 ? { items: nextItems } : {}),
+        });
         if (error || !data) {
           setOrders(prevSnapshot);
           showToast(error?.message || 'Failed to update order status', 'error');
           return;
         }
         setOrders((prev) => prev.map((o) => (o.id === id ? data : o)));
+        broadcastOrderTrackerUpdate(id);
 
         if (isNowCancelling || isUncancelling) {
           for (const item of targetOrder.items) {
@@ -2704,6 +3014,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           return;
         }
         setOrders((prev) => prev.map((o) => (o.id === id ? data : o)));
+        broadcastOrderTrackerUpdate(id);
         showToast(`Payment status updated to "${paymentStatus}"`, 'info');
       })();
       return;
@@ -2716,6 +3027,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const targetOrder = orders.find((o) => o.id === id);
     const nextStatus: OrderStatus =
       targetOrder?.status === 'pending' ? 'shipped' : targetOrder?.status || 'shipped';
+    const nextStatusHistory =
+      targetOrder && nextStatus !== targetOrder.status
+        ? appendStatusHistoryEntry(
+            buildOrderStatusHistory(targetOrder),
+            nextStatus,
+            targetOrder.createdAt
+          )
+        : targetOrder?.statusHistory;
+    const nextItems =
+      targetOrder &&
+      nextStatus !== targetOrder.status &&
+      Array.isArray(targetOrder.items) &&
+      targetOrder.items.length > 0
+        ? targetOrder.items.map((item, idx) =>
+            idx === 0
+              ? {
+                  ...item,
+                  orderMeta: {
+                    ...(item.orderMeta || {}),
+                    statusHistory: nextStatusHistory,
+                  },
+                }
+              : item
+          )
+        : undefined;
     const prevSnapshot = orders;
 
     setOrders((prev) =>
@@ -2726,6 +3062,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               courierName,
               trackingCode,
               status: nextStatus,
+              ...(nextStatusHistory ? { statusHistory: nextStatusHistory } : {}),
+              ...(nextItems ? { items: nextItems } : {}),
             }
           : o
       )
@@ -2737,6 +3075,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           courierName,
           trackingCode,
           status: nextStatus,
+          ...(nextItems ? { items: nextItems } : {}),
         });
         if (error || !data) {
           setOrders(prevSnapshot);
@@ -2744,6 +3083,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           return;
         }
         setOrders((prev) => prev.map((o) => (o.id === id ? data : o)));
+        broadcastOrderTrackerUpdate(id);
         showToast(`Consignment ${trackingCode} assigned to ${courierName}`, 'success');
       })();
       return;
@@ -2908,9 +3248,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   useEffect(() => {
     if (!isAuthLoading && user?.id && isSupabaseConfigured) {
+      if (
+        sessionScope === 'customer' ||
+        isCustomerPortalSessionActive(user.id) ||
+        isOnStorefrontCustomerPath()
+      ) {
+        return;
+      }
       void refreshSubscribedWebsites();
     }
-  }, [isAuthLoading, user?.id, refreshSubscribedWebsites]);
+  }, [isAuthLoading, user?.id, sessionScope, refreshSubscribedWebsites]);
 
   const checkSubdomainAvailabilityAsync = async (
     rawSubdomain: string,
@@ -5691,7 +6038,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Synchronize store-scoped tables across ALL merchant stores & websites (products, orders, customers, inventory_movements, store_members)
   useEffect(() => {
-    if (!isSupabaseConfigured || !supabase || !user?.id || merchantStoreIds.length === 0) {
+    if (
+      !isSupabaseConfigured ||
+      !supabase ||
+      !user?.id ||
+      merchantStoreIds.length === 0 ||
+      sessionScope === 'customer' ||
+      isCustomerPortalSessionActive(user.id) ||
+      isOnStorefrontCustomerPath()
+    ) {
       return;
     }
 
@@ -5743,7 +6098,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, activeStore.id, merchantStoreIdsKey, applyIncomingOrdersAndDetectNew]);
+  }, [user?.id, activeStore.id, merchantStoreIdsKey, sessionScope, applyIncomingOrdersAndDetectNew]);
 
   // Keep local product metadata merged whenever website catalog metadata refreshes
   useEffect(() => {
@@ -5755,7 +6110,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Multi-store Realtime order listener + resilient adaptive polling fallback + focus/visibility re-sync
   useEffect(() => {
-    if (!isSupabaseConfigured || !supabase || !user?.id || merchantStoreIds.length === 0) {
+    if (
+      !isSupabaseConfigured ||
+      !supabase ||
+      !user?.id ||
+      merchantStoreIds.length === 0 ||
+      sessionScope === 'customer' ||
+      isCustomerPortalSessionActive(user.id) ||
+      isOnStorefrontCustomerPath()
+    ) {
       setIsOrderRealtimeLive(false);
       return;
     }
@@ -5832,11 +6195,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       setIsOrderRealtimeLive(false);
     };
-  }, [user?.id, merchantStoreIds, isOrderRealtimeLive, refreshStoreOrders]);
+  }, [user?.id, merchantStoreIds, sessionScope, isOrderRealtimeLive, refreshStoreOrders]);
 
   // Synchronize user-scoped support tickets & authoritative service pricing catalog
   useEffect(() => {
-    if (!isSupabaseConfigured || !supabase || !user?.id) {
+    if (
+      !isSupabaseConfigured ||
+      !supabase ||
+      !user?.id ||
+      sessionScope === 'customer' ||
+      isCustomerPortalSessionActive(user.id) ||
+      isOnStorefrontCustomerPath()
+    ) {
       return;
     }
 
@@ -5856,7 +6226,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => {
       cancelled = true;
     };
-  }, [user?.id, refreshServicePricingCatalog]);
+  }, [user?.id, sessionScope, refreshServicePricingCatalog]);
 
   // Notifications
   const [notifications, setNotifications] = useState<AppNotification[]>(() =>
@@ -5917,10 +6287,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         toggleTheme,
         user,
         role,
+        sessionScope,
+        isCustomerSessionOnly: sessionScope === 'customer',
         isAuthenticated: !!user,
         isAuthLoading,
         setAuthenticatedUser,
         loginWithGoogle,
+        loginAsCustomerWithGoogle,
+        transitionCustomerToMerchantOnboarding,
+        hydrateMerchantWorkspace,
         loginWithEmail,
         registerWithEmail,
         requestPasswordReset,

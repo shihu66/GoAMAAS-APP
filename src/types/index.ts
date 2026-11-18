@@ -43,6 +43,55 @@ export interface Product {
   isFeatured?: boolean;
 }
 
+export interface OrderStatusHistoryEntry {
+  status: OrderStatus;
+  at: string;
+  note?: string;
+}
+
+export interface MerchantBrandingSnapshot {
+  businessName: string;
+  logoUrl?: string;
+  brandColor?: string;
+  phone?: string;
+  email?: string;
+  address?: string;
+  websiteUrl?: string;
+  subdomain?: string;
+}
+
+export interface CustomerSavedAddress {
+  id: string;
+  label: string;
+  recipientName: string;
+  phone: string;
+  shippingAddress: string;
+  city: string;
+  deliveryArea?: string;
+  isDefault?: boolean;
+}
+
+export interface CustomerPortalProfile {
+  authUserId: string;
+  fullName: string;
+  email: string;
+  avatarUrl?: string;
+  phone: string;
+  savedAddresses: CustomerSavedAddress[];
+}
+
+export interface CustomerCartLineItem {
+  productId: string;
+  name: string;
+  sku?: string;
+  unitPrice: number;
+  originalPrice?: number;
+  quantity: number;
+  maxStock?: number;
+  imageUrl?: string;
+  category?: string;
+}
+
 export interface OrderItemMetadata {
   orderSource?: 'public_website' | 'manual_dashboard';
   websiteId?: string;
@@ -52,6 +101,10 @@ export interface OrderItemMetadata {
   deliveryMethod?: string;
   deliveryInstructions?: string;
   orderNotes?: string;
+  customerAuthUserId?: string;
+  discountTotal?: number;
+  statusHistory?: OrderStatusHistoryEntry[];
+  merchantBrandingSnapshot?: MerchantBrandingSnapshot;
 }
 
 export interface OrderItem {
@@ -76,12 +129,14 @@ export interface Order {
   customerName: string;
   customerEmail: string;
   customerPhone: string;
+  customerAuthUserId?: string;
   items: OrderItem[];
   subtotal?: number;
   total: number;
   deliveryFee: number;
   discount: number;
   status: OrderStatus;
+  statusHistory?: OrderStatusHistoryEntry[];
   paymentStatus: PaymentStatus;
   paymentMethod: 'Cash on Delivery (COD)' | 'bKash' | 'Nagad' | 'Card' | 'Bank Transfer';
   shippingAddress: string;
@@ -95,6 +150,7 @@ export interface Order {
   source?: string;
   websiteId?: string;
   websiteSubdomain?: string;
+  merchantBrandingSnapshot?: MerchantBrandingSnapshot;
   createdAt: string;
 }
 

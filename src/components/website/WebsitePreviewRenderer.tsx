@@ -1,7 +1,10 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
+  CustomerCartLineItem,
+  CustomerPortalProfile,
   Order,
   SubscribedWebsite,
+  User,
   WebsiteSectionConfig,
   WebsiteProductItem,
 } from '../../types';
@@ -9,10 +12,30 @@ import {
   PublicCustomerInquiryInput,
   PublicCustomerOrderInput,
   buildGoogleMapsDirectionsUrl,
-  validateAndNormalizeGoogleMapsUrl,
   validatePublicCustomerInquiryInput,
   validatePublicCustomerOrderInput,
 } from '../../lib/storefrontSync';
+import {
+  clearScopedCartFromStorage,
+  fetchCustomerCartFromPortal,
+  fetchCustomerProfileFromPortal,
+  getCustomerCartStorageKey,
+  getGuestCartStorageKey,
+  getSavedStorefrontLang,
+  loadScopedCartFromStorage,
+  mergeGuestAndCustomerCart,
+  reconcileConflictingCart,
+  resolveStoreScopeKey,
+  revalidateCartAgainstCatalog,
+  saveScopedCartToStorage,
+  saveStorefrontLang,
+  StorefrontLang,
+  syncCustomerCartToPortal,
+  updateCustomerProfileInPortal,
+} from '../../lib/customerPortal';
+import { CustomerPortalModal, CustomerPortalTab } from './CustomerPortalModal';
+import { MerchantOrderInvoice } from './MerchantOrderInvoice';
+import { CustomerOrderTracker } from './CustomerOrderTracker';
 import {
   Globe,
   Phone,
@@ -24,7 +47,6 @@ import {
   CheckCircle2,
   ChevronRight,
   ChevronDown,
-  Shield,
   Facebook,
   Instagram,
   Twitter,
@@ -33,6 +55,7 @@ import {
   ExternalLink,
   Quote,
   ShoppingBag,
+  Shield,
   Plus,
   Minus,
   Trash2,
@@ -41,6 +64,11 @@ import {
   Loader2,
   Package,
   Eye,
+  FileText,
+  User as UserIcon,
+  LogOut,
+  Menu,
+  Languages,
 } from 'lucide-react';
 
 const PRODUCT_UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -60,17 +88,7 @@ const BD_DISTRICTS = [
   'Bogura',
 ];
 
-interface CartLineItem {
-  productId: string;
-  name: string;
-  sku?: string;
-  unitPrice: number;
-  originalPrice?: number;
-  quantity: number;
-  maxStock?: number;
-  imageUrl?: string;
-  category?: string;
-}
+type CartLineItem = CustomerCartLineItem;
 
 export type WebsitePreviewEditorSectionTarget =
   | 'business'
@@ -85,6 +103,13 @@ interface WebsitePreviewRendererProps {
   viewMode?: 'desktop' | 'mobile';
   showGraceBanner?: boolean;
   isPublicView?: boolean;
+  customerUser?: User | null;
+  customerAccessToken?: string | null;
+  initialPortalParam?: string | null;
+  initialOrderParam?: string | null;
+  onCustomerGoogleSignIn?: (tab?: CustomerPortalTab) => Promise<void>;
+  onCustomerSignOut?: () => Promise<void>;
+  onStartCustomerBusiness?: () => Promise<void>;
   onSelectSection?: (section: WebsitePreviewEditorSectionTarget) => void;
   onSubmitOrder?: (
     input: PublicCustomerOrderInput
@@ -206,11 +231,71 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
   viewMode = 'desktop',
   showGraceBanner = false,
   isPublicView = false,
+  customerUser = null,
+  customerAccessToken = null,
+  initialPortalParam = null,
+  initialOrderParam = null,
+  onCustomerGoogleSignIn,
+  onCustomerSignOut,
+  onStartCustomerBusiness,
   onSelectSection,
   onSubmitOrder,
   onSubmitInquiry,
   onOrderPlaced,
 }) => {
+  const [lang, setLang] = useState<StorefrontLang>(() =>
+    isPublicView ? getSavedStorefrontLang() : 'en'
+  );
+  const toggleLang = () => {
+    const next: StorefrontLang = lang === 'en' ? 'bn' : 'en';
+    setLang(next);
+    saveStorefrontLang(next);
+  };
+
+  // Customer Portal, Invoice & Order Tracking Overlays
+  const [isPortalOpen, setIsPortalOpen] = useState(false);
+  const [portalTab, setPortalTab] = useState<CustomerPortalTab>('orders');
+  const [portalOrderQuery, setPortalOrderQuery] = useState<string | null>(null);
+  const [customerProfile, setCustomerProfile] = useState<CustomerPortalProfile | null>(null);
+  const [saveCheckoutAddress, setSaveCheckoutAddress] = useState(false);
+  const [invoiceOrder, setInvoiceOrder] = useState<Order | null>(null);
+  const [trackingOrderModal, setTrackingOrderModal] = useState<Order | null>(null);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
+  const accountMenuRef = useRef<HTMLDivElement | null>(null);
+  const isCustomerAuthenticated = Boolean(customerUser && customerAccessToken);
+
+  useEffect(() => {
+    if (!isAccountMenuOpen) return;
+    const handlePointerDown = (event: MouseEvent | TouchEvent) => {
+      if (
+        accountMenuRef.current &&
+        !accountMenuRef.current.contains(event.target as Node)
+      ) {
+        setIsAccountMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsAccountMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('touchstart', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('touchstart', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isAccountMenuOpen]);
+
+  useEffect(() => {
+    if (!isCustomerAuthenticated) {
+      setIsAccountMenuOpen(false);
+    }
+  }, [isCustomerAuthenticated]);
+
   const [inquiryName, setInquiryName] = useState('');
   const [inquiryContact, setInquiryContact] = useState('');
   const [inquiryEmail, setInquiryEmail] = useState('');
@@ -241,8 +326,17 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
   const [detailProduct, setDetailProduct] = useState<WebsiteProductItem | null>(null);
   const [cardQuantities, setCardQuantities] = useState<Record<string, number>>({});
 
-  // Order Bag & Customer Checkout State
-  const [cart, setCart] = useState<CartLineItem[]>([]);
+  // Order Bag & Customer Checkout State (initialized with scoped persistence on public storefronts)
+  const storeScopeKey = useMemo(() => resolveStoreScopeKey(site), [site]);
+  const [cart, setCart] = useState<CartLineItem[]>(() => {
+    if (!isPublicView) return [];
+    const guestKey = getGuestCartStorageKey(resolveStoreScopeKey(site));
+    return loadScopedCartFromStorage(guestKey);
+  });
+  const cartHydratedCustomerRef = useRef<string | null>(null);
+  const cartVersionRef = useRef<number>(0);
+  const lastSyncedCartRef = useRef<CartLineItem[]>([]);
+  const suppressNextCartSyncRef = useRef<boolean>(false);
   const [customerName, setCustomerName] = useState('');
   const [customerPhone, setCustomerPhone] = useState('');
   const [customerEmail, setCustomerEmail] = useState('');
@@ -388,30 +482,221 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
   useEffect(() => {
     setCart((prev) => {
       if (prev.length === 0) return prev;
-      const next: CartLineItem[] = [];
-      for (const line of prev) {
-        const match = visibleProducts.find(
-          (vp) => (vp.productId || vp.id) === line.productId
-        );
-        if (!match) continue;
-        const avail =
-          typeof match.stock === 'number' && Number.isFinite(match.stock)
-            ? Math.max(0, Math.trunc(match.stock))
-            : undefined;
-        if (match.inStock === false || (avail !== undefined && avail <= 0)) continue;
-        const unitPrice = parseItemNumericPrice(match);
-        next.push({
-          ...line,
-          name: match.name,
-          unitPrice,
-          originalPrice: parseItemOriginalPrice(match, unitPrice),
-          maxStock: avail,
-          quantity: avail !== undefined ? Math.min(line.quantity, avail) : line.quantity,
-        });
-      }
-      return next;
+      return revalidateCartAgainstCatalog(prev, visibleProducts);
     });
   }, [visibleProducts]);
+
+  // Scoped customer cart hydration & safe guest-to-customer merge after Google Sign-In
+  useEffect(() => {
+    if (!isPublicView) return;
+    const guestKey = getGuestCartStorageKey(storeScopeKey);
+
+    if (!customerUser?.id || !customerAccessToken) {
+      cartHydratedCustomerRef.current = null;
+      cartVersionRef.current = 0;
+      lastSyncedCartRef.current = [];
+      setCustomerProfile(null);
+      const guestItems = loadScopedCartFromStorage(guestKey);
+      if (guestItems.length > 0 && visibleProducts.length > 0) {
+        setCart(revalidateCartAgainstCatalog(guestItems, visibleProducts));
+      }
+      return;
+    }
+
+    const sessionPair = `${storeScopeKey}:${customerUser.id}`;
+    if (cartHydratedCustomerRef.current === sessionPair) return;
+    cartHydratedCustomerRef.current = sessionPair;
+
+    let cancelled = false;
+    (async () => {
+      const custKey = getCustomerCartStorageKey(storeScopeKey, customerUser.id);
+      const guestItems = loadScopedCartFromStorage(guestKey);
+      const cachedCustItems = loadScopedCartFromStorage(custKey);
+
+      const [remoteCartRes, profRes] = await Promise.all([
+        fetchCustomerCartFromPortal(subdomain, customerAccessToken),
+        fetchCustomerProfileFromPortal(subdomain, customerAccessToken),
+      ]);
+      if (cancelled) return;
+
+      const remoteSucceeded = !remoteCartRes.error;
+      if (remoteSucceeded) {
+        cartVersionRef.current = remoteCartRes.version;
+        lastSyncedCartRef.current = remoteCartRes.items;
+      }
+
+      const baseCustomerItems = remoteSucceeded
+        ? remoteCartRes.items
+        : cachedCustItems;
+
+      const merged = mergeGuestAndCustomerCart(
+        guestItems,
+        baseCustomerItems,
+        visibleProducts
+      );
+      suppressNextCartSyncRef.current = guestItems.length === 0;
+      setCart(merged);
+      saveScopedCartToStorage(custKey, merged);
+      if (guestItems.length > 0) {
+        clearScopedCartFromStorage(guestKey);
+        const pushRes = await syncCustomerCartToPortal(
+          subdomain,
+          customerAccessToken,
+          merged.map((m) => ({ productId: m.productId, quantity: m.quantity })),
+          remoteSucceeded ? remoteCartRes.version : undefined
+        );
+        if (!cancelled && !pushRes.error) {
+          if (pushRes.conflict) {
+            const reconciled = reconcileConflictingCart({
+              baseItems: remoteCartRes.items,
+              localItems: merged,
+              serverItems: pushRes.items,
+              liveCatalog: visibleProducts,
+            });
+            cartVersionRef.current = pushRes.version;
+            lastSyncedCartRef.current = pushRes.items;
+            suppressNextCartSyncRef.current = true;
+            setCart(reconciled);
+            saveScopedCartToStorage(custKey, reconciled);
+            const retryRes = await syncCustomerCartToPortal(
+              subdomain,
+              customerAccessToken,
+              reconciled.map((m) => ({ productId: m.productId, quantity: m.quantity })),
+              pushRes.version
+            );
+            if (!retryRes.error && !retryRes.conflict) {
+              cartVersionRef.current = retryRes.version;
+              lastSyncedCartRef.current = retryRes.items;
+            }
+          } else {
+            cartVersionRef.current = pushRes.version;
+            lastSyncedCartRef.current = pushRes.items;
+          }
+        }
+      }
+
+      if (profRes.profile) {
+        setCustomerProfile(profRes.profile);
+        setCustomerName((prev) => prev || profRes.profile?.fullName || customerUser.name || '');
+        setCustomerPhone((prev) => prev || profRes.profile?.phone || '');
+        setCustomerEmail((prev) => prev || profRes.profile?.email || customerUser.email || '');
+        const defaultAddr =
+          profRes.profile.savedAddresses.find((a) => a.isDefault) ||
+          profRes.profile.savedAddresses[0];
+        if (defaultAddr) {
+          setShippingAddress((prev) => prev || defaultAddr.shippingAddress);
+          setCity((prev) => (prev === 'Dhaka' && defaultAddr.city ? defaultAddr.city : prev));
+          setDeliveryArea((prev) => prev || defaultAddr.deliveryArea || '');
+        }
+      } else {
+        setCustomerName((prev) => prev || customerUser.name || '');
+        setCustomerEmail((prev) => prev || customerUser.email || '');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isPublicView, storeScopeKey, subdomain, customerUser?.id, customerUser?.name, customerUser?.email, customerAccessToken, visibleProducts]);
+
+  // Refresh cross-device cart when returning focus to this tab/device
+  useEffect(() => {
+    if (!isPublicView || !customerUser?.id || !customerAccessToken) return;
+    const custKey = getCustomerCartStorageKey(storeScopeKey, customerUser.id);
+    const refreshRemoteCart = async () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      const remoteRes = await fetchCustomerCartFromPortal(subdomain, customerAccessToken);
+      if (remoteRes.error) return;
+      if (remoteRes.version > cartVersionRef.current) {
+        const revalidated = revalidateCartAgainstCatalog(remoteRes.items, visibleProducts);
+        cartVersionRef.current = remoteRes.version;
+        lastSyncedCartRef.current = remoteRes.items;
+        suppressNextCartSyncRef.current = true;
+        setCart(revalidated);
+        saveScopedCartToStorage(custKey, revalidated);
+      }
+    };
+    window.addEventListener('focus', refreshRemoteCart);
+    document.addEventListener('visibilitychange', refreshRemoteCart);
+    return () => {
+      window.removeEventListener('focus', refreshRemoteCart);
+      document.removeEventListener('visibilitychange', refreshRemoteCart);
+    };
+  }, [isPublicView, storeScopeKey, subdomain, customerUser?.id, customerAccessToken, visibleProducts]);
+
+  // Persist cart changes locally (scoped per store & customer/guest) and sync with version check to portal API
+  useEffect(() => {
+    if (!isPublicView) return;
+    if (customerUser?.id && customerAccessToken) {
+      if (cartHydratedCustomerRef.current !== `${storeScopeKey}:${customerUser.id}`) {
+        return;
+      }
+      const custKey = getCustomerCartStorageKey(storeScopeKey, customerUser.id);
+      saveScopedCartToStorage(custKey, cart);
+      if (suppressNextCartSyncRef.current) {
+        suppressNextCartSyncRef.current = false;
+        return;
+      }
+      const snapshotCart = cart;
+      const timer = window.setTimeout(() => {
+        void (async () => {
+          const res = await syncCustomerCartToPortal(
+            subdomain,
+            customerAccessToken,
+            snapshotCart.map((c) => ({ productId: c.productId, quantity: c.quantity })),
+            cartVersionRef.current
+          );
+          if (res.error) return;
+          if (res.conflict) {
+            const reconciled = reconcileConflictingCart({
+              baseItems: lastSyncedCartRef.current,
+              localItems: snapshotCart,
+              serverItems: res.items,
+              liveCatalog: visibleProducts,
+            });
+            cartVersionRef.current = res.version;
+            lastSyncedCartRef.current = res.items;
+            suppressNextCartSyncRef.current = true;
+            setCart(reconciled);
+            saveScopedCartToStorage(custKey, reconciled);
+            const retryRes = await syncCustomerCartToPortal(
+              subdomain,
+              customerAccessToken,
+              reconciled.map((c) => ({ productId: c.productId, quantity: c.quantity })),
+              res.version
+            );
+            if (!retryRes.error && !retryRes.conflict) {
+              cartVersionRef.current = retryRes.version;
+              lastSyncedCartRef.current = retryRes.items;
+            }
+          } else {
+            cartVersionRef.current = res.version;
+            lastSyncedCartRef.current = res.items;
+          }
+        })();
+      }, 450);
+      return () => window.clearTimeout(timer);
+    }
+
+    const guestKey = getGuestCartStorageKey(storeScopeKey);
+    saveScopedCartToStorage(guestKey, cart);
+  }, [isPublicView, storeScopeKey, subdomain, customerUser?.id, customerAccessToken, cart, visibleProducts]);
+
+  // Handle post-OAuth or direct ?portal= URL entry on public storefront
+  useEffect(() => {
+    if (!isPublicView || !initialPortalParam) return;
+    if (initialPortalParam === 'account') {
+      setPortalTab('account');
+      setPortalOrderQuery(null);
+      setIsPortalOpen(true);
+    } else if (initialPortalParam === 'orders' || initialPortalParam === 'track') {
+      setPortalTab('orders');
+      setPortalOrderQuery(initialOrderParam || null);
+      setIsPortalOpen(true);
+    } else if (initialPortalParam === 'cart' || initialPortalParam === 'checkout') {
+      setTimeout(() => scrollToCheckout(), 150);
+    }
+  }, [isPublicView, initialPortalParam, initialOrderParam]);
 
   const orderableCatalogItems = useMemo(
     () =>
@@ -434,6 +719,17 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
   );
   const cartSubtotal = useMemo(
     () => cart.reduce((sum, line) => sum + line.unitPrice * line.quantity, 0),
+    [cart]
+  );
+  const cartSavings = useMemo(
+    () =>
+      cart.reduce((sum, line) => {
+        const diff =
+          line.originalPrice && line.originalPrice > line.unitPrice
+            ? line.originalPrice - line.unitPrice
+            : 0;
+        return sum + diff * line.quantity;
+      }, 0),
     [cart]
   );
   const deliveryCharge = useMemo(() => {
@@ -606,7 +902,38 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
       }
 
       setConfirmedOrder(result.order);
+      suppressNextCartSyncRef.current = true;
       setCart([]);
+      lastSyncedCartRef.current = [];
+      clearScopedCartFromStorage(getGuestCartStorageKey(storeScopeKey));
+      if (customerUser?.id) {
+        clearScopedCartFromStorage(getCustomerCartStorageKey(storeScopeKey, customerUser.id));
+        if (customerAccessToken) {
+          const cleared = await syncCustomerCartToPortal(subdomain, customerAccessToken, []);
+          if (!cleared.error) {
+            cartVersionRef.current = cleared.version;
+          }
+          if (saveCheckoutAddress && shippingAddress.trim()) {
+            const newAddr = {
+              id: `addr-${Date.now().toString(36)}`,
+              label: deliveryArea.trim() || city.trim() || 'Saved Address',
+              recipientName: customerName.trim(),
+              phone: customerPhone.trim(),
+              shippingAddress: shippingAddress.trim(),
+              city: city.trim() || 'Dhaka',
+              deliveryArea: deliveryArea.trim() || undefined,
+              isDefault: (customerProfile?.savedAddresses?.length || 0) === 0,
+            };
+            const existingAddrs = customerProfile?.savedAddresses || [];
+            const profRes = await updateCustomerProfileInPortal(subdomain, customerAccessToken, {
+              fullName: customerName.trim(),
+              phone: customerPhone.trim(),
+              savedAddresses: [...existingAddrs, newAddr],
+            });
+            if (profRes.profile) setCustomerProfile(profRes.profile);
+          }
+        }
+      }
       setOrderNotes('');
       setDeliveryInstructions('');
       setCheckoutAttemptId(createCheckoutAttemptId());
@@ -1748,15 +2075,42 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
 
                       <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                         <p className="text-xs text-slate-600">
-                          Save your reference number (<strong className="font-mono">#{confirmedOrder.orderNumber}</strong>) for delivery updates.
+                          {lang === 'bn' ? (
+                            <>
+                              আপনার অর্ডার নম্বর (<strong className="font-mono">#{confirmedOrder.orderNumber}</strong>) সংরক্ষণ করুন।
+                            </>
+                          ) : (
+                            <>
+                              Save your reference number (<strong className="font-mono">#{confirmedOrder.orderNumber}</strong>) for delivery updates.
+                            </>
+                          )}
                         </p>
-                        <button
-                          type="button"
-                          onClick={() => setConfirmedOrder(null)}
-                          className={`px-4 py-2 ${buttonRadiusClass} border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-800 cursor-pointer`}
-                        >
-                          Place Another Order
-                        </button>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setInvoiceOrder(confirmedOrder)}
+                            className={`px-3.5 py-2 ${buttonRadiusClass} border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-800 inline-flex items-center gap-1.5 cursor-pointer`}
+                          >
+                            <FileText className="w-3.5 h-3.5" />
+                            <span>{lang === 'bn' ? 'ইনভয়েস ডাউনলোড' : 'View / Download Invoice'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setTrackingOrderModal(confirmedOrder)}
+                            className={`px-3.5 py-2 ${buttonRadiusClass} text-white text-xs font-semibold hover:opacity-90 inline-flex items-center gap-1.5 cursor-pointer`}
+                            style={{ backgroundColor: brandColor }}
+                          >
+                            <Package className="w-3.5 h-3.5" />
+                            <span>{lang === 'bn' ? 'অর্ডার ট্র্যাক' : 'Track Order'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmedOrder(null)}
+                            className={`px-3.5 py-2 ${buttonRadiusClass} border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-800 cursor-pointer`}
+                          >
+                            {lang === 'bn' ? 'নতুন অর্ডার করুন' : 'Place Another Order'}
+                          </button>
+                        </div>
                       </div>
                     </div>
                   ) : (
@@ -1865,11 +2219,19 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
 
                         <div className="pt-3 border-t border-slate-200 space-y-1.5 text-xs">
                           <div className="flex justify-between text-slate-600">
-                            <span>Subtotal</span>
+                            <span>{lang === 'bn' ? 'সাবটোটাল' : 'Subtotal'}</span>
                             <span className="font-mono tabular-nums font-semibold">
                               ৳{cartSubtotal.toLocaleString()}
                             </span>
                           </div>
+                          {cartSavings > 0 && (
+                            <div className="flex justify-between text-emerald-700 font-medium">
+                              <span>{lang === 'bn' ? 'ডিসকাউন্ট সাশ্রয়' : 'Product Savings'}</span>
+                              <span className="font-mono tabular-nums">
+                                -৳{cartSavings.toLocaleString()}
+                              </span>
+                            </div>
+                          )}
                           <div className="flex justify-between text-slate-600">
                             <span>Delivery ({deliveryMethod})</span>
                             <span className="font-mono tabular-nums font-semibold">
@@ -1881,7 +2243,7 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                             </span>
                           </div>
                           <div className="pt-2 border-t border-slate-200 flex justify-between text-sm font-extrabold text-slate-900">
-                            <span>Total Payable</span>
+                            <span>{lang === 'bn' ? 'সর্বমোট মূল্য' : 'Total Payable'}</span>
                             <span className="font-mono tabular-nums" style={{ color: brandColor }}>
                               ৳{cartGrandTotal.toLocaleString()}
                             </span>
@@ -1891,9 +2253,47 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
 
                       {/* Customer Details & Delivery Form Column */}
                       <div className="lg:col-span-7 p-5 sm:p-6 rounded-2xl border border-slate-200 bg-white space-y-4 text-xs">
-                        <h4 className="text-sm font-bold text-slate-900">
-                          Customer &amp; Delivery Information
-                        </h4>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <h4 className="text-sm font-bold text-slate-900">
+                            {lang === 'bn' ? 'গ্রাহক ও ডেলিভারির তথ্য' : 'Customer & Delivery Information'}
+                          </h4>
+                          {isPublicView && !isCustomerAuthenticated && onCustomerGoogleSignIn && (
+                            <button
+                              type="button"
+                              onClick={() => void onCustomerGoogleSignIn('cart' as CustomerPortalTab)}
+                              className="px-2.5 py-1 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-[11px] font-semibold text-slate-700 inline-flex items-center gap-1.5 cursor-pointer"
+                            >
+                              <UserIcon className="w-3 h-3" />
+                              <span>{lang === 'bn' ? 'Google দিয়ে দ্রুত তথ্য পূরণ' : 'Sign in with Google'}</span>
+                            </button>
+                          )}
+                        </div>
+
+                        {isPublicView && isCustomerAuthenticated && customerProfile?.savedAddresses && customerProfile.savedAddresses.length > 0 && (
+                          <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+                            <span className="text-[11px] font-semibold text-slate-600 block">
+                              {lang === 'bn' ? 'সংরক্ষিত ঠিকানা থেকে বেছে নিন:' : 'Use a saved delivery address:'}
+                            </span>
+                            <div className="flex flex-wrap gap-1.5">
+                              {customerProfile.savedAddresses.map((addr) => (
+                                <button
+                                  key={addr.id}
+                                  type="button"
+                                  onClick={() => {
+                                    setCustomerName(addr.recipientName || customerName);
+                                    setCustomerPhone(addr.phone || customerPhone);
+                                    setShippingAddress(addr.shippingAddress);
+                                    handleCityChange(addr.city);
+                                    setDeliveryArea(addr.deliveryArea || '');
+                                  }}
+                                  className="px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:border-slate-500 text-[11px] font-semibold text-slate-800 cursor-pointer"
+                                >
+                                  {addr.label} · {addr.city}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                           <div>
@@ -2055,6 +2455,21 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                             />
                           </div>
                         </div>
+
+                        {isPublicView && customerUser && (
+                          <label className="inline-flex items-center gap-2 text-slate-700 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={saveCheckoutAddress}
+                              onChange={(e) => setSaveCheckoutAddress(e.target.checked)}
+                            />
+                            <span>
+                              {lang === 'bn'
+                                ? 'এই ডেলিভারি ঠিকানা আমার অ্যাকাউন্টে সেভ করুন'
+                                : 'Save this delivery address to my account'}
+                            </span>
+                          </label>
+                        )}
 
                         {orderFormError && (
                           <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 flex items-start gap-2">
@@ -2642,11 +3057,11 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                 : ''
             }`}
           >
-            <div className="max-w-5xl mx-auto px-4 sm:px-6 py-3.5 flex items-center justify-between gap-3">
+            <div className="max-w-5xl mx-auto px-3 sm:px-6 py-3 sm:py-3.5 flex items-center justify-between gap-2 sm:gap-3">
               <a
                 href="#"
                 onClick={!isPublicView && onSelectSection ? (e) => e.preventDefault() : undefined}
-                className="flex items-center gap-2.5 min-w-0"
+                className="flex items-center gap-2 sm:gap-2.5 min-w-0 flex-1"
               >
                 {site.logoUrl && !brokenLogoImg ? (
                   <img
@@ -2654,17 +3069,17 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                     alt={businessName}
                     referrerPolicy="no-referrer"
                     onError={() => setBrokenLogoImg(true)}
-                    className="w-9 h-9 rounded-xl object-contain bg-white border border-slate-200 p-0.5 shrink-0"
+                    className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl object-contain bg-white border border-slate-200 p-0.5 shrink-0"
                   />
                 ) : (
                   <div
-                    className="w-9 h-9 rounded-xl flex items-center justify-center text-white font-black text-sm shrink-0"
+                    className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl flex items-center justify-center text-white font-black text-sm shrink-0"
                     style={{ backgroundColor: brandColor }}
                   >
                     {businessName.charAt(0).toUpperCase()}
                   </div>
                 )}
-                <div className="truncate">
+                <div className="min-w-0 truncate">
                   <h1 className="text-sm sm:text-base font-extrabold tracking-tight text-slate-900 leading-tight truncate">
                     {businessName}
                   </h1>
@@ -2676,28 +3091,40 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                 </div>
               </a>
 
-              <nav className="hidden sm:flex items-center gap-5 text-xs font-medium text-slate-600">
-                {hasAboutSection && (
-                  <a href="#about" className="hover:text-slate-900 hover:underline underline-offset-4">
-                    About
-                  </a>
-                )}
+              <nav className="hidden md:flex items-center gap-5 text-xs font-medium text-slate-600 shrink-0">
+                <a href="#" className="hover:text-slate-900 hover:underline underline-offset-4">
+                  {lang === 'bn' ? 'হোম' : 'Home'}
+                </a>
                 {hasProductsSection && (
                   <a href="#services" className="hover:text-slate-900 hover:underline underline-offset-4">
-                    Catalog
+                    {lang === 'bn' ? 'পণ্যসমূহ' : 'Products'}
                   </a>
                 )}
-                {hasOrderableStorefront && (
-                  <a href="#checkout" className="hover:text-slate-900 hover:underline underline-offset-4">
-                    Order Online
+                {hasAboutSection && (
+                  <a href="#about" className="hover:text-slate-900 hover:underline underline-offset-4">
+                    {lang === 'bn' ? 'আমাদের সম্পর্কে' : 'About'}
                   </a>
                 )}
                 {hasContactSection && (
                   <a href="#contact" className="hover:text-slate-900 hover:underline underline-offset-4">
-                    Contact
+                    {lang === 'bn' ? 'যোগাযোগ' : 'Contact'}
                   </a>
                 )}
-                {customLinks.slice(0, 2).map((link) => (
+                {isPublicView && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsAccountMenuOpen(false);
+                      setPortalTab('orders');
+                      setPortalOrderQuery(null);
+                      setIsPortalOpen(true);
+                    }}
+                    className="hover:text-slate-900 hover:underline underline-offset-4 cursor-pointer font-medium"
+                  >
+                    {lang === 'bn' ? 'আমার অর্ডার' : 'My Orders'}
+                  </button>
+                )}
+                {customLinks.slice(0, 1).map((link) => (
                   <a
                     key={link.id}
                     href={resolveCtaHref(link.url)}
@@ -2710,20 +3137,144 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                 ))}
               </nav>
 
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+                {isPublicView && (
+                  <button
+                    type="button"
+                    onClick={toggleLang}
+                    title={lang === 'en' ? 'বাংলায় দেখুন' : 'Switch to English'}
+                    className="hidden sm:inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-[11px] font-bold text-slate-700 cursor-pointer"
+                  >
+                    <Languages className="w-3.5 h-3.5" />
+                    <span>{lang === 'en' ? 'BN' : 'EN'}</span>
+                  </button>
+                )}
+
                 {hasOrderableStorefront && (
                   <button
                     type="button"
                     onClick={scrollToCheckout}
-                    className={`min-h-[36px] inline-flex items-center gap-1.5 px-3.5 py-1.5 ${buttonRadiusClass} text-xs font-semibold text-white shadow-xs transition-opacity hover:opacity-90 cursor-pointer`}
+                    aria-label={lang === 'bn' ? `ব্যাগ (${totalCartItems})` : `Bag (${totalCartItems})`}
+                    className={`min-h-[36px] inline-flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1.5 ${buttonRadiusClass} text-xs font-semibold text-white shadow-xs transition-opacity hover:opacity-90 whitespace-nowrap shrink-0 cursor-pointer`}
                     style={{ backgroundColor: brandColor }}
                   >
-                    <ShoppingBag className="w-3.5 h-3.5" />
-                    <span>Bag</span>
+                    <ShoppingBag className="w-3.5 h-3.5 shrink-0" />
+                    <span className="hidden sm:inline">{lang === 'bn' ? 'ব্যাগ' : 'Bag'}</span>
                     <span className="font-mono tabular-nums font-bold">
                       ({totalCartItems})
                     </span>
                   </button>
+                )}
+
+                {isPublicView && (
+                  isCustomerAuthenticated ? (
+                    <div className="relative shrink-0" ref={accountMenuRef}>
+                      <button
+                        type="button"
+                        data-testid="storefront-account-menu-button"
+                        aria-haspopup="menu"
+                        aria-expanded={isAccountMenuOpen}
+                        onClick={() => setIsAccountMenuOpen((prev) => !prev)}
+                        className="min-h-[36px] inline-flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-[11px] sm:text-xs font-semibold text-slate-800 whitespace-nowrap shrink-0 cursor-pointer shadow-2xs"
+                      >
+                        {customerUser?.avatar ? (
+                          <img
+                            src={customerUser.avatar}
+                            alt={customerUser.name}
+                            referrerPolicy="no-referrer"
+                            className="w-5 h-5 rounded-full object-cover shrink-0"
+                          />
+                        ) : (
+                          <UserIcon className="w-3.5 h-3.5 shrink-0" style={{ color: brandColor }} />
+                        )}
+                        <span className="max-w-[54px] sm:max-w-[96px] truncate">
+                          {customerUser?.name?.split(' ')[0] ||
+                            (lang === 'bn' ? 'অ্যাকাউন্ট' : 'Account')}
+                        </span>
+                        <ChevronDown
+                          className={`w-3 h-3 text-slate-500 shrink-0 transition-transform ${
+                            isAccountMenuOpen ? 'rotate-180' : ''
+                          }`}
+                        />
+                      </button>
+
+                      {isAccountMenuOpen && (
+                        <div
+                          role="menu"
+                          data-testid="storefront-account-menu"
+                          className="absolute right-0 mt-2 w-56 rounded-xl border border-slate-200 bg-white shadow-xl py-1.5 z-40 text-left"
+                        >
+                          <div className="px-3.5 py-2 border-b border-slate-100">
+                            <p className="text-xs font-bold text-slate-900 truncate">
+                              {customerUser?.name}
+                            </p>
+                            {customerUser?.email && (
+                              <p className="text-[11px] text-slate-500 truncate">
+                                {customerUser.email}
+                              </p>
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setIsAccountMenuOpen(false);
+                              setPortalTab('orders');
+                              setPortalOrderQuery(null);
+                              setIsPortalOpen(true);
+                            }}
+                            className="w-full px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
+                          >
+                            <Package className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                            <span>{lang === 'bn' ? 'আমার অর্ডার' : 'My Orders'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setIsAccountMenuOpen(false);
+                              setPortalTab('account');
+                              setPortalOrderQuery(null);
+                              setIsPortalOpen(true);
+                            }}
+                            className="w-full px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
+                          >
+                            <UserIcon className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                            <span>{lang === 'bn' ? 'আমার অ্যাকাউন্ট' : 'My Account'}</span>
+                          </button>
+                          <div className="my-1 border-t border-slate-100" />
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setIsAccountMenuOpen(false);
+                              setIsPortalOpen(false);
+                              void onCustomerSignOut?.();
+                            }}
+                            className="w-full px-3.5 py-2 text-xs font-semibold text-rose-600 hover:bg-rose-50 flex items-center gap-2 cursor-pointer"
+                          >
+                            <LogOut className="w-3.5 h-3.5 shrink-0" />
+                            <span>{lang === 'bn' ? 'সাইন আউট' : 'Sign Out'}</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      data-testid="storefront-signin-button"
+                      onClick={() => {
+                        setIsAccountMenuOpen(false);
+                        setPortalTab('account');
+                        setPortalOrderQuery(null);
+                        setIsPortalOpen(true);
+                      }}
+                      className="min-h-[36px] inline-flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-[11px] sm:text-xs font-semibold text-slate-800 whitespace-nowrap shrink-0 cursor-pointer shadow-2xs"
+                    >
+                      <UserIcon className="w-3.5 h-3.5 shrink-0" style={{ color: brandColor }} />
+                      <span>{lang === 'bn' ? 'সাইন ইন' : 'Sign In'}</span>
+                    </button>
+                  )
                 )}
 
                 {!hasOrderableStorefront && hasWhatsapp ? (
@@ -2731,24 +3282,186 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                     href={`https://wa.me/${whatsappDigits}`}
                     target="_blank"
                     rel="noreferrer"
-                    className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 ${buttonRadiusClass} text-xs font-semibold text-white shadow-xs transition-opacity hover:opacity-90 shrink-0`}
+                    aria-label="WhatsApp"
+                    className={`min-h-[36px] inline-flex items-center gap-1.5 px-2.5 sm:px-3.5 py-1.5 ${buttonRadiusClass} text-xs font-semibold text-white shadow-xs transition-opacity hover:opacity-90 shrink-0`}
                     style={{ backgroundColor: brandColor }}
                   >
-                    <MessageSquare className="w-3.5 h-3.5" />
-                    <span>WhatsApp</span>
+                    <MessageSquare className="w-3.5 h-3.5 shrink-0" />
+                    <span className="hidden sm:inline">WhatsApp</span>
                   </a>
                 ) : !hasOrderableStorefront && phone ? (
                   <a
                     href={`tel:${phone}`}
-                    className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 ${buttonRadiusClass} text-xs font-semibold text-white shadow-xs transition-opacity hover:opacity-90 shrink-0`}
+                    aria-label="Call"
+                    className={`min-h-[36px] inline-flex items-center gap-1.5 px-2.5 sm:px-3.5 py-1.5 ${buttonRadiusClass} text-xs font-semibold text-white shadow-xs transition-opacity hover:opacity-90 shrink-0`}
                     style={{ backgroundColor: brandColor }}
                   >
-                    <Phone className="w-3.5 h-3.5" />
-                    <span>Call</span>
+                    <Phone className="w-3.5 h-3.5 shrink-0" />
+                    <span className="hidden sm:inline">Call</span>
                   </a>
                 ) : null}
+
+                {isPublicView && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsAccountMenuOpen(false);
+                      setMobileNavOpen((prev) => !prev);
+                    }}
+                    aria-label="Toggle Menu"
+                    className="md:hidden min-h-[36px] p-2 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 shrink-0 cursor-pointer"
+                  >
+                    {mobileNavOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
+                  </button>
+                )}
               </div>
             </div>
+
+            {/* Compact Mobile Storefront Navigation Drawer */}
+            {isPublicView && mobileNavOpen && (
+              <div
+                data-testid="storefront-mobile-menu"
+                className="md:hidden border-t border-slate-100 bg-white px-4 py-3 space-y-2.5 text-xs font-semibold text-slate-700"
+              >
+                {isCustomerAuthenticated ? (
+                  <div className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-200/80 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      {customerUser?.avatar ? (
+                        <img
+                          src={customerUser.avatar}
+                          alt={customerUser.name}
+                          referrerPolicy="no-referrer"
+                          className="w-7 h-7 rounded-full object-cover shrink-0"
+                        />
+                      ) : (
+                        <div
+                          className="w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-bold shrink-0"
+                          style={{ backgroundColor: brandColor }}
+                        >
+                          {(customerUser?.name || 'C').charAt(0).toUpperCase()}
+                        </div>
+                      )}
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold text-slate-900 truncate">
+                          {customerUser?.name}
+                        </p>
+                        {customerUser?.email && (
+                          <p className="text-[10px] text-slate-500 truncate">
+                            {customerUser.email}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMobileNavOpen(false);
+                        setIsPortalOpen(false);
+                        void onCustomerSignOut?.();
+                      }}
+                      className="px-2.5 py-1.5 rounded-lg bg-white border border-slate-200 text-rose-600 hover:bg-rose-50 inline-flex items-center gap-1 shrink-0 cursor-pointer"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      <span>{lang === 'bn' ? 'সাইন আউট' : 'Sign Out'}</span>
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    data-testid="storefront-mobile-menu-signin"
+                    onClick={() => {
+                      setMobileNavOpen(false);
+                      setPortalTab('account');
+                      setPortalOrderQuery(null);
+                      setIsPortalOpen(true);
+                    }}
+                    className="w-full min-h-[40px] px-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-900 text-white hover:bg-slate-800 flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <UserIcon className="w-4 h-4 shrink-0" />
+                    <span>{lang === 'bn' ? 'সাইন ইন' : 'Sign In'}</span>
+                  </button>
+                )}
+
+                <div className="grid grid-cols-2 gap-2">
+                  <a
+                    href="#"
+                    onClick={() => setMobileNavOpen(false)}
+                    className="px-3 py-2 rounded-lg bg-slate-50 hover:bg-slate-100"
+                  >
+                    {lang === 'bn' ? 'হোম' : 'Home'}
+                  </a>
+                  {hasProductsSection && (
+                    <a
+                      href="#services"
+                      onClick={() => setMobileNavOpen(false)}
+                      className="px-3 py-2 rounded-lg bg-slate-50 hover:bg-slate-100"
+                    >
+                      {lang === 'bn' ? 'পণ্যসমূহ' : 'Products'}
+                    </a>
+                  )}
+                  {hasAboutSection && (
+                    <a
+                      href="#about"
+                      onClick={() => setMobileNavOpen(false)}
+                      className="px-3 py-2 rounded-lg bg-slate-50 hover:bg-slate-100"
+                    >
+                      {lang === 'bn' ? 'আমাদের সম্পর্কে' : 'About'}
+                    </a>
+                  )}
+                  {hasContactSection && (
+                    <a
+                      href="#contact"
+                      onClick={() => setMobileNavOpen(false)}
+                      className="px-3 py-2 rounded-lg bg-slate-50 hover:bg-slate-100"
+                    >
+                      {lang === 'bn' ? 'যোগাযোগ' : 'Contact'}
+                    </a>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMobileNavOpen(false);
+                      setPortalTab('orders');
+                      setPortalOrderQuery(null);
+                      setIsPortalOpen(true);
+                    }}
+                    className="px-3 py-2 rounded-lg bg-slate-50 hover:bg-slate-100 text-left inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Package className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                    <span>{lang === 'bn' ? 'আমার অর্ডার' : 'My Orders'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMobileNavOpen(false);
+                      setPortalTab('account');
+                      setPortalOrderQuery(null);
+                      setIsPortalOpen(true);
+                    }}
+                    className="px-3 py-2 rounded-lg bg-slate-50 hover:bg-slate-100 text-left inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <UserIcon className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                    <span>
+                      {isCustomerAuthenticated
+                        ? lang === 'bn'
+                          ? 'আমার অ্যাকাউন্ট'
+                          : 'My Account'
+                        : lang === 'bn'
+                        ? 'গ্রাহক অ্যাকাউন্ট'
+                        : 'Customer Account'}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={toggleLang}
+                    className="px-3 py-2 rounded-lg bg-slate-50 hover:bg-slate-100 text-left inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Languages className="w-3.5 h-3.5 shrink-0" />
+                    <span>{lang === 'en' ? 'বাংলা ভাষা' : 'English'}</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </header>
 
           {/* Dynamic Ordered Website Sections */}
@@ -2929,6 +3642,42 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                 </div>
 
                 <div className="flex flex-col items-start md:items-end gap-3">
+                  {isPublicView && (
+                    <div className="flex flex-wrap items-center gap-4 text-[11px]">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPortalTab('orders');
+                          setPortalOrderQuery(null);
+                          setIsPortalOpen(true);
+                        }}
+                        className="text-slate-300 hover:text-white hover:underline underline-offset-4 cursor-pointer"
+                      >
+                        {lang === 'bn' ? 'আমার অর্ডার' : 'My Orders'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPortalTab('account');
+                          setPortalOrderQuery(null);
+                          setIsPortalOpen(true);
+                        }}
+                        className="text-slate-300 hover:text-white hover:underline underline-offset-4 inline-flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <UserIcon className="w-3 h-3" />
+                        <span>
+                          {isCustomerAuthenticated
+                            ? lang === 'bn'
+                              ? 'আমার অ্যাকাউন্ট'
+                              : 'My Account'
+                            : lang === 'bn'
+                            ? 'সাইন ইন'
+                            : 'Sign In'}
+                        </span>
+                      </button>
+                    </div>
+                  )}
+
                   {customLinks.length > 0 && (
                     <div className="flex flex-wrap items-center gap-4 text-[11px]">
                       {customLinks.map((link) => (
@@ -3032,6 +3781,77 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
               <MessageSquare className="w-4 h-4 fill-white" />
               <span>Chat with Us</span>
             </a>
+          )}
+          {/* Customer Portal Modal (Sign-in, Orders, Live Tracking, Saved Addresses) */}
+          {isPublicView && (
+            <CustomerPortalModal
+              isOpen={isPortalOpen}
+              initialTab={portalTab}
+              initialOrderQuery={portalOrderQuery}
+              site={site}
+              subdomain={subdomain}
+              user={isCustomerAuthenticated ? customerUser : null}
+              accessToken={customerAccessToken}
+              lang={lang}
+              onClose={() => setIsPortalOpen(false)}
+              onGoogleSignIn={async () => {
+                await onCustomerGoogleSignIn?.(portalTab);
+              }}
+              onSignOut={async () => {
+                await onCustomerSignOut?.();
+                setIsPortalOpen(false);
+              }}
+              onProfileSynced={(prof) => setCustomerProfile(prof)}
+              onOpenInvoice={(ord) => setInvoiceOrder(ord)}
+              onStartBusiness={onStartCustomerBusiness}
+            />
+          )}
+
+          {/* Direct Order Tracker Modal (after instant checkout confirmation) */}
+          {trackingOrderModal && (
+            <div
+              className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5 overflow-y-auto"
+              onClick={() => setTrackingOrderModal(null)}
+            >
+              <div
+                className="w-full max-w-2xl bg-white text-slate-900 rounded-2xl border border-slate-200 shadow-2xl overflow-hidden my-auto max-h-[90vh] flex flex-col"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+                  <span className="text-xs font-extrabold text-slate-900">
+                    {lang === 'bn' ? 'অর্ডার ট্র্যাকিং' : 'Order Status Tracker'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setTrackingOrderModal(null)}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-200/70 cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="p-5 overflow-y-auto">
+                  <CustomerOrderTracker
+                    order={trackingOrderModal}
+                    subdomain={subdomain}
+                    accessToken={customerAccessToken}
+                    site={site}
+                    lang={lang}
+                    onOrderRefreshed={(updated) => setTrackingOrderModal(updated)}
+                    onOpenInvoice={(ord) => setInvoiceOrder(ord)}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Merchant-Branded A4 Order Invoice Portal */}
+          {invoiceOrder && (
+            <MerchantOrderInvoice
+              order={invoiceOrder}
+              site={site}
+              lang={lang}
+              onClose={() => setInvoiceOrder(null)}
+            />
           )}
         </div>
       )}
