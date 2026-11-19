@@ -359,7 +359,12 @@ export function clearSharedPkceCookie(key: string): void {
   document.cookie = `${getPkceCookieName(key)}=; Domain=${domain}; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax${secureFlag}`;
 }
 
-const pkceCookieBridgedStorage = {
+export const SUPABASE_AUTH_STORAGE_KEY: string = supabaseProjectRef
+  ? `sb-${supabaseProjectRef}-auth-token`
+  : 'supabase.auth.token';
+export const BRIDGE_EPHEMERAL_STORAGE_KEY = 'goamaas-pkce-bridge-token';
+
+export const pkceCookieBridgedStorage = {
   getItem: (key: string): string | null => {
     let val: string | null = null;
     if (typeof window !== 'undefined' && window.localStorage) {
@@ -400,31 +405,71 @@ const pkceCookieBridgedStorage = {
   },
 };
 
-function createPkceCookieFirstMemoryStorage() {
+export function createPkceCookieFirstMemoryStorage(
+  sourceStorageKey: string = SUPABASE_AUTH_STORAGE_KEY,
+  bridgeStorageKey: string = BRIDGE_EPHEMERAL_STORAGE_KEY
+) {
   const mem = new Map<string, string>();
+  const accessedVerifierKeys = new Set<string>();
+  const diagnostics = {
+    verifierCookieExists: false,
+    verifierInLocalStorage: false,
+    verifierRetrieved: false,
+  };
+
+  const mapToSourceKey = (key: string): string => {
+    if (bridgeStorageKey && sourceStorageKey && key.startsWith(bridgeStorageKey)) {
+      return `${sourceStorageKey}${key.slice(bridgeStorageKey.length)}`;
+    }
+    return key;
+  };
+
   return {
     getItem: (key: string): string | null => {
-      if (isPkceVerifierStorageKey(key)) {
-        const cookieVal = readSharedPkceCookie(key);
-        if (cookieVal) return cookieVal;
+      const memVal = mem.get(key);
+      if (memVal !== undefined) {
+        return memVal;
+      }
+      const mappedKey = mapToSourceKey(key);
+      if (isPkceVerifierStorageKey(mappedKey)) {
+        const cookieVal = readSharedPkceCookie(mappedKey);
+        if (cookieVal) {
+          diagnostics.verifierCookieExists = true;
+          diagnostics.verifierRetrieved = true;
+          accessedVerifierKeys.add(mappedKey);
+          return cookieVal;
+        }
         if (typeof window !== 'undefined' && window.localStorage) {
           try {
-            const lsVal = window.localStorage.getItem(key);
-            if (lsVal) return lsVal;
+            const lsVal = window.localStorage.getItem(mappedKey);
+            if (lsVal) {
+              diagnostics.verifierInLocalStorage = true;
+              diagnostics.verifierRetrieved = true;
+              accessedVerifierKeys.add(mappedKey);
+              return lsVal;
+            }
           } catch {}
         }
       }
-      return mem.get(key) ?? null;
+      return null;
     },
     setItem: (key: string, value: string): void => {
       mem.set(key, value);
     },
     removeItem: (key: string): void => {
+      // Keep ephemeral state clean in memory ONLY; defer .amaas.xyz cookie deletion
+      // until exchangeCodeForSession succeeds so failures retain diagnostic evidence.
       mem.delete(key);
-      if (isPkceVerifierStorageKey(key)) {
-        clearSharedPkceCookie(key);
-      }
     },
+    clearConsumedCookies: (): void => {
+      for (const k of accessedVerifierKeys) {
+        clearSharedPkceCookie(k);
+      }
+      clearSharedPkceCookie(`${sourceStorageKey}-code-verifier`);
+      clearSharedPkceCookie(`${sourceStorageKey}-flows-code-verifier`);
+      accessedVerifierKeys.clear();
+    },
+    getDiagnostics: () => ({ ...diagnostics }),
   };
 }
 
@@ -576,6 +621,7 @@ export const supabase: SupabaseClient | null = isSupabaseConfigured
         persistSession: true,
         autoRefreshToken: true,
         detectSessionInUrl: !initialOAuthUrlSnapshot.isCrossOriginStorefrontBridge,
+        storageKey: SUPABASE_AUTH_STORAGE_KEY,
         storage: typeof window !== 'undefined' ? pkceCookieBridgedStorage : undefined,
       },
     })
@@ -585,7 +631,9 @@ export const supabase: SupabaseClient | null = isSupabaseConfigured
  * Safely hydrates an implicit-flow #access_token/#refresh_token URL fragment via setSession()
  * when flowType is 'pkce' (e.g. legacy recovery or magic-link redirects), scrubbing tokens from the URL.
  */
-export async function hydrateImplicitHashSessionIfNeeded(): Promise<{
+export async function hydrateImplicitHashSessionIfNeeded(options?: {
+  customerSubdomain?: string;
+}): Promise<{
   session: Session | null;
   error: Error | null;
 }> {
@@ -598,8 +646,8 @@ export async function hydrateImplicitHashSessionIfNeeded(): Promise<{
 
   if (!tokens && typeof window !== 'undefined' && window.location?.hash) {
     const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
-    const accessToken = hashParams.get('access_token');
-    const refreshToken = hashParams.get('refresh_token');
+    const accessToken = hashParams.get('sb_handoff_at') || hashParams.get('access_token');
+    const refreshToken = hashParams.get('sb_handoff_rt') || hashParams.get('refresh_token');
     if (accessToken && refreshToken) {
       tokens = { access_token: accessToken, refresh_token: refreshToken };
     }
@@ -615,6 +663,19 @@ export async function hydrateImplicitHashSessionIfNeeded(): Promise<{
       window.history.replaceState(window.history.state, '', cleanUrl);
     } catch {
       // Ignore history replacement errors
+    }
+  }
+
+  if (options?.customerSubdomain !== undefined) {
+    try {
+      const parts = tokens.access_token.split('.');
+      const claims = parts.length === 3 ? decodeBase64UrlJson(parts[1]) : null;
+      const sub = typeof claims?.sub === 'string' ? claims.sub.trim() : '';
+      if (sub) {
+        setCustomerPortalSessionActive(sub, options.customerSubdomain);
+      }
+    } catch {
+      // Ignore JWT decode fallback errors
     }
   }
 
@@ -1170,36 +1231,109 @@ export function buildCrossOriginStorefrontErrorUrl(
 }
 
 /**
- * Performs the PKCE authorization code exchange on app.amaas.xyz inside an isolated,
- * memory-only Supabase client reading the shared .amaas.xyz PKCE verifier cookie so
- * merchant sessions in app.amaas.xyz localStorage are never overwritten.
+ * Performs the PKCE authorization code exchange on app.amaas.xyz inside an isolated
+ * ephemeral Supabase client that:
+ * 1) Sets persistSession: true (GoTrueClient discards custom auth.storage when persistSession is false!)
+ * 2) Uses a separate bridge storageKey so BroadcastChannel & navigator locks never interfere with
+ *    open merchant dashboard sessions in app.amaas.xyz localStorage
+ * 3) Reads the .amaas.xyz PKCE verifier cookie via key mapping back to SUPABASE_AUTH_STORAGE_KEY
+ * 4) Preserves the verifier cookie if exchange fails (for diagnosis) and clears it only on success.
  */
 export async function exchangeCrossOriginStorefrontPkceCode(
   code: string,
-  flowId?: string
+  flowId?: string,
+  clientOverride?: { url?: string; anonKey?: string; projectRef?: string }
 ): Promise<{ session: Session | null; error: Error | null }> {
-  if (!isSupabaseConfigured || !supabaseUrl || !supabaseAnonKey) {
+  const effectiveUrl = clientOverride?.url || supabaseUrl;
+  const effectiveKey = clientOverride?.anonKey || supabaseAnonKey;
+  const effectiveRef = clientOverride?.projectRef || extractSupabaseProjectRef(effectiveUrl) || supabaseProjectRef;
+  const sourceStorageKey = effectiveRef
+    ? `sb-${effectiveRef}-auth-token`
+    : SUPABASE_AUTH_STORAGE_KEY;
+
+  if (!effectiveUrl || !effectiveKey || (!clientOverride && !isSupabaseConfigured)) {
     return { session: null, error: new Error('Supabase client is not configured.') };
   }
+
+  const expectedVerifierKey = flowId
+    ? `${sourceStorageKey}-flow-${flowId}-code-verifier`
+    : `${sourceStorageKey}-code-verifier`;
+  const bridgeStorage = createPkceCookieFirstMemoryStorage(
+    sourceStorageKey,
+    BRIDGE_EPHEMERAL_STORAGE_KEY
+  );
+  const preCheckCookieExists = Boolean(
+    readSharedPkceCookie(expectedVerifierKey) ||
+      readSharedPkceCookie(`${sourceStorageKey}-code-verifier`)
+  );
+  let preCheckLocalStorageExists = false;
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      preCheckLocalStorageExists = Boolean(
+        window.localStorage.getItem(expectedVerifierKey) ||
+          window.localStorage.getItem(`${sourceStorageKey}-code-verifier`)
+      );
+    } catch {
+      preCheckLocalStorageExists = false;
+    }
+  }
+
   try {
-    const ephemeralClient = createClient(supabaseUrl, supabaseAnonKey, {
+    const ephemeralClient = createClient(effectiveUrl, effectiveKey, {
       auth: {
         flowType: 'pkce',
-        persistSession: false,
+        persistSession: true,
         autoRefreshToken: false,
         detectSessionInUrl: false,
-        storage: createPkceCookieFirstMemoryStorage(),
+        storageKey: BRIDGE_EPHEMERAL_STORAGE_KEY,
+        storage: bridgeStorage,
       },
     });
     const { data, error } = await ephemeralClient.auth.exchangeCodeForSession(
       code,
       flowId ? { flowId } : undefined
     );
+    const diag = bridgeStorage.getDiagnostics();
+    const exchangeSucceeded = Boolean(data?.session?.access_token && data?.session?.refresh_token && !error);
+
+    try {
+      console.info('[GoAMAAS PKCE Bridge] Callback exchange', {
+        callbackOrigin: typeof window !== 'undefined' ? window.location?.origin : 'ssr',
+        expectedStorageKey: expectedVerifierKey,
+        bridgeStorageKey: BRIDGE_EPHEMERAL_STORAGE_KEY,
+        verifierCookieExists: preCheckCookieExists || diag.verifierCookieExists,
+        verifierInLocalStorage: preCheckLocalStorageExists || diag.verifierInLocalStorage,
+        verifierRetrieved: diag.verifierRetrieved,
+        exchangeSucceeded,
+        errorName: error?.name || null,
+      });
+    } catch {}
+
+    if (exchangeSucceeded && data?.session) {
+      bridgeStorage.clearConsumedCookies();
+      return {
+        session: data.session,
+        error: null,
+      };
+    }
+
     return {
-      session: data?.session ?? null,
-      error: error ?? null,
+      session: null,
+      error: error ?? new Error('PKCE exchange did not return an authenticated session.'),
     };
   } catch (err: unknown) {
+    const diag = bridgeStorage.getDiagnostics();
+    try {
+      console.warn('[GoAMAAS PKCE Bridge] Callback exchange exception', {
+        callbackOrigin: typeof window !== 'undefined' ? window.location?.origin : 'ssr',
+        expectedStorageKey: expectedVerifierKey,
+        verifierCookieExists: preCheckCookieExists || diag.verifierCookieExists,
+        verifierInLocalStorage: preCheckLocalStorageExists || diag.verifierInLocalStorage,
+        verifierRetrieved: diag.verifierRetrieved,
+        exchangeSucceeded: false,
+        errorName: err instanceof Error ? err.name : 'UnknownError',
+      });
+    } catch {}
     return {
       session: null,
       error: err instanceof Error ? err : new Error('Failed to complete PKCE code exchange.'),
@@ -1333,6 +1467,34 @@ export async function signInWithGoogle(
         queryParams,
       },
     });
+
+    if (options?.isCustomerFlow) {
+      const legacyVerifierKey = `${SUPABASE_AUTH_STORAGE_KEY}-code-verifier`;
+      let verifierInLocalStorage = false;
+      if (typeof window !== 'undefined' && window.localStorage) {
+        try {
+          verifierInLocalStorage = Boolean(window.localStorage.getItem(legacyVerifierKey));
+        } catch {
+          verifierInLocalStorage = false;
+        }
+      }
+      const verifierCookieExists = Boolean(readSharedPkceCookie(legacyVerifierKey));
+      let parsedRedirectOrigin = '';
+      try {
+        parsedRedirectOrigin = new URL(redirectTo).origin;
+      } catch {}
+      try {
+        console.info('[GoAMAAS PKCE Bridge] OAuth initiation', {
+          initiationOrigin: typeof window !== 'undefined' ? window.location?.origin : 'ssr',
+          redirectOrigin: parsedRedirectOrigin,
+          expectedStorageKey: legacyVerifierKey,
+          verifierInLocalStorage,
+          verifierCookieExists,
+          cookieDomain: getSharedPkceCookieDomain(),
+          oauthUrlGenerated: Boolean(data?.url && !error),
+        });
+      } catch {}
+    }
 
     if (error) {
       try {

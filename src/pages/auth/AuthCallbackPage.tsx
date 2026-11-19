@@ -159,7 +159,21 @@ export const AuthCallbackPage: React.FC = () => {
         exchangedAuthCodes.add(bridgeCode);
         const { session: bridgeSession, error: bridgeErr } =
           await exchangeCrossOriginStorefrontPkceCode(bridgeCode, bridgeFlowId);
-        if (bridgeSession?.access_token && bridgeSession?.refresh_token) {
+        const hasHandoffSession = Boolean(
+          bridgeSession?.access_token && bridgeSession?.refresh_token
+        );
+        try {
+          console.info('[GoAMAAS PKCE Bridge] Bridge handoff decision', {
+            callbackOrigin: typeof window !== 'undefined' ? window.location?.origin : 'ssr',
+            storefront: crossOriginBridge.storefront,
+            hasAuthorizationCode: Boolean(bridgeCode),
+            hasFlowId: Boolean(bridgeFlowId),
+            pkceExchangeSucceeded: hasHandoffSession,
+            errorName: bridgeErr?.name || null,
+          });
+        } catch {}
+
+        if (hasHandoffSession && bridgeSession) {
           setStatus('success');
           window.location.replace(
             buildCrossOriginStorefrontHandoffUrl(
@@ -385,7 +399,17 @@ export const AuthCallbackPage: React.FC = () => {
 
         // 4. Fallback for implicit #access_token/#refresh_token URL fragments if ever returned
         if (!session?.user) {
-          const implicitRes = await hydrateImplicitHashSessionIfNeeded();
+          const customerSubdomainHint = isCustomerAuthFlow
+            ? customerIntent?.subdomain ||
+              (onTenantSubdomain && typeof window !== 'undefined'
+                ? window.location.hostname.split('.')[0].trim().toLowerCase()
+                : '')
+            : undefined;
+          const implicitRes = await hydrateImplicitHashSessionIfNeeded(
+            customerSubdomainHint !== undefined
+              ? { customerSubdomain: customerSubdomainHint }
+              : undefined
+          );
           if (implicitRes.session?.user) {
             session = implicitRes.session;
             sessionError = null;

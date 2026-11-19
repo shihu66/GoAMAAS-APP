@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { createClient } from '@supabase/supabase-js';
 import customerPortalHandler from '../api/customer-portal';
 import publicOrderHandler from '../api/public-order';
 import {
@@ -8,12 +10,15 @@ import {
   buildCrossOriginStorefrontHandoffUrl,
   buildGoogleOAuthQueryParams,
   buildGoogleOAuthRedirectTo,
+  exchangeCrossOriginStorefrontPkceCode,
   extractTenantSubdomainFromHostname,
   getCrossOriginStorefrontBridgeTarget,
   getMainAppOrigin,
   getSharedPkceCookieDomain,
   isEmbeddedInAppWebViewUserAgent,
   isSafeInternalRedirectPath,
+  pkceCookieBridgedStorage,
+  readSharedPkceCookie,
 } from '../src/lib/supabase';
 import { phonesMatch } from '../src/lib/storefrontSync';
 
@@ -549,10 +554,231 @@ async function testCustomerDirectorySyncAndOrderMergeAcrossMerchants(): Promise<
   }
 }
 
+async function testCrossSubdomainPkceExchangeRoundTrip(): Promise<void> {
+  const projectRef = 'mockpkceproj';
+  const mockUrl = `https://${projectRef}.supabase.co`;
+  const mockAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.mock.sig';
+  const expectedStorageKey = `sb-${projectRef}-auth-token`;
+
+  const storefrontLocalStorage = new Map<string, string>();
+  const mainAppLocalStorage = new Map<string, string>();
+  // Pre-seed an active merchant dashboard session on app.amaas.xyz to ensure zero overwrite
+  mainAppLocalStorage.set(
+    expectedStorageKey,
+    JSON.stringify({ access_token: 'merchant-active-at', user: { id: 'merchant-1', email: 'merchant@amaas.xyz' } })
+  );
+
+  // Shared cookie jar scoped to .amaas.xyz
+  const cookieJar = new Map<string, string>();
+  let activeHostname = 'fortyninee.amaas.xyz';
+  let activeOrigin = 'https://fortyninee.amaas.xyz';
+  let activeStorageMap = storefrontLocalStorage;
+
+  const prevWindow = (globalThis as any).window;
+  const prevDocument = (globalThis as any).document;
+  const origFetch = globalThis.fetch;
+
+  const mockLocalStorage = {
+    getItem: (k: string) => activeStorageMap.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      activeStorageMap.set(k, v);
+    },
+    removeItem: (k: string) => {
+      activeStorageMap.delete(k);
+    },
+  };
+
+  (globalThis as any).window = {
+    location: {
+      get hostname() {
+        return activeHostname;
+      },
+      get origin() {
+        return activeOrigin;
+      },
+      get href() {
+        return `${activeOrigin}/auth/callback?code=auth-code-123&storefront=fortyninee`;
+      },
+      protocol: 'https:',
+      port: '',
+    },
+    localStorage: mockLocalStorage,
+  };
+
+  (globalThis as any).document = {
+    get cookie() {
+      return Array.from(cookieJar.entries())
+        .map(([k, v]) => `${k}=${v}`)
+        .join('; ');
+    },
+    set cookie(raw: string) {
+      const segments = raw.split(';').map((s) => s.trim());
+      const [kv] = segments;
+      const eqIdx = kv.indexOf('=');
+      if (eqIdx <= 0) return;
+      const name = kv.slice(0, eqIdx);
+      const val = kv.slice(eqIdx + 1);
+      const hasMaxAgeZero = segments.some((s) => s.toLowerCase() === 'max-age=0');
+      const hasDomain = segments.some((s) => s.toLowerCase() === 'domain=.amaas.xyz');
+      const hasSameSite = segments.some((s) => s.toLowerCase() === 'samesite=lax');
+      const hasSecure = segments.some((s) => s.toLowerCase() === 'secure');
+      assert.equal(hasDomain, true, 'PKCE cookie must be scoped to Domain=.amaas.xyz');
+      assert.equal(hasSameSite, true, 'PKCE cookie must include SameSite=Lax');
+      assert.equal(hasSecure, true, 'PKCE cookie must include Secure on HTTPS');
+      if (hasMaxAgeZero || val === '') {
+        cookieJar.delete(name);
+      } else {
+        cookieJar.set(name, val);
+      }
+    },
+  };
+
+  let tokenExchangeMode: 'fail_once' | 'succeed' = 'fail_once';
+  let capturedChallenge = '';
+  let capturedVerifier = '';
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const urlStr = typeof input === 'string' ? input : input.toString();
+    if (urlStr.includes('/auth/v1/token') && urlStr.includes('grant_type=pkce')) {
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      capturedVerifier = String(body.code_verifier || '');
+      if (tokenExchangeMode === 'fail_once') {
+        return new Response(
+          JSON.stringify({ error: 'server_error', error_description: 'Transient failure' }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          access_token: 'customer-handoff-jwt-token',
+          refresh_token: 'customer-handoff-refresh-token',
+          token_type: 'bearer',
+          expires_in: 3600,
+          user: {
+            id: 'cust-pkce-user-1',
+            email: 'rahim@gmail.com',
+            user_metadata: { full_name: 'Rahim Mia' },
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return new Response(JSON.stringify({}), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    // Phase 1: Initiate Google OAuth on https://fortyninee.amaas.xyz using real Supabase client
+    const storefrontClient = createClient(mockUrl, mockAnonKey, {
+      auth: {
+        flowType: 'pkce',
+        persistSession: true,
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+        storageKey: expectedStorageKey,
+        storage: pkceCookieBridgedStorage,
+      },
+    });
+    const redirectTo = buildGoogleOAuthRedirectTo('https://fortyninee.amaas.xyz', undefined, {
+      isCustomerFlow: true,
+      subdomain: 'fortyninee',
+      returnPath: '/?portal=account',
+    });
+    const { data: oauthData, error: oauthErr } = await storefrontClient.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo, skipBrowserRedirect: true },
+    });
+    assert.equal(oauthErr, null);
+    assert.ok(oauthData?.url);
+
+    const authorizeUrl = new URL(oauthData.url);
+    capturedChallenge = authorizeUrl.searchParams.get('code_challenge') || '';
+    assert.ok(capturedChallenge, 'signInWithOAuth must generate PKCE code_challenge');
+
+    // Switch browser context to https://app.amaas.xyz/auth/callback
+    activeHostname = 'app.amaas.xyz';
+    activeOrigin = 'https://app.amaas.xyz';
+    activeStorageMap = mainAppLocalStorage;
+
+    const cookieBeforeExchange = readSharedPkceCookie(`${expectedStorageKey}-code-verifier`);
+    assert.ok(
+      cookieBeforeExchange,
+      'PKCE verifier cookie written on fortyninee.amaas.xyz must be readable on app.amaas.xyz'
+    );
+
+    // Phase 2a: Failed exchange must NOT destroy the verifier cookie
+    tokenExchangeMode = 'fail_once';
+    const failRes = await exchangeCrossOriginStorefrontPkceCode('auth-code-123', undefined, {
+      url: mockUrl,
+      anonKey: mockAnonKey,
+      projectRef,
+    });
+    assert.equal(failRes.session, null);
+    assert.ok(failRes.error);
+    assert.ok(
+      readSharedPkceCookie(`${expectedStorageKey}-code-verifier`),
+      'Verifier cookie must remain intact on failed exchange for diagnosis'
+    );
+
+    // Phase 2b: Successful exchange verifies SHA-256 PKCE match, clears cookie, leaves merchant session untouched
+    tokenExchangeMode = 'succeed';
+    const okRes = await exchangeCrossOriginStorefrontPkceCode('auth-code-123', undefined, {
+      url: mockUrl,
+      anonKey: mockAnonKey,
+      projectRef,
+    });
+    assert.equal(okRes.error, null);
+    assert.equal(okRes.session?.access_token, 'customer-handoff-jwt-token');
+    assert.equal(okRes.session?.refresh_token, 'customer-handoff-refresh-token');
+
+    const computedChallenge = createHash('sha256')
+      .update(capturedVerifier)
+      .digest('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+    assert.equal(
+      computedChallenge,
+      capturedChallenge,
+      'Exchanged code_verifier must match original storefront PKCE code_challenge'
+    );
+
+    assert.equal(
+      readSharedPkceCookie(`${expectedStorageKey}-code-verifier`),
+      null,
+      'Consumed PKCE verifier cookie must be cleared after successful exchange'
+    );
+
+    const merchantStored = JSON.parse(mainAppLocalStorage.get(expectedStorageKey) || '{}');
+    assert.equal(
+      merchantStored.access_token,
+      'merchant-active-at',
+      'Existing merchant dashboard session in app.amaas.xyz localStorage must never be overwritten'
+    );
+
+    console.log(
+      'PASS [4/4]: Real Supabase client cross-subdomain PKCE cookie round-trip, SHA-256 challenge match, cookie cleanup & merchant session preservation verified'
+    );
+  } finally {
+    globalThis.fetch = origFetch;
+    if (prevWindow === undefined) {
+      delete (globalThis as any).window;
+    } else {
+      (globalThis as any).window = prevWindow;
+    }
+    if (prevDocument === undefined) {
+      delete (globalThis as any).document;
+    } else {
+      (globalThis as any).document = prevDocument;
+    }
+  }
+}
+
 async function main() {
   testOAuthHelpersAndWebViewDetection();
   await testCustomerDirectorySyncAndOrderMergeAcrossMerchants();
+  await testCrossSubdomainPkceExchangeRoundTrip();
   console.log('\nALL STOREFRONT GOOGLE AUTH & CUSTOMER CRM SYNC TESTS PASSED.');
+  process.exit(0);
 }
 
 main().catch((err) => {
