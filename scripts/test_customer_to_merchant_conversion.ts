@@ -188,14 +188,14 @@ function testOriginAndOAuthRedirectHelpers(): void {
   };
 
   try {
-    // 1. Subdomain host on .amaas.xyz -> main origin must be https://amaas.xyz
+    // 1. Subdomain host on .amaas.xyz -> main origin must be https://app.amaas.xyz
     (globalThis as any).window = {
       location: { hostname: 'dhakakicks.amaas.xyz', protocol: 'https:', port: '', origin: 'https://dhakakicks.amaas.xyz', pathname: '/' },
       sessionStorage: storageApi,
       localStorage: storageApi,
     };
     assert.equal(isTenantSubdomainHost(), true);
-    assert.equal(getMainAppOrigin(), 'https://amaas.xyz');
+    assert.equal(getMainAppOrigin(), 'https://app.amaas.xyz');
 
     // 2. Subdomain host on .localhost:3000 -> main origin must preserve port
     (globalThis as any).window = {

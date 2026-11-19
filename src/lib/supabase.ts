@@ -668,12 +668,12 @@ export function isTenantSubdomainHost(): boolean {
 }
 
 export function getMainAppOrigin(): string {
-  if (typeof window === 'undefined') return 'https://amaas.xyz';
+  if (typeof window === 'undefined') return 'https://app.amaas.xyz';
   const host = window.location.hostname.toLowerCase();
   const protocol = window.location.protocol === 'http:' ? 'http:' : 'https:';
   const port = window.location.port ? `:${window.location.port}` : '';
   if (host.endsWith('.amaas.xyz') && host !== 'amaas.xyz') {
-    return isTenantSubdomainHost() ? `https://amaas.xyz` : window.location.origin;
+    return isTenantSubdomainHost() ? 'https://app.amaas.xyz' : window.location.origin;
   }
   if (host.endsWith('.localhost') && host !== 'localhost') {
     return `${protocol}//localhost${port}`;
@@ -862,6 +862,41 @@ export interface SignInWithGoogleOptions {
   skipWindowRedirect?: boolean;
 }
 
+const EMBEDDED_WEBVIEW_UA_REGEX =
+  /(FBAN|FBAV|FB_IAB|FBIOS|Instagram|Line\/|MicroMessenger|WeChat|BytedanceWebview|TikTok|Musical_ly|Snapchat|Twitter|LinkedInApp|\bwv\b|; wv\))/i;
+
+/**
+ * Detects embedded social/messenger in-app WebViews where Google OAuth returns 403 disallowed_useragent.
+ */
+export function isEmbeddedInAppWebViewUserAgent(userAgent?: string): boolean {
+  const ua =
+    typeof userAgent === 'string'
+      ? userAgent
+      : typeof navigator !== 'undefined' && typeof navigator.userAgent === 'string'
+      ? navigator.userAgent
+      : '';
+  if (!ua) return false;
+  return EMBEDDED_WEBVIEW_UA_REGEX.test(ua);
+}
+
+/**
+ * Builds Google OAuth query parameters.
+ * Customer & Admin flows use clean { prompt: 'select_account' } without requesting offline refresh tokens.
+ */
+export function buildGoogleOAuthQueryParams(
+  options?: SignInWithGoogleOptions
+): Record<string, string> {
+  if (options?.isAdminFlow || options?.isCustomerFlow) {
+    return {
+      prompt: 'select_account',
+    };
+  }
+  return {
+    access_type: 'offline',
+    prompt: 'select_account',
+  };
+}
+
 /**
  * Initiates the real Google OAuth sign-in flow through Supabase Auth.
  * Never simulates authentication and never exposes authorized emails in query strings.
@@ -881,6 +916,15 @@ export async function signInWithGoogle(
   }
 
   try {
+    if (typeof navigator !== 'undefined' && isEmbeddedInAppWebViewUserAgent(navigator.userAgent)) {
+      return {
+        data: null,
+        error: new Error(
+          'Google Sign-In cannot run inside an in-app browser (such as Facebook, Instagram, or WhatsApp). Please tap the menu icon and choose "Open in Chrome" or "Open in Safari" to continue with Google.'
+        ),
+      };
+    }
+
     // Preflight check so disabled provider in Supabase Auth returns an actionable UI error instead of raw JSON 400
     const providerStatus = await checkGoogleOAuthProviderStatus();
     if (!providerStatus.enabled) {
@@ -925,14 +969,7 @@ export async function signInWithGoogle(
       }
     }
 
-    const queryParams: Record<string, string> = options?.isAdminFlow
-      ? {
-          prompt: 'select_account',
-        }
-      : {
-          access_type: 'offline',
-          prompt: 'select_account',
-        };
+    const queryParams = buildGoogleOAuthQueryParams(options);
 
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
@@ -953,7 +990,37 @@ export async function signInWithGoogle(
     }
 
     if (data?.url && !options?.skipWindowRedirect && typeof window !== 'undefined') {
-      window.location.assign(data.url);
+      let isInIframe = false;
+      try {
+        isInIframe = window.self !== window.top;
+      } catch {
+        isInIframe = true;
+      }
+
+      if (isInIframe) {
+        let navigatedTop = false;
+        try {
+          if (window.top && window.top.location) {
+            window.top.location.assign(data.url);
+            navigatedTop = true;
+          }
+        } catch {
+          navigatedTop = false;
+        }
+        if (!navigatedTop) {
+          const opened = window.open(data.url, '_blank', 'noopener,noreferrer');
+          if (!opened) {
+            return {
+              data: null,
+              error: new Error(
+                'Google Sign-In cannot open inside an embedded frame. Please open this storefront directly in a new browser tab and try again.'
+              ),
+            };
+          }
+        }
+      } else {
+        window.location.assign(data.url);
+      }
     }
 
     return { data, error: null };

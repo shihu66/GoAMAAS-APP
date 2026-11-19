@@ -412,6 +412,7 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
 
     // Optional authenticated customer verification (NEVER trust customerAuthUserId from request body)
     let verifiedCustomerAuthUserId = '';
+    let verifiedCustomerEmail = '';
     const authHeader = String(req.headers.authorization || '').trim();
     if (authHeader.toLowerCase().startsWith('bearer ')) {
       const bearerToken = authHeader.slice(7).trim();
@@ -425,9 +426,12 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
             },
           });
           if (authUserResp.ok) {
-            const authUserJson = (await authUserResp.json()) as { id?: string };
+            const authUserJson = (await authUserResp.json()) as { id?: string; email?: string };
             if (authUserJson?.id && UUID_REGEX.test(String(authUserJson.id).trim())) {
               verifiedCustomerAuthUserId = String(authUserJson.id).trim();
+            }
+            if (typeof authUserJson?.email === 'string' && authUserJson.email.trim()) {
+              verifiedCustomerEmail = authUserJson.email.trim().toLowerCase();
             }
           }
         } catch {
@@ -981,6 +985,7 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
               deliveryInstructions: deliveryInstructions || undefined,
               orderNotes: orderNotes || undefined,
               ...(verifiedCustomerAuthUserId ? { customerAuthUserId: verifiedCustomerAuthUserId } : {}),
+              ...(verifiedCustomerEmail ? { customerVerifiedEmail: verifiedCustomerEmail } : {}),
               ...(discountTotal > 0 ? { discountTotal } : {}),
               statusHistory: initialStatusHistory,
               merchantBrandingSnapshot,
@@ -988,6 +993,8 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
           }
         : {}),
     }));
+
+    const effectiveCustomerEmail = customerEmail || verifiedCustomerEmail || '';
 
     const orderInsertResp = await fetch(`${supabaseUrl}/rest/v1/orders`, {
       method: 'POST',
@@ -997,7 +1004,7 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
         order_number: orderNumber,
         customer_name: customerName,
         customer_phone: customerPhone,
-        customer_email: customerEmail || null,
+        customer_email: effectiveCustomerEmail || null,
         address: formattedShippingAddress,
         city,
         subtotal,
@@ -1074,8 +1081,28 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
         { method: 'GET', headers: adminHeaders }
       );
       const existingCustomers = custLookupResp.ok ? ((await custLookupResp.json()) as any[]) : [];
-      if (Array.isArray(existingCustomers) && existingCustomers.length > 0) {
-        const existingCust = existingCustomers[0];
+      let existingCust =
+        Array.isArray(existingCustomers) && existingCustomers.length > 0
+          ? existingCustomers[0]
+          : null;
+
+      if (!existingCust && verifiedCustomerEmail) {
+        const emailLookupResp = await fetch(
+          `${supabaseUrl}/rest/v1/customers?store_id=eq.${encodeURIComponent(storeId)}&email=ilike.${encodeURIComponent(verifiedCustomerEmail)}&order=created_at.asc&limit=1&select=*`,
+          { method: 'GET', headers: adminHeaders }
+        );
+        const existingByEmail = emailLookupResp.ok
+          ? ((await emailLookupResp.json()) as any[])
+          : [];
+        if (Array.isArray(existingByEmail) && existingByEmail.length > 0) {
+          existingCust = existingByEmail[0];
+        }
+      }
+
+      if (existingCust) {
+        const existingPhone = String(existingCust.phone || '').trim();
+        const shouldReplacePhone =
+          !existingPhone || existingPhone.toLowerCase() === 'not provided';
         await fetch(
           `${supabaseUrl}/rest/v1/customers?id=eq.${encodeURIComponent(existingCust.id)}&store_id=eq.${encodeURIComponent(storeId)}`,
           {
@@ -1083,7 +1110,8 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
             headers: adminHeaders,
             body: JSON.stringify({
               name: customerName,
-              ...(customerEmail ? { email: customerEmail } : {}),
+              ...(shouldReplacePhone ? { phone: customerPhone } : {}),
+              ...(effectiveCustomerEmail ? { email: effectiveCustomerEmail } : {}),
               address: streetAddress,
               city,
               orders_count: (Number(existingCust.orders_count) || 0) + 1,
@@ -1099,7 +1127,7 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
             store_id: storeId,
             name: customerName,
             phone: customerPhone,
-            email: customerEmail || null,
+            email: effectiveCustomerEmail || null,
             address: streetAddress,
             city,
             orders_count: 1,

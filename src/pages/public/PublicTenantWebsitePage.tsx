@@ -15,6 +15,7 @@ import {
 } from '../../lib/paymentWorkflow';
 import { WebsitePreviewRenderer } from '../../components/website/WebsitePreviewRenderer';
 import { CustomerPortalTab } from '../../components/website/CustomerPortalModal';
+import { ToastContainer } from '../../components/ui/Toast';
 import { Globe, ArrowLeft, Loader2, Sparkles } from 'lucide-react';
 
 export const PublicTenantWebsitePage: React.FC = () => {
@@ -134,7 +135,10 @@ export const PublicTenantWebsitePage: React.FC = () => {
     const returnPath = isTenantHost
       ? `/?portal=${encodeURIComponent(targetTab)}`
       : `/s/${encodeURIComponent(sub)}?portal=${encodeURIComponent(targetTab)}`;
-    await loginAsCustomerWithGoogle(sub, returnPath);
+    const result = await loginAsCustomerWithGoogle(sub, returnPath);
+    if (result.error) {
+      throw result.error;
+    }
   };
 
   const handleStartBusinessFromCustomerPortal = async () => {
@@ -241,6 +245,7 @@ export const PublicTenantWebsitePage: React.FC = () => {
         onSubmitInquiry={submitPublicCustomerInquiry}
         onOrderPlaced={() => void refreshResolvedSite()}
       />
+      <ToastContainer />
     </div>
   );
 };

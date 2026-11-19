@@ -16,6 +16,7 @@ import {
   setCustomerPortalSessionActive,
   clearCustomerPortalSessionActive,
   signOutFromSupabase,
+  isTenantSubdomainHost,
 } from '../../lib/supabase';
 import {
   AUTHORIZED_ADMIN_EMAIL,
@@ -96,6 +97,7 @@ export const AuthCallbackPage: React.FC = () => {
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isAdminFlowState, setIsAdminFlowState] = useState<boolean>(false);
+  const [isCustomerFlowState, setIsCustomerFlowState] = useState<boolean>(false);
   const [customerReturnTarget, setCustomerReturnTarget] = useState<string | null>(null);
 
   useEffect(() => {
@@ -109,16 +111,21 @@ export const AuthCallbackPage: React.FC = () => {
     const customerIntent = consumeCustomerOAuthIntent();
     const oauthFlowSource = consumeOAuthFlowSource();
     const effectiveNext = nextFromQuery || nextFromIntent || '';
+    const onTenantSubdomain = isTenantSubdomainHost();
     const isAdminAuthFlow =
-      oauthFlowSource === 'admin' ||
-      effectiveNext === '/admin' ||
-      effectiveNext.startsWith('/admin/');
+      !onTenantSubdomain &&
+      (oauthFlowSource === 'admin' ||
+        effectiveNext === '/admin' ||
+        effectiveNext.startsWith('/admin/'));
     const isCustomerAuthFlow =
       !isAdminAuthFlow &&
-      (oauthFlowSource === 'customer' || Boolean(customerIntent));
+      (oauthFlowSource === 'customer' || Boolean(customerIntent) || onTenantSubdomain);
     setIsAdminFlowState(isAdminAuthFlow);
-    if (isCustomerAuthFlow && customerIntent?.returnPath) {
-      setCustomerReturnTarget(customerIntent.returnPath);
+    setIsCustomerFlowState(isCustomerAuthFlow);
+    if (isCustomerAuthFlow) {
+      setCustomerReturnTarget(
+        customerIntent?.returnPath || (onTenantSubdomain ? '/' : null)
+      );
     }
 
     const hashParams =
@@ -158,7 +165,9 @@ export const AuthCallbackPage: React.FC = () => {
       setStatus('error');
       if (reason === 'access_denied') {
         setErrorMessage(
-          'Google authentication was cancelled. You can try again or use your email and password.'
+          isCustomerAuthFlow
+            ? 'Google sign-in was cancelled or denied. Please try again with a Google account or continue with guest checkout.'
+            : 'Google authentication was cancelled. You can try again or use your email and password.'
         );
       } else {
         setErrorMessage(
@@ -366,7 +375,9 @@ export const AuthCallbackPage: React.FC = () => {
           const userId = authenticatedUser.id;
           const targetReturn =
             customerIntent?.returnPath ||
-            (customerIntent?.subdomain
+            (onTenantSubdomain
+              ? '/?portal=account'
+              : customerIntent?.subdomain
               ? `/s/${encodeURIComponent(customerIntent.subdomain)}?portal=account`
               : '/');
 
@@ -530,6 +541,8 @@ export const AuthCallbackPage: React.FC = () => {
             <p className="text-xs text-slate-500">
               {isAdminFlowState
                 ? 'Confirming verified Google identity and server-side administrator permissions.'
+                : isCustomerFlowState
+                ? 'Verifying your customer session and returning you to the storefront.'
                 : 'Verifying your session and synchronizing your merchant workspace.'}
             </p>
           </div>
@@ -561,12 +574,14 @@ export const AuthCallbackPage: React.FC = () => {
                 to={
                   isAdminFlowState
                     ? '/admin/login'
-                    : customerReturnTarget || '/login'
+                    : customerReturnTarget || (isCustomerFlowState ? '/' : '/login')
                 }
                 className="w-full py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs transition-colors flex items-center justify-center gap-2"
               >
                 <span>
-                  {customerReturnTarget ? 'Return to Storefront' : 'Return to Sign In'}
+                  {customerReturnTarget || isCustomerFlowState
+                    ? 'Return to Storefront'
+                    : 'Return to Sign In'}
                 </span>
                 <ArrowRight className="w-3.5 h-3.5" />
               </Link>

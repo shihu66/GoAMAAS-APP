@@ -104,6 +104,162 @@ function parseNumPrice(item: any): number {
   return Number.isFinite(cleaned) && cleaned >= 0 ? cleaned : 0;
 }
 
+function buildPhoneVariants(rawPhone: string): string[] {
+  const cleaned = String(rawPhone || '').replace(/[\s()-]+/g, '').trim();
+  if (!cleaned || cleaned.toLowerCase() === 'not provided') return [];
+  const digitsOnly = cleaned.replace(/^\+/, '');
+  const variants = new Set<string>([cleaned]);
+  if (/^8801[3-9]\d{8}$/.test(digitsOnly)) {
+    variants.add(`0${digitsOnly.slice(3)}`);
+    variants.add(digitsOnly);
+    variants.add(`+${digitsOnly}`);
+  } else if (/^01[3-9]\d{8}$/.test(digitsOnly)) {
+    variants.add(digitsOnly);
+    variants.add(`88${digitsOnly}`);
+    variants.add(`+88${digitsOnly}`);
+  }
+  return Array.from(variants);
+}
+
+/**
+ * Connects a verified Google-authenticated customer to the current merchant's public.customers
+ * CRM directory strictly scoped by store_id, preventing duplicate customer rows and never
+ * overwriting valid order phone numbers or historical totals.
+ */
+async function syncAuthenticatedCustomerToStoreDirectory(params: {
+  supabaseUrl: string;
+  adminHeaders: Record<string, string>;
+  storeId: string;
+  subdomain: string;
+  verifiedEmail: string;
+  fullName: string;
+  phone?: string;
+  shippingAddress?: string;
+  city?: string;
+  preferProfileOverwrite?: boolean;
+}): Promise<void> {
+  try {
+    const cleanEmail = String(params.verifiedEmail || '').trim().toLowerCase();
+    const rawPhone = String(params.phone || '').replace(/[\s()-]+/g, '').trim().slice(0, 30);
+    const cleanPhone =
+      rawPhone && rawPhone.toLowerCase() !== 'not provided' ? rawPhone : '';
+    if (!cleanEmail && !cleanPhone) return;
+
+    const cleanName =
+      String(params.fullName || '').trim().slice(0, 120) ||
+      (cleanEmail ? cleanEmail.split('@')[0] : 'Customer');
+    const cleanAddress = String(params.shippingAddress || '').trim().slice(0, 400);
+    const cleanCity = String(params.city || '').trim().slice(0, 80);
+
+    let existingCust: any = null;
+    if (cleanEmail) {
+      const emailLookupResp = await fetch(
+        `${params.supabaseUrl}/rest/v1/customers?store_id=eq.${encodeURIComponent(params.storeId)}&email=ilike.${encodeURIComponent(cleanEmail)}&order=created_at.asc&limit=1&select=*`,
+        { method: 'GET', headers: params.adminHeaders }
+      );
+      if (emailLookupResp.ok) {
+        const rows = (await emailLookupResp.json()) as any[];
+        if (Array.isArray(rows) && rows.length > 0) {
+          existingCust = rows[0];
+        }
+      }
+    }
+
+    if (!existingCust && cleanPhone) {
+      const variants = buildPhoneVariants(cleanPhone);
+      if (variants.length > 0) {
+        const phoneOrClause = variants.map((p) => `phone.eq.${encodeURIComponent(p)}`).join(',');
+        const phoneLookupResp = await fetch(
+          `${params.supabaseUrl}/rest/v1/customers?store_id=eq.${encodeURIComponent(params.storeId)}&or=(${phoneOrClause})&order=created_at.asc&limit=1&select=*`,
+          { method: 'GET', headers: params.adminHeaders }
+        );
+        if (phoneLookupResp.ok) {
+          const rows = (await phoneLookupResp.json()) as any[];
+          if (Array.isArray(rows) && rows.length > 0) {
+            existingCust = rows[0];
+          }
+        }
+      }
+    }
+
+    if (existingCust && existingCust.id) {
+      const patchBody: Record<string, unknown> = {};
+      const existingEmail = String(existingCust.email || '').trim().toLowerCase();
+      if (cleanEmail && existingEmail !== cleanEmail) {
+        patchBody.email = cleanEmail;
+      }
+
+      const existingName = String(existingCust.name || '').trim();
+      if (
+        cleanName &&
+        (params.preferProfileOverwrite || !existingName || existingName === 'Customer') &&
+        existingName !== cleanName
+      ) {
+        patchBody.name = cleanName;
+      }
+
+      const existingPhone = String(existingCust.phone || '').trim();
+      const existingPhoneMissing =
+        !existingPhone || existingPhone.toLowerCase() === 'not provided';
+      if (
+        cleanPhone &&
+        (existingPhoneMissing || params.preferProfileOverwrite) &&
+        existingPhone !== cleanPhone
+      ) {
+        patchBody.phone = cleanPhone;
+      }
+
+      const existingAddress = String(existingCust.address || '').trim();
+      if (
+        cleanAddress &&
+        (params.preferProfileOverwrite || !existingAddress) &&
+        existingAddress !== cleanAddress
+      ) {
+        patchBody.address = cleanAddress;
+      }
+
+      const existingCity = String(existingCust.city || '').trim();
+      if (
+        cleanCity &&
+        (params.preferProfileOverwrite || !existingCity) &&
+        existingCity !== cleanCity
+      ) {
+        patchBody.city = cleanCity;
+      }
+
+      if (Object.keys(patchBody).length > 0) {
+        await fetch(
+          `${params.supabaseUrl}/rest/v1/customers?id=eq.${encodeURIComponent(existingCust.id)}&store_id=eq.${encodeURIComponent(params.storeId)}`,
+          {
+            method: 'PATCH',
+            headers: params.adminHeaders,
+            body: JSON.stringify(patchBody),
+          }
+        );
+      }
+      return;
+    }
+
+    await fetch(`${params.supabaseUrl}/rest/v1/customers`, {
+      method: 'POST',
+      headers: params.adminHeaders,
+      body: JSON.stringify({
+        store_id: params.storeId,
+        name: cleanName,
+        phone: cleanPhone || 'Not provided',
+        email: cleanEmail || null,
+        address: cleanAddress,
+        city: cleanCity,
+        orders_count: 0,
+        total_spent: 0,
+        notes: `Signed in with Google via ${params.subdomain}.amaas.xyz`,
+      }),
+    });
+  } catch {
+    // Non-fatal store directory sync; never break customer portal operations
+  }
+}
+
 function mapDbOrderToCustomerDto(
   row: any,
   fallbackBranding: Record<string, any>
@@ -437,21 +593,43 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
           : {};
 
       if (req.method === 'GET') {
+        const resolvedEmail = String(adminUserJson.email || verifiedAuthUser.email || '').trim().toLowerCase();
+        const resolvedFullName =
+          String(portalProfile.fullName || existingUserMeta.full_name || existingUserMeta.name || '').trim() ||
+          String(resolvedEmail || '').split('@')[0] ||
+          'Customer';
+        const savedAddresses = Array.isArray(portalProfile.savedAddresses)
+          ? portalProfile.savedAddresses
+          : [];
+        const defaultSavedAddress =
+          savedAddresses.find((a: any) => a && a.isDefault) || savedAddresses[0] || null;
+        const resolvedPhone = String(
+          portalProfile.phone || defaultSavedAddress?.phone || ''
+        ).trim();
+
+        await syncAuthenticatedCustomerToStoreDirectory({
+          supabaseUrl,
+          adminHeaders,
+          storeId,
+          subdomain,
+          verifiedEmail: resolvedEmail,
+          fullName: resolvedFullName,
+          phone: resolvedPhone,
+          shippingAddress: defaultSavedAddress?.shippingAddress || '',
+          city: defaultSavedAddress?.city || '',
+          preferProfileOverwrite: false,
+        });
+
         sendJson(res, 200, {
           ok: true,
           profile: {
             authUserId: verifiedUserId,
-            fullName:
-              String(portalProfile.fullName || existingUserMeta.full_name || existingUserMeta.name || '').trim() ||
-              String(verifiedAuthUser.email || '').split('@')[0] ||
-              'Customer',
+            fullName: resolvedFullName,
             email: String(adminUserJson.email || verifiedAuthUser.email || '').trim(),
             avatarUrl:
               String(existingUserMeta.avatar_url || existingUserMeta.picture || '').trim() || undefined,
             phone: String(portalProfile.phone || '').trim(),
-            savedAddresses: Array.isArray(portalProfile.savedAddresses)
-              ? portalProfile.savedAddresses
-              : [],
+            savedAddresses,
           },
         });
         return;
@@ -545,6 +723,24 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
             }
           ).catch(() => {});
         }
+
+        const verifiedEmail = String(adminUserJson.email || verifiedAuthUser.email || '')
+          .trim()
+          .toLowerCase();
+        const defaultSavedAddress =
+          cleanAddresses.find((a) => a.isDefault) || cleanAddresses[0] || null;
+        await syncAuthenticatedCustomerToStoreDirectory({
+          supabaseUrl,
+          adminHeaders,
+          storeId,
+          subdomain,
+          verifiedEmail,
+          fullName: nextFullName || 'Customer',
+          phone: nextPhone || defaultSavedAddress?.phone || '',
+          shippingAddress: defaultSavedAddress?.shippingAddress || '',
+          city: defaultSavedAddress?.city || '',
+          preferProfileOverwrite: true,
+        });
 
         sendJson(res, 200, {
           ok: true,
@@ -738,6 +934,37 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
         if (!saveCartResp.ok) {
           sendJson(res, 502, { ok: false, code: 'CART_SYNC_FAILED', error: 'Unable to sync shopping bag.' });
           return;
+        }
+
+        if (validatedCompact.length > 0) {
+          const portalProfile =
+            existingUserMeta.customer_portal_profile &&
+            typeof existingUserMeta.customer_portal_profile === 'object'
+              ? existingUserMeta.customer_portal_profile
+              : {};
+          const verifiedEmail = String(adminUserJson.email || verifiedAuthUser.email || '')
+            .trim()
+            .toLowerCase();
+          const savedAddresses = Array.isArray(portalProfile.savedAddresses)
+            ? portalProfile.savedAddresses
+            : [];
+          const defaultSavedAddress =
+            savedAddresses.find((a: any) => a && a.isDefault) || savedAddresses[0] || null;
+          await syncAuthenticatedCustomerToStoreDirectory({
+            supabaseUrl,
+            adminHeaders,
+            storeId,
+            subdomain,
+            verifiedEmail,
+            fullName:
+              String(portalProfile.fullName || existingUserMeta.full_name || existingUserMeta.name || '').trim() ||
+              String(verifiedEmail || '').split('@')[0] ||
+              'Customer',
+            phone: String(portalProfile.phone || defaultSavedAddress?.phone || '').trim(),
+            shippingAddress: defaultSavedAddress?.shippingAddress || '',
+            city: defaultSavedAddress?.city || '',
+            preferProfileOverwrite: false,
+          });
         }
 
         sendJson(res, 200, {

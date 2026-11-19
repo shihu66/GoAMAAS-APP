@@ -2260,7 +2260,9 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                           {isPublicView && !isCustomerAuthenticated && onCustomerGoogleSignIn && (
                             <button
                               type="button"
-                              onClick={() => void onCustomerGoogleSignIn('cart' as CustomerPortalTab)}
+                              onClick={() =>
+                                void onCustomerGoogleSignIn('cart' as CustomerPortalTab).catch(() => {})
+                              }
                               className="px-2.5 py-1 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-[11px] font-semibold text-slate-700 inline-flex items-center gap-1.5 cursor-pointer"
                             >
                               <UserIcon className="w-3 h-3" />

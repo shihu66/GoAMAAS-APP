@@ -179,6 +179,7 @@ export const CustomerPortalModal: React.FC<CustomerPortalModalProps> = ({
   const [addrDefault, setAddrDefault] = useState(false);
 
   const [isSigningIn, setIsSigningIn] = useState(false);
+  const [signInError, setSignInError] = useState<string | null>(null);
   const [isStartingBusiness, setIsStartingBusiness] = useState(false);
 
   const handleStartBusinessClick = async () => {
@@ -457,12 +458,29 @@ export const CustomerPortalModal: React.FC<CustomerPortalModalProps> = ({
               <p className="text-xs text-slate-600 leading-relaxed">{t.signInSubtitle}</p>
             </div>
             <div className="max-w-xs mx-auto space-y-3">
+              {signInError && (
+                <div
+                  role="alert"
+                  className="text-left text-[11px] leading-relaxed text-rose-700 bg-rose-50 border border-rose-200 rounded-xl px-3 py-2.5"
+                >
+                  {signInError}
+                </div>
+              )}
               <button
                 type="button"
                 disabled={isSigningIn}
                 onClick={() => {
                   setIsSigningIn(true);
-                  void onGoogleSignIn().finally(() => setIsSigningIn(false));
+                  setSignInError(null);
+                  void onGoogleSignIn()
+                    .catch((err: unknown) => {
+                      setSignInError(
+                        err instanceof Error
+                          ? err.message
+                          : 'Unable to start Google Sign-In. Please try again.'
+                      );
+                    })
+                    .finally(() => setIsSigningIn(false));
                 }}
                 className="w-full min-h-[44px] px-4 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-900 font-bold text-xs shadow-xs flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-60"
               >
