@@ -290,6 +290,7 @@ interface AppContextType {
 
   // Customers
   customers: Customer[];
+  refreshStoreCustomers: (options?: { silent?: boolean }) => Promise<void>;
   addCustomer: (customer: Omit<Customer, 'id' | 'totalSpent' | 'ordersCount' | 'lastOrderDate' | 'createdAt'>) => void;
   updateCustomer: (id: string, customer: Partial<Customer>) => void;
   deleteCustomer: (id: string) => void;
@@ -2304,6 +2305,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     },
     [user?.id, merchantStoreIds, applyIncomingOrdersAndDetectNew]
+  );
+
+  const refreshStoreCustomers = useCallback(
+    async (_options?: { silent?: boolean }) => {
+      if (!isSupabaseConfigured || !supabase || !user?.id || merchantStoreIds.length === 0) {
+        return;
+      }
+      const res = await fetchCustomersForStoresFromDb(merchantStoreIds);
+      if (!res.error && res.data) {
+        setCustomers(res.data);
+      }
+    },
+    [user?.id, merchantStoreIds]
   );
 
   useEffect(() => {
@@ -6163,6 +6177,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }
           }
         )
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'customers',
+            filter: `store_id=eq.${sid}`,
+          },
+          () => {
+            void refreshStoreCustomers({ silent: true });
+          }
+        )
         .subscribe((status) => {
           setIsOrderRealtimeLive(status === 'SUBSCRIBED');
         });
@@ -6174,11 +6200,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       if (storeIdSet.size === 0) return;
       void refreshStoreOrders({ silent: true });
+      void refreshStoreCustomers({ silent: true });
     }, pollIntervalMs);
 
     const handleVisibilityOrFocus = () => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       void refreshStoreOrders({ silent: true });
+      void refreshStoreCustomers({ silent: true });
     };
 
     window.addEventListener('focus', handleVisibilityOrFocus);
@@ -6195,7 +6223,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       setIsOrderRealtimeLive(false);
     };
-  }, [user?.id, merchantStoreIds, sessionScope, isOrderRealtimeLive, refreshStoreOrders]);
+  }, [user?.id, merchantStoreIds, sessionScope, isOrderRealtimeLive, refreshStoreOrders, refreshStoreCustomers]);
 
   // Synchronize user-scoped support tickets & authoritative service pricing catalog
   useEffect(() => {
@@ -6340,6 +6368,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateOrderPaymentStatus,
         updateOrderTracking,
         customers,
+        refreshStoreCustomers,
         addCustomer,
         updateCustomer,
         deleteCustomer,

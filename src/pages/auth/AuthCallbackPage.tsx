@@ -18,6 +18,7 @@ import {
   signOutFromSupabase,
   isTenantSubdomainHost,
 } from '../../lib/supabase';
+import { fetchCustomerProfileFromPortal } from '../../lib/customerPortal';
 import {
   AUTHORIZED_ADMIN_EMAIL,
   clearAdminLoginFailures,
@@ -393,6 +394,18 @@ export const AuthCallbackPage: React.FC = () => {
             },
             { scope: 'customer' }
           );
+
+          const resolvedCustomerSubdomain =
+            customerIntent?.subdomain ||
+            (onTenantSubdomain && typeof window !== 'undefined'
+              ? window.location.hostname.split('.')[0].trim().toLowerCase()
+              : '');
+          if (resolvedCustomerSubdomain && session?.access_token) {
+            void fetchCustomerProfileFromPortal(
+              resolvedCustomerSubdomain,
+              session.access_token
+            ).catch(() => {});
+          }
 
           setStatus('success');
           showToast(`Signed in as ${fullName}`, 'success');

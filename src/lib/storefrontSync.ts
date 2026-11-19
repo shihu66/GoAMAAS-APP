@@ -614,7 +614,7 @@ export function normalizeCustomerPhone(raw: string): string {
 
 export function getBangladeshPhoneVariants(raw: string): string[] {
   const cleaned = normalizeCustomerPhone(raw);
-  if (!cleaned) return [];
+  if (!cleaned || cleaned.toLowerCase() === 'notprovided' || !/\d/.test(cleaned)) return [];
   const digits = cleaned.replace(/^\+/, '');
   const variants = new Set<string>([cleaned]);
 

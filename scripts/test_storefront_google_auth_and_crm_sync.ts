@@ -8,6 +8,7 @@ import {
   getMainAppOrigin,
   isEmbeddedInAppWebViewUserAgent,
 } from '../src/lib/supabase';
+import { phonesMatch } from '../src/lib/storefrontSync';
 
 async function invokeHandler(
   handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>,
@@ -80,7 +81,12 @@ function testOAuthHelpersAndWebViewDetection(): void {
   // 3. SSR default main app origin points to app.amaas.xyz
   assert.equal(getMainAppOrigin(), 'https://app.amaas.xyz');
 
-  console.log('PASS [1/3]: Storefront Google OAuth queryParams, WebView guard & main origin checks');
+  // 4. Placeholder 'Not provided' phones must NEVER falsely match each other
+  assert.equal(phonesMatch('Not provided', 'Not provided'), false);
+  assert.equal(phonesMatch('Not provided', '01711223344'), false);
+  assert.equal(phonesMatch('01711223344', '+8801711223344'), true);
+
+  console.log('PASS [1/3]: Storefront Google OAuth queryParams, WebView guard, origin & phone matching checks');
 }
 
 async function testCustomerDirectorySyncAndOrderMergeAcrossMerchants(): Promise<void> {

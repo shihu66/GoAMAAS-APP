@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Customer } from '../../types';
 import { phonesMatch } from '../../lib/storefrontSync';
@@ -18,6 +18,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ShoppingBag,
+  RefreshCw,
 } from 'lucide-react';
 import { Modal } from '../../components/ui/Modal';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
@@ -25,12 +26,38 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { StatusBadge } from '../../components/ui/StatusBadge';
 
 export const CustomersPage: React.FC = () => {
-  const { customers, orders, addCustomer, updateCustomer, deleteCustomer, addCustomerNote } = useApp();
+  const {
+    customers,
+    orders,
+    activeStore,
+    stores,
+    refreshStoreCustomers,
+    addCustomer,
+    updateCustomer,
+    deleteCustomer,
+    addCustomerNote,
+    showToast,
+  } = useApp();
 
   const [search, setSearch] = useState('');
   const [selectedTag, setSelectedTag] = useState<string>('all');
   const [currentPage, setCurrentPage] = useState(1);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const itemsPerPage = 6;
+
+  useEffect(() => {
+    void refreshStoreCustomers({ silent: true });
+  }, [activeStore?.id, refreshStoreCustomers]);
+
+  const handleManualRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await refreshStoreCustomers();
+      showToast('Customer directory synchronized.', 'info');
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   // Modals
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -52,9 +79,14 @@ export const CustomersPage: React.FC = () => {
 
   const [noteInput, setNoteInput] = useState('');
 
-  // Filtering
+  // Store-scoped customer list + search/segment filtering
+  const storeScopedCustomers = useMemo(() => {
+    if (!activeStore?.id || stores.length <= 1) return customers;
+    return customers.filter((c) => !c.storeId || c.storeId === activeStore.id);
+  }, [customers, activeStore?.id, stores.length]);
+
   const filteredCustomers = useMemo(() => {
-    return customers.filter((c) => {
+    return storeScopedCustomers.filter((c) => {
       const matchesSearch =
         c.name.toLowerCase().includes(search.toLowerCase()) ||
         c.email.toLowerCase().includes(search.toLowerCase()) ||
@@ -66,7 +98,7 @@ export const CustomersPage: React.FC = () => {
         c.tags.includes(selectedTag);
       return matchesSearch && matchesTag;
     });
-  }, [customers, search, selectedTag]);
+  }, [storeScopedCustomers, search, selectedTag]);
 
   const totalPages = Math.ceil(filteredCustomers.length / itemsPerPage) || 1;
   const paginatedCustomers = filteredCustomers.slice(
@@ -140,13 +172,24 @@ export const CustomersPage: React.FC = () => {
           </p>
         </div>
 
-        <button
-          onClick={handleOpenAdd}
-          className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-xs transition-colors self-start sm:self-auto cursor-pointer whitespace-nowrap shrink-0"
-        >
-          <Plus className="w-3.5 h-3.5" />
-          <span>Add New Customer</span>
-        </button>
+        <div className="flex items-center gap-2 self-start sm:self-auto">
+          <button
+            type="button"
+            onClick={() => void handleManualRefresh()}
+            disabled={isRefreshing}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold transition-colors cursor-pointer disabled:opacity-60 whitespace-nowrap shrink-0"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+            <span>Refresh</span>
+          </button>
+          <button
+            onClick={handleOpenAdd}
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>Add New Customer</span>
+          </button>
+        </div>
       </div>
 
       {/* Search and Filters */}
@@ -185,7 +228,7 @@ export const CustomersPage: React.FC = () => {
       </div>
 
       {/* Customers Table */}
-      {customers.length === 0 ? (
+      {storeScopedCustomers.length === 0 ? (
         <EmptyState
           icon={Users}
           title="No customer records yet"
@@ -228,7 +271,7 @@ export const CustomersPage: React.FC = () => {
                     </div>
                     <p className="font-mono text-blue-600 dark:text-blue-400 mt-0.5">{c.phone}</p>
                     <p className="text-[11px] text-slate-500">
-                      {c.city}
+                      {c.city || '—'}
                       {c.email ? ` · ${c.email}` : ''}
                     </p>
                   </div>
@@ -303,7 +346,7 @@ export const CustomersPage: React.FC = () => {
                       <span className="text-slate-400 text-[10px]">{c.email}</span>
                     </td>
                     <td className="py-3.5 px-4 text-slate-700 dark:text-slate-300">
-                      {c.city}
+                      {c.city || '—'}
                     </td>
                     <td className="py-3.5 px-4 text-right font-mono font-bold tabular-nums text-slate-900 dark:text-white">
                       {c.ordersCount}
@@ -540,10 +583,13 @@ export const CustomersPage: React.FC = () => {
             {(() => {
               const matchedOrders = orders.filter(
                 (o) =>
-                  phonesMatch(o.customerPhone, activeCustomer.phone) ||
-                  (activeCustomer.email &&
-                    o.customerEmail &&
-                    o.customerEmail.toLowerCase() === activeCustomer.email.toLowerCase())
+                  (!activeCustomer.storeId ||
+                    !o.storeId ||
+                    o.storeId === activeCustomer.storeId) &&
+                  (phonesMatch(o.customerPhone, activeCustomer.phone) ||
+                    (activeCustomer.email &&
+                      o.customerEmail &&
+                      o.customerEmail.toLowerCase() === activeCustomer.email.toLowerCase()))
               );
               return (
                 <div>
