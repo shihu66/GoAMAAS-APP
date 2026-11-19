@@ -4,9 +4,16 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import customerPortalHandler from '../api/customer-portal';
 import publicOrderHandler from '../api/public-order';
 import {
+  buildCrossOriginStorefrontErrorUrl,
+  buildCrossOriginStorefrontHandoffUrl,
   buildGoogleOAuthQueryParams,
+  buildGoogleOAuthRedirectTo,
+  extractTenantSubdomainFromHostname,
+  getCrossOriginStorefrontBridgeTarget,
   getMainAppOrigin,
+  getSharedPkceCookieDomain,
   isEmbeddedInAppWebViewUserAgent,
+  isSafeInternalRedirectPath,
 } from '../src/lib/supabase';
 import { phonesMatch } from '../src/lib/storefrontSync';
 
@@ -52,7 +59,105 @@ function testOAuthHelpersAndWebViewDetection(): void {
     prompt: 'select_account',
   });
 
-  // 2. Embedded in-app WebView UA detection (403 disallowed_useragent prevention)
+  // 2. Storefront customer OAuth on *.amaas.xyz routes through the already-working app.amaas.xyz/auth/callback
+  assert.equal(
+    buildGoogleOAuthRedirectTo('https://fortyninee.amaas.xyz', undefined, {
+      isCustomerFlow: true,
+      subdomain: 'fortyninee',
+      returnPath: '/?portal=account',
+    }),
+    'https://app.amaas.xyz/auth/callback?storefront=fortyninee&return_path=%2F%3Fportal%3Daccount'
+  );
+  assert.equal(
+    buildGoogleOAuthRedirectTo('https://dhakakicks.amaas.xyz/', undefined, {
+      isCustomerFlow: true,
+      subdomain: 'dhakakicks',
+      returnPath: '/?portal=cart',
+    }),
+    'https://app.amaas.xyz/auth/callback?storefront=dhakakicks&return_path=%2F%3Fportal%3Dcart'
+  );
+  // Reject unsafe returnPath injection when constructing OAuth redirect
+  assert.equal(
+    buildGoogleOAuthRedirectTo('https://fortyninee.amaas.xyz', undefined, {
+      isCustomerFlow: true,
+      subdomain: 'fortyninee',
+      returnPath: 'https://ais-dev-example.run.app/',
+    }),
+    'https://app.amaas.xyz/auth/callback?storefront=fortyninee&return_path=%2F%3Fportal%3Daccount'
+  );
+  // Merchant / main-app / path-based storefront / localhost flows preserve same-origin callback
+  assert.equal(
+    buildGoogleOAuthRedirectTo('https://app.amaas.xyz'),
+    'https://app.amaas.xyz/auth/callback'
+  );
+  assert.equal(
+    buildGoogleOAuthRedirectTo('https://app.amaas.xyz', undefined, {
+      isCustomerFlow: true,
+      subdomain: 'fortyninee',
+      returnPath: '/s/fortyninee?portal=account',
+    }),
+    'https://app.amaas.xyz/auth/callback'
+  );
+  assert.equal(
+    buildGoogleOAuthRedirectTo('http://fortyninee.localhost:3000', undefined, {
+      isCustomerFlow: true,
+      subdomain: 'fortyninee',
+      returnPath: '/?portal=account',
+    }),
+    'http://fortyninee.localhost:3000/auth/callback'
+  );
+
+  // 3. Cross-origin storefront bridge parsing, strict subdomain validation, and handoff URLs
+  const validBridge = getCrossOriginStorefrontBridgeTarget(
+    new URLSearchParams('storefront=fortyninee&return_path=%2F%3Fportal%3Daccount')
+  );
+  assert.deepEqual(validBridge, {
+    storefront: 'fortyninee',
+    returnPath: '/?portal=account',
+    origin: 'https://fortyninee.amaas.xyz',
+  });
+  assert.equal(
+    getCrossOriginStorefrontBridgeTarget(new URLSearchParams('storefront=admin&return_path=/')),
+    null
+  );
+  assert.equal(
+    getCrossOriginStorefrontBridgeTarget(new URLSearchParams('storefront=evil.com&return_path=/')),
+    null
+  );
+
+  const handoff = buildCrossOriginStorefrontHandoffUrl(
+    'fortyninee',
+    '/?portal=account',
+    'jwt-at-123',
+    'rt-456'
+  );
+  assert.equal(
+    handoff,
+    'https://fortyninee.amaas.xyz/auth/callback?portal_return=%2F%3Fportal%3Daccount#sb_handoff_at=jwt-at-123&sb_handoff_rt=rt-456'
+  );
+  assert.throws(() =>
+    buildCrossOriginStorefrontHandoffUrl('admin', '/?portal=account', 'at', 'rt')
+  );
+  assert.equal(
+    buildCrossOriginStorefrontErrorUrl('fortyninee', 'https://evil.com', { error: 'access_denied' }),
+    'https://fortyninee.amaas.xyz/auth/callback?portal_return=%2F%3Fportal%3Daccount&error=access_denied'
+  );
+
+  // 4. Shared parent cookie domain & tenant extraction helpers
+  assert.equal(getSharedPkceCookieDomain('fortyninee.amaas.xyz'), '.amaas.xyz');
+  assert.equal(getSharedPkceCookieDomain('app.amaas.xyz'), '.amaas.xyz');
+  assert.equal(getSharedPkceCookieDomain('localhost'), null);
+  assert.equal(extractTenantSubdomainFromHostname('fortyninee.amaas.xyz'), 'fortyninee');
+  assert.equal(extractTenantSubdomainFromHostname('app.amaas.xyz'), '');
+
+  // 5. Internal redirect path validation prevents external/AI Studio preview or admin escape
+  assert.equal(isSafeInternalRedirectPath('/?portal=account'), true);
+  assert.equal(isSafeInternalRedirectPath('/s/fortyninee?portal=account'), true);
+  assert.equal(isSafeInternalRedirectPath('https://ais-dev-example.run.app/'), false);
+  assert.equal(isSafeInternalRedirectPath('//evil.example.com'), false);
+  assert.equal(isSafeInternalRedirectPath('/admin'), false);
+
+  // 6. Embedded in-app WebView UA detection (403 disallowed_useragent prevention)
   assert.equal(
     isEmbeddedInAppWebViewUserAgent(
       'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Mobile/15E148 [FBAN/FBIOS;FBAV/438.0]'
@@ -78,15 +183,15 @@ function testOAuthHelpersAndWebViewDetection(): void {
     false
   );
 
-  // 3. SSR default main app origin points to app.amaas.xyz
+  // 7. SSR default main app origin points to app.amaas.xyz
   assert.equal(getMainAppOrigin(), 'https://app.amaas.xyz');
 
-  // 4. Placeholder 'Not provided' phones must NEVER falsely match each other
+  // 8. Placeholder 'Not provided' phones must NEVER falsely match each other
   assert.equal(phonesMatch('Not provided', 'Not provided'), false);
   assert.equal(phonesMatch('Not provided', '01711223344'), false);
   assert.equal(phonesMatch('01711223344', '+8801711223344'), true);
 
-  console.log('PASS [1/3]: Storefront Google OAuth queryParams, WebView guard, origin & phone matching checks');
+  console.log('PASS [1/3]: Storefront Google OAuth bridge, PKCE cookie domain, WebView guard, origin & phone matching checks');
 }
 
 async function testCustomerDirectorySyncAndOrderMergeAcrossMerchants(): Promise<void> {

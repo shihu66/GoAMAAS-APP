@@ -278,11 +278,154 @@ export interface InitialOAuthUrlSnapshot {
   search: string;
   code: string | null;
   flowId: string | null;
+  storefront: string | null;
+  returnPath: string | null;
   error: string | null;
   errorCode: string | null;
   errorDescription: string | null;
   hasImplicitTokens: boolean;
+  isCrossOriginStorefrontBridge: boolean;
   hasCallbackPayload: boolean;
+}
+
+export function extractTenantSubdomainFromHostname(hostname?: string | null): string {
+  const host = (hostname || '').trim().toLowerCase().split(':')[0];
+  if (!host) return '';
+  let candidate = '';
+  if (host.endsWith('.amaas.xyz') && host !== 'amaas.xyz') {
+    candidate = host.slice(0, -'.amaas.xyz'.length);
+  } else if (host.endsWith('.localhost') && host !== 'localhost') {
+    candidate = host.slice(0, -'.localhost'.length);
+  }
+  if (!candidate || candidate.includes('.')) return '';
+  return validateSubdomainFormat(candidate).valid ? candidate : '';
+}
+
+export function getSharedPkceCookieDomain(hostname?: string | null): string | null {
+  const host = (
+    hostname ||
+    (typeof window !== 'undefined' && window.location?.hostname ? window.location.hostname : '')
+  )
+    .trim()
+    .toLowerCase()
+    .split(':')[0];
+  if (!host) return null;
+  if (host === 'amaas.xyz' || host.endsWith('.amaas.xyz')) {
+    return '.amaas.xyz';
+  }
+  return null;
+}
+
+function isPkceVerifierStorageKey(key: string): boolean {
+  return key.includes('-code-verifier');
+}
+
+function getPkceCookieName(key: string): string {
+  return `goamaas_pkce_${key.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+}
+
+export function writeSharedPkceCookie(key: string, value: string): void {
+  if (typeof document === 'undefined') return;
+  const domain = getSharedPkceCookieDomain();
+  if (!domain) return;
+  const isHttps = typeof window !== 'undefined' && window.location?.protocol === 'https:';
+  const secureFlag = isHttps ? '; Secure' : '';
+  document.cookie = `${getPkceCookieName(key)}=${encodeURIComponent(value)}; Domain=${domain}; Path=/; Max-Age=600; SameSite=Lax${secureFlag}`;
+}
+
+export function readSharedPkceCookie(key: string): string | null {
+  if (typeof document === 'undefined' || !document.cookie) return null;
+  const prefix = `${getPkceCookieName(key)}=`;
+  const parts = document.cookie.split(';');
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (trimmed.startsWith(prefix)) {
+      try {
+        return decodeURIComponent(trimmed.slice(prefix.length));
+      } catch {
+        return trimmed.slice(prefix.length);
+      }
+    }
+  }
+  return null;
+}
+
+export function clearSharedPkceCookie(key: string): void {
+  if (typeof document === 'undefined') return;
+  const domain = getSharedPkceCookieDomain();
+  if (!domain) return;
+  const isHttps = typeof window !== 'undefined' && window.location?.protocol === 'https:';
+  const secureFlag = isHttps ? '; Secure' : '';
+  document.cookie = `${getPkceCookieName(key)}=; Domain=${domain}; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax${secureFlag}`;
+}
+
+const pkceCookieBridgedStorage = {
+  getItem: (key: string): string | null => {
+    let val: string | null = null;
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        val = window.localStorage.getItem(key);
+      } catch {
+        val = null;
+      }
+    }
+    if (!val && isPkceVerifierStorageKey(key)) {
+      val = readSharedPkceCookie(key);
+    }
+    return val;
+  },
+  setItem: (key: string, value: string): void => {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        window.localStorage.setItem(key, value);
+      } catch {
+        // Ignore storage exceptions
+      }
+    }
+    if (isPkceVerifierStorageKey(key)) {
+      writeSharedPkceCookie(key, value);
+    }
+  },
+  removeItem: (key: string): void => {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        window.localStorage.removeItem(key);
+      } catch {
+        // Ignore storage exceptions
+      }
+    }
+    if (isPkceVerifierStorageKey(key)) {
+      clearSharedPkceCookie(key);
+    }
+  },
+};
+
+function createPkceCookieFirstMemoryStorage() {
+  const mem = new Map<string, string>();
+  return {
+    getItem: (key: string): string | null => {
+      if (isPkceVerifierStorageKey(key)) {
+        const cookieVal = readSharedPkceCookie(key);
+        if (cookieVal) return cookieVal;
+        if (typeof window !== 'undefined' && window.localStorage) {
+          try {
+            const lsVal = window.localStorage.getItem(key);
+            if (lsVal) return lsVal;
+          } catch {}
+        }
+      }
+      return mem.get(key) ?? null;
+    },
+    setItem: (key: string, value: string): void => {
+      mem.set(key, value);
+    },
+    removeItem: (key: string): void => {
+      mem.delete(key);
+      if (isPkceVerifierStorageKey(key)) {
+        clearSharedPkceCookie(key);
+      }
+    },
+  };
 }
 
 let pendingImplicitHashTokens: { access_token: string; refresh_token: string } | null = null;
@@ -295,10 +438,13 @@ function captureInitialOAuthUrlSnapshot(): InitialOAuthUrlSnapshot {
       search: '',
       code: null,
       flowId: null,
+      storefront: null,
+      returnPath: null,
       error: null,
       errorCode: null,
       errorDescription: null,
       hasImplicitTokens: false,
+      isCrossOriginStorefrontBridge: false,
       hasCallbackPayload: false,
     };
   }
@@ -312,21 +458,41 @@ function captureInitialOAuthUrlSnapshot(): InitialOAuthUrlSnapshot {
 
     const code = searchParams.get('code') || null;
     const flowId = searchParams.get('sb_flow_id') || null;
+    const rawStorefront = (searchParams.get('storefront') || '').trim().toLowerCase();
+    const storefront =
+      rawStorefront && validateSubdomainFormat(rawStorefront).valid ? rawStorefront : null;
+    const rawReturnPath = (searchParams.get('return_path') || searchParams.get('portal_return') || '').trim();
+    const returnPath = rawReturnPath || null;
+
     const error = searchParams.get('error') || hashParams.get('error') || null;
     const errorCode = searchParams.get('error_code') || hashParams.get('error_code') || null;
     const errorDescription =
       searchParams.get('error_description') || hashParams.get('error_description') || null;
 
-    const accessToken = hashParams.get('access_token');
-    const refreshToken = hashParams.get('refresh_token');
+    const handoffAccessToken = hashParams.get('sb_handoff_at');
+    const handoffRefreshToken = hashParams.get('sb_handoff_rt');
+    const accessToken = handoffAccessToken || hashParams.get('access_token');
+    const refreshToken = handoffRefreshToken || hashParams.get('refresh_token');
     const hasImplicitTokens = Boolean(accessToken && refreshToken);
     if (accessToken && refreshToken) {
       pendingImplicitHashTokens = {
         access_token: accessToken,
         refresh_token: refreshToken,
       };
+      // Scrub internal handoff tokens from location.hash synchronously before GoTrueClient initializes
+      if (handoffAccessToken && window.history?.replaceState) {
+        try {
+          window.history.replaceState(window.history.state, '', `${pathname}${search}`);
+        } catch {
+          // Ignore history replacement errors
+        }
+      }
     }
 
+    const onTenantHost = Boolean(extractTenantSubdomainFromHostname(window.location.hostname));
+    const isCrossOriginStorefrontBridge = Boolean(
+      storefront && !onTenantHost && pathname === '/auth/callback'
+    );
     const hasCallbackPayload = Boolean(code || error || errorCode || hasImplicitTokens);
 
     return {
@@ -334,10 +500,13 @@ function captureInitialOAuthUrlSnapshot(): InitialOAuthUrlSnapshot {
       search,
       code,
       flowId,
+      storefront,
+      returnPath,
       error,
       errorCode,
       errorDescription,
       hasImplicitTokens,
+      isCrossOriginStorefrontBridge,
       hasCallbackPayload,
     };
   } catch {
@@ -346,10 +515,13 @@ function captureInitialOAuthUrlSnapshot(): InitialOAuthUrlSnapshot {
       search: '',
       code: null,
       flowId: null,
+      storefront: null,
+      returnPath: null,
       error: null,
       errorCode: null,
       errorDescription: null,
       hasImplicitTokens: false,
+      isCrossOriginStorefrontBridge: false,
       hasCallbackPayload: false,
     };
   }
@@ -379,6 +551,12 @@ export function consumeRootOAuthBridgeRedirect(): string | null {
   const forwarded = new URLSearchParams();
   if (initialOAuthUrlSnapshot.code) forwarded.set('code', initialOAuthUrlSnapshot.code);
   if (initialOAuthUrlSnapshot.flowId) forwarded.set('sb_flow_id', initialOAuthUrlSnapshot.flowId);
+  if (initialOAuthUrlSnapshot.storefront) {
+    forwarded.set('storefront', initialOAuthUrlSnapshot.storefront);
+  }
+  if (initialOAuthUrlSnapshot.returnPath) {
+    forwarded.set('return_path', initialOAuthUrlSnapshot.returnPath);
+  }
   if (initialOAuthUrlSnapshot.error) forwarded.set('error', initialOAuthUrlSnapshot.error);
   if (initialOAuthUrlSnapshot.errorCode) {
     forwarded.set('error_code', initialOAuthUrlSnapshot.errorCode);
@@ -397,7 +575,8 @@ export const supabase: SupabaseClient | null = isSupabaseConfigured
         flowType: 'pkce',
         persistSession: true,
         autoRefreshToken: true,
-        detectSessionInUrl: true,
+        detectSessionInUrl: !initialOAuthUrlSnapshot.isCrossOriginStorefrontBridge,
+        storage: typeof window !== 'undefined' ? pkceCookieBridgedStorage : undefined,
       },
     })
   : null;
@@ -570,7 +749,7 @@ export function clearCustomerOAuthIntentStorage(): void {
 export function setCustomerOAuthIntent(subdomain: string, returnPath: string): void {
   if (typeof window === 'undefined') return;
   const cleanSub = (subdomain || '').trim().toLowerCase();
-  const safePath = returnPath && returnPath.startsWith('/') ? returnPath : '/';
+  const safePath = isSafeInternalRedirectPath(returnPath) ? returnPath.trim() : '/';
   const payload: CustomerOAuthIntentPayload = {
     subdomain: cleanSub,
     returnPath: safePath,
@@ -602,8 +781,8 @@ export function peekCustomerOAuthIntent(): CustomerOAuthIntentPayload | null {
       return null;
     }
     const safeReturn =
-      typeof parsed.returnPath === 'string' && parsed.returnPath.startsWith('/')
-        ? parsed.returnPath
+      typeof parsed.returnPath === 'string' && isSafeInternalRedirectPath(parsed.returnPath)
+        ? parsed.returnPath.trim()
         : '/';
     return {
       subdomain: String(parsed.subdomain || '').trim().toLowerCase(),
@@ -656,15 +835,7 @@ export function clearCustomerPortalSessionActive(): void {
 
 export function isTenantSubdomainHost(): boolean {
   if (typeof window === 'undefined') return false;
-  const host = window.location.hostname.toLowerCase();
-  let candidate = '';
-  if (host.endsWith('.amaas.xyz') && host !== 'amaas.xyz') {
-    candidate = host.slice(0, -'.amaas.xyz'.length);
-  } else if (host.endsWith('.localhost') && host !== 'localhost') {
-    candidate = host.slice(0, -'.localhost'.length);
-  }
-  if (!candidate || candidate.includes('.')) return false;
-  return validateSubdomainFormat(candidate).valid;
+  return Boolean(extractTenantSubdomainFromHostname(window.location.hostname));
 }
 
 export function getMainAppOrigin(): string {
@@ -897,6 +1068,193 @@ export function buildGoogleOAuthQueryParams(
   };
 }
 
+export interface CrossOriginStorefrontBridgeTarget {
+  storefront: string;
+  returnPath: string;
+  origin: string;
+}
+
+export function resolveStorefrontOriginFromSubdomain(
+  subdomain: string,
+  currentLocation?: { protocol?: string; hostname?: string; port?: string }
+): string {
+  const clean = (subdomain || '').trim().toLowerCase();
+  if (!validateSubdomainFormat(clean).valid) {
+    return 'https://app.amaas.xyz';
+  }
+  const host = (
+    currentLocation?.hostname ||
+    (typeof window !== 'undefined' ? window.location.hostname : '')
+  ).toLowerCase();
+  if (host.endsWith('.localhost') || host === 'localhost') {
+    const protocol =
+      currentLocation?.protocol ||
+      (typeof window !== 'undefined' ? window.location.protocol : 'http:');
+    const port =
+      currentLocation?.port ||
+      (typeof window !== 'undefined' && window.location.port ? `:${window.location.port}` : '');
+    return `${protocol === 'http:' ? 'http:' : 'https:'}//${clean}.localhost${port}`;
+  }
+  return `https://${clean}.amaas.xyz`;
+}
+
+export function getCrossOriginStorefrontBridgeTarget(
+  searchParams?: URLSearchParams
+): CrossOriginStorefrontBridgeTarget | null {
+  if (isTenantSubdomainHost()) return null;
+  const rawStorefront = (
+    searchParams?.get('storefront') ||
+    initialOAuthUrlSnapshot.storefront ||
+    ''
+  )
+    .trim()
+    .toLowerCase();
+  if (!rawStorefront || !validateSubdomainFormat(rawStorefront).valid) {
+    return null;
+  }
+  const rawReturn =
+    searchParams?.get('return_path') ||
+    searchParams?.get('portal_return') ||
+    initialOAuthUrlSnapshot.returnPath ||
+    '';
+  const returnPath = isSafeInternalRedirectPath(rawReturn) ? rawReturn.trim() : '/?portal=account';
+  return {
+    storefront: rawStorefront,
+    returnPath,
+    origin: resolveStorefrontOriginFromSubdomain(rawStorefront),
+  };
+}
+
+export function buildCrossOriginStorefrontHandoffUrl(
+  storefront: string,
+  returnPath: string,
+  accessToken: string,
+  refreshToken: string,
+  originOverride?: string
+): string {
+  const cleanSub = (storefront || '').trim().toLowerCase();
+  if (!validateSubdomainFormat(cleanSub).valid) {
+    throw new Error('Invalid merchant storefront subdomain for OAuth handoff.');
+  }
+  const safeReturn = isSafeInternalRedirectPath(returnPath) ? returnPath.trim() : '/?portal=account';
+  const baseOrigin = originOverride
+    ? originOverride.replace(/\/+$/, '')
+    : resolveStorefrontOriginFromSubdomain(cleanSub);
+  const query = new URLSearchParams({ portal_return: safeReturn }).toString();
+  const fragment = new URLSearchParams({
+    sb_handoff_at: accessToken,
+    sb_handoff_rt: refreshToken,
+  }).toString();
+  return `${baseOrigin}/auth/callback?${query}#${fragment}`;
+}
+
+export function buildCrossOriginStorefrontErrorUrl(
+  storefront: string,
+  returnPath: string,
+  errorParams: { error?: string | null; errorCode?: string | null; errorDescription?: string | null },
+  originOverride?: string
+): string {
+  const cleanSub = (storefront || '').trim().toLowerCase();
+  if (!validateSubdomainFormat(cleanSub).valid) {
+    return '/login';
+  }
+  const safeReturn = isSafeInternalRedirectPath(returnPath) ? returnPath.trim() : '/?portal=account';
+  const baseOrigin = originOverride
+    ? originOverride.replace(/\/+$/, '')
+    : resolveStorefrontOriginFromSubdomain(cleanSub);
+  const qs = new URLSearchParams({ portal_return: safeReturn });
+  if (errorParams.error) qs.set('error', errorParams.error);
+  if (errorParams.errorCode) qs.set('error_code', errorParams.errorCode);
+  if (errorParams.errorDescription) qs.set('error_description', errorParams.errorDescription);
+  return `${baseOrigin}/auth/callback?${qs.toString()}`;
+}
+
+/**
+ * Performs the PKCE authorization code exchange on app.amaas.xyz inside an isolated,
+ * memory-only Supabase client reading the shared .amaas.xyz PKCE verifier cookie so
+ * merchant sessions in app.amaas.xyz localStorage are never overwritten.
+ */
+export async function exchangeCrossOriginStorefrontPkceCode(
+  code: string,
+  flowId?: string
+): Promise<{ session: Session | null; error: Error | null }> {
+  if (!isSupabaseConfigured || !supabaseUrl || !supabaseAnonKey) {
+    return { session: null, error: new Error('Supabase client is not configured.') };
+  }
+  try {
+    const ephemeralClient = createClient(supabaseUrl, supabaseAnonKey, {
+      auth: {
+        flowType: 'pkce',
+        persistSession: false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+        storage: createPkceCookieFirstMemoryStorage(),
+      },
+    });
+    const { data, error } = await ephemeralClient.auth.exchangeCodeForSession(
+      code,
+      flowId ? { flowId } : undefined
+    );
+    return {
+      session: data?.session ?? null,
+      error: error ?? null,
+    };
+  } catch (err: unknown) {
+    return {
+      session: null,
+      error: err instanceof Error ? err : new Error('Failed to complete PKCE code exchange.'),
+    };
+  }
+}
+
+/**
+ * Builds the exact OAuth callback URL.
+ * Customer sign-ins on *.amaas.xyz tenant storefronts reuse the already-allowlisted
+ * https://app.amaas.xyz/auth/callback endpoint with strict storefront + return_path parameters,
+ * keeping Google OAuth & Supabase configuration unified and preserving merchant login unchanged.
+ */
+export function buildGoogleOAuthRedirectTo(
+  originOverride?: string,
+  customRedirectTo?: string,
+  options?: Pick<SignInWithGoogleOptions, 'isCustomerFlow' | 'subdomain' | 'returnPath'>
+): string {
+  if (customRedirectTo && customRedirectTo.trim()) {
+    return customRedirectTo.trim();
+  }
+  const rawOrigin =
+    (originOverride && originOverride.trim()) ||
+    (typeof window !== 'undefined' && window.location?.origin
+      ? window.location.origin
+      : 'https://app.amaas.xyz');
+  const cleanOrigin = rawOrigin.replace(/\/+$/, '');
+
+  if (options?.isCustomerFlow) {
+    try {
+      const parsedOrigin = new URL(cleanOrigin);
+      const hostname = parsedOrigin.hostname.toLowerCase();
+      const hostTenant = extractTenantSubdomainFromHostname(hostname);
+      if (hostTenant && hostname.endsWith('.amaas.xyz')) {
+        const storefront =
+          options.subdomain && validateSubdomainFormat(options.subdomain).valid
+            ? options.subdomain.trim().toLowerCase()
+            : hostTenant;
+        const safeReturn = isSafeInternalRedirectPath(options.returnPath)
+          ? options.returnPath!.trim()
+          : '/?portal=account';
+        const qs = new URLSearchParams({
+          storefront,
+          return_path: safeReturn,
+        });
+        return `https://app.amaas.xyz/auth/callback?${qs.toString()}`;
+      }
+    } catch {
+      // Fallback to same-origin callback if origin cannot be parsed
+    }
+  }
+
+  return `${cleanOrigin}/auth/callback`;
+}
+
 /**
  * Initiates the real Google OAuth sign-in flow through Supabase Auth.
  * Never simulates authentication and never exposes authorized emails in query strings.
@@ -937,13 +1295,9 @@ export async function signInWithGoogle(
       };
     }
 
-    // Always preserve current window.location.origin so PKCE code_verifier in localStorage
-    // and the /auth/callback landing page share the exact same origin.
-    const origin =
-      typeof window !== 'undefined' && window.location.origin
-        ? window.location.origin
-        : 'https://app.amaas.xyz';
-    const redirectTo = customRedirectTo || `${origin}/auth/callback`;
+    // Storefront customer logins on *.amaas.xyz reuse the working https://app.amaas.xyz/auth/callback
+    // endpoint with PKCE verifier bridged across .amaas.xyz cookies; main app & local flows use same origin.
+    const redirectTo = buildGoogleOAuthRedirectTo(undefined, customRedirectTo, options);
 
     if (options?.isAdminFlow) {
       clearMerchantOAuthIntentStorage();

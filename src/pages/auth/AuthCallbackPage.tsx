@@ -17,6 +17,10 @@ import {
   clearCustomerPortalSessionActive,
   signOutFromSupabase,
   isTenantSubdomainHost,
+  getCrossOriginStorefrontBridgeTarget,
+  exchangeCrossOriginStorefrontPkceCode,
+  buildCrossOriginStorefrontHandoffUrl,
+  buildCrossOriginStorefrontErrorUrl,
 } from '../../lib/supabase';
 import { fetchCustomerProfileFromPortal } from '../../lib/customerPortal';
 import {
@@ -106,28 +110,8 @@ export const AuthCallbackPage: React.FC = () => {
     processedRef.current = true;
 
     const initialSnapshot = getInitialOAuthUrlSnapshot();
-    const nextFromQuery = (searchParams.get('next') || '').trim();
-    const nextFromIntent = consumeAdminOAuthIntent();
-    const merchantNextIntent = consumeMerchantOAuthIntent();
-    const customerIntent = consumeCustomerOAuthIntent();
-    const oauthFlowSource = consumeOAuthFlowSource();
-    const effectiveNext = nextFromQuery || nextFromIntent || '';
     const onTenantSubdomain = isTenantSubdomainHost();
-    const isAdminAuthFlow =
-      !onTenantSubdomain &&
-      (oauthFlowSource === 'admin' ||
-        effectiveNext === '/admin' ||
-        effectiveNext.startsWith('/admin/'));
-    const isCustomerAuthFlow =
-      !isAdminAuthFlow &&
-      (oauthFlowSource === 'customer' || Boolean(customerIntent) || onTenantSubdomain);
-    setIsAdminFlowState(isAdminAuthFlow);
-    setIsCustomerFlowState(isCustomerAuthFlow);
-    if (isCustomerAuthFlow) {
-      setCustomerReturnTarget(
-        customerIntent?.returnPath || (onTenantSubdomain ? '/' : null)
-      );
-    }
+    const crossOriginBridge = getCrossOriginStorefrontBridgeTarget(searchParams);
 
     const hashParams =
       typeof window !== 'undefined' && window.location.hash
@@ -142,6 +126,90 @@ export const AuthCallbackPage: React.FC = () => {
       searchParams.get('error_description') ||
       hashParams.get('error_description') ||
       initialSnapshot.errorDescription;
+
+    // Cross-origin storefront OAuth bridge on https://app.amaas.xyz/auth/callback:
+    // Complete PKCE exchange via Supabase Auth using the shared .amaas.xyz verifier cookie
+    // and return customer cleanly to their originating https://<storefront>.amaas.xyz host.
+    if (crossOriginBridge) {
+      setIsCustomerFlowState(true);
+      if (errorParam || errorCode) {
+        window.location.replace(
+          buildCrossOriginStorefrontErrorUrl(
+            crossOriginBridge.storefront,
+            crossOriginBridge.returnPath,
+            {
+              error: errorParam,
+              errorCode,
+              errorDescription,
+            }
+          )
+        );
+        return;
+      }
+
+      const bridgeCode = searchParams.get('code') || initialSnapshot.code;
+      const bridgeFlowId = searchParams.get('sb_flow_id') || initialSnapshot.flowId || undefined;
+      if (!bridgeCode) {
+        window.location.replace(`${crossOriginBridge.origin}${crossOriginBridge.returnPath}`);
+        return;
+      }
+
+      void (async () => {
+        if (exchangedAuthCodes.has(bridgeCode)) return;
+        exchangedAuthCodes.add(bridgeCode);
+        const { session: bridgeSession, error: bridgeErr } =
+          await exchangeCrossOriginStorefrontPkceCode(bridgeCode, bridgeFlowId);
+        if (bridgeSession?.access_token && bridgeSession?.refresh_token) {
+          setStatus('success');
+          window.location.replace(
+            buildCrossOriginStorefrontHandoffUrl(
+              crossOriginBridge.storefront,
+              crossOriginBridge.returnPath,
+              bridgeSession.access_token,
+              bridgeSession.refresh_token
+            )
+          );
+          return;
+        }
+        window.location.replace(
+          buildCrossOriginStorefrontErrorUrl(
+            crossOriginBridge.storefront,
+            crossOriginBridge.returnPath,
+            {
+              error: 'pkce_exchange_failed',
+              errorDescription:
+                bridgeErr?.message ||
+                'Failed to complete Google verification for this storefront. Please try again.',
+            }
+          )
+        );
+      })();
+      return;
+    }
+
+    const nextFromQuery = (searchParams.get('next') || '').trim();
+    const portalReturnRaw = (searchParams.get('portal_return') || '').trim();
+    const safePortalReturn = isSafeInternalRedirectPath(portalReturnRaw) ? portalReturnRaw : '';
+    const nextFromIntent = consumeAdminOAuthIntent();
+    const merchantNextIntent = consumeMerchantOAuthIntent();
+    const customerIntent = consumeCustomerOAuthIntent();
+    const oauthFlowSource = consumeOAuthFlowSource();
+    const effectiveNext = nextFromQuery || nextFromIntent || '';
+    const isAdminAuthFlow =
+      !onTenantSubdomain &&
+      (oauthFlowSource === 'admin' ||
+        effectiveNext === '/admin' ||
+        effectiveNext.startsWith('/admin/'));
+    const isCustomerAuthFlow =
+      !isAdminAuthFlow &&
+      (oauthFlowSource === 'customer' || Boolean(customerIntent) || onTenantSubdomain);
+    setIsAdminFlowState(isAdminAuthFlow);
+    setIsCustomerFlowState(isCustomerAuthFlow);
+    if (isCustomerAuthFlow) {
+      setCustomerReturnTarget(
+        safePortalReturn || customerIntent?.returnPath || (onTenantSubdomain ? '/?portal=account' : null)
+      );
+    }
 
     if (errorParam || errorCode) {
       const reason = classifyAdminOAuthFailureReason(errorParam, errorCode, errorDescription);
@@ -374,15 +442,26 @@ export const AuthCallbackPage: React.FC = () => {
               ? userMeta.picture
               : undefined;
           const userId = authenticatedUser.id;
-          const targetReturn =
+          const resolvedCustomerSubdomain =
+            customerIntent?.subdomain ||
+            (onTenantSubdomain && typeof window !== 'undefined'
+              ? window.location.hostname.split('.')[0].trim().toLowerCase()
+              : '');
+          const rawTargetReturn =
+            safePortalReturn ||
             customerIntent?.returnPath ||
             (onTenantSubdomain
               ? '/?portal=account'
-              : customerIntent?.subdomain
-              ? `/s/${encodeURIComponent(customerIntent.subdomain)}?portal=account`
+              : resolvedCustomerSubdomain
+              ? `/s/${encodeURIComponent(resolvedCustomerSubdomain)}?portal=account`
               : '/');
+          const targetReturn = isSafeInternalRedirectPath(rawTargetReturn)
+            ? rawTargetReturn
+            : onTenantSubdomain
+            ? '/?portal=account'
+            : '/';
 
-          setCustomerPortalSessionActive(userId, customerIntent?.subdomain || '');
+          setCustomerPortalSessionActive(userId, resolvedCustomerSubdomain);
           setAuthenticatedUser(
             {
               id: userId,
@@ -395,16 +474,14 @@ export const AuthCallbackPage: React.FC = () => {
             { scope: 'customer' }
           );
 
-          const resolvedCustomerSubdomain =
-            customerIntent?.subdomain ||
-            (onTenantSubdomain && typeof window !== 'undefined'
-              ? window.location.hostname.split('.')[0].trim().toLowerCase()
-              : '');
           if (resolvedCustomerSubdomain && session?.access_token) {
-            void fetchCustomerProfileFromPortal(
-              resolvedCustomerSubdomain,
-              session.access_token
-            ).catch(() => {});
+            await Promise.race([
+              fetchCustomerProfileFromPortal(
+                resolvedCustomerSubdomain,
+                session.access_token
+              ).catch(() => {}),
+              new Promise((resolve) => setTimeout(resolve, 1500)),
+            ]);
           }
 
           setStatus('success');
