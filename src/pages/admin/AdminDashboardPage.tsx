@@ -2321,9 +2321,20 @@ export const AdminDashboardPage: React.FC = () => {
                           <td className="py-3.5 px-4">
                             <select
                               value={req.status}
-                              onChange={(e) =>
-                                updateWebsiteRequestStatus(req.id, e.target.value as any)
-                              }
+                              onChange={async (e) => {
+                                const nextStatus = e.target.value as any;
+                                const recheck = await revalidateAdminBeforeAction({
+                                  action: 'update_website_request',
+                                  targetType: 'request',
+                                  targetId: req.id,
+                                });
+                                if (!recheck.allowed) {
+                                  showToast(recheck.errorMessage || 'Admin session verification required.', 'error');
+                                  await refreshVerification();
+                                  return;
+                                }
+                                updateWebsiteRequestStatus(req.id, nextStatus);
+                              }}
                               className="min-h-[38px] px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-white focus:outline-hidden"
                             >
                               <option value="Pending">Pending</option>
@@ -3322,8 +3333,18 @@ export const AdminDashboardPage: React.FC = () => {
         maxWidth="lg"
       >
         <form
-          onSubmit={(e) => {
+          onSubmit={async (e) => {
             e.preventDefault();
+            const recheck = await revalidateAdminBeforeAction({
+              action: 'update_plan_rules',
+              targetType: 'plan',
+              targetId: 'website_lite',
+            });
+            if (!recheck.allowed) {
+              showToast(recheck.errorMessage || 'Admin session verification required.', 'error');
+              await refreshVerification();
+              return;
+            }
             updateWebsiteSubscriptionPlanConfig({
               priceMonthly: Number(planPrice),
               isVisible: planIsVisible,

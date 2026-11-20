@@ -16,6 +16,12 @@ import {
   validatePublicCustomerOrderInput,
 } from '../../lib/storefrontSync';
 import {
+  sanitizeEmailHref,
+  sanitizeHrefUrl,
+  sanitizeImageUrl,
+  sanitizePhoneHref,
+} from '../../lib/security';
+import {
   clearScopedCartFromStorage,
   fetchCustomerCartFromPortal,
   fetchCustomerProfileFromPortal,
@@ -1062,7 +1068,7 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
 
   const resolveCtaHref = (rawLink?: string, fallbackAnchor = '#services') => {
     const trimmed = (rawLink || '').trim();
-    if (!trimmed || trimmed === 'whatsapp') {
+    if (!trimmed || trimmed.toLowerCase() === 'whatsapp') {
       if (hasOrderableStorefront && !trimmed) {
         return '#services';
       }
@@ -1071,21 +1077,13 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
           `Hello ${businessName}, I am visiting your website (${displayDomain}) and would like to inquire.`
         )}`;
       }
-      if (phone) return `tel:${phone}`;
-      if (email) return `mailto:${email}`;
+      const safeTel = sanitizePhoneHref(phone);
+      if (safeTel) return safeTel;
+      const safeEmail = sanitizeEmailHref(email);
+      if (safeEmail) return safeEmail;
       return fallbackAnchor;
     }
-    if (
-      trimmed.startsWith('#') ||
-      trimmed.startsWith('http://') ||
-      trimmed.startsWith('https://') ||
-      trimmed.startsWith('tel:') ||
-      trimmed.startsWith('mailto:') ||
-      trimmed.startsWith('/')
-    ) {
-      return trimmed;
-    }
-    return `https://${trimmed}`;
+    return sanitizeHrefUrl(trimmed, fallbackAnchor, { allowBareDomain: true });
   };
 
   const primaryCtaLabel =
@@ -1134,7 +1132,7 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
           site.subheadline !== undefined
             ? site.subheadline.trim()
             : (section.subtitle || subheadline).trim();
-        const rawHeroImg = ((site.heroImageUrl ?? section.imageUrl) || '').trim();
+        const rawHeroImg = sanitizeImageUrl(site.heroImageUrl ?? section.imageUrl);
         const heroImg = !brokenHeroImg ? rawHeroImg : '';
 
         // Hero Cover Image Styling Controls
@@ -1371,7 +1369,7 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
       case 'banner': {
         const bTitle = (site.bannerTitle || section.title || '').trim();
         const bSub = (site.bannerSubtitle || section.subtitle || section.content || '').trim();
-        const bImg = (site.bannerImageUrl || section.imageUrl || '').trim();
+        const bImg = sanitizeImageUrl(site.bannerImageUrl || section.imageUrl);
         const bCtaText = (site.bannerCtaText || section.ctaText || '').trim();
         const bCtaHref = resolveCtaHref(site.bannerCtaLink || section.ctaLink, '#services');
 
@@ -1565,7 +1563,7 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
 
       case 'about': {
         const body = (section.content !== undefined ? section.content : aboutText).trim();
-        const sectionImg = (section.imageUrl || '').trim();
+        const sectionImg = sanitizeImageUrl(section.imageUrl);
         if (!body && !sectionImg) return null;
 
         return (
@@ -1667,10 +1665,10 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                     key={it.id}
                     className="p-5 rounded-xl bg-white border border-slate-200 space-y-2"
                   >
-                    {it.imageUrl && (
+                    {sanitizeImageUrl(it.imageUrl) && (
                       <div className="w-full h-32 rounded-lg overflow-hidden bg-slate-100 mb-2">
                         <img
-                          src={it.imageUrl}
+                          src={sanitizeImageUrl(it.imageUrl)}
                           alt={it.title}
                           referrerPolicy="no-referrer"
                           className="w-full h-full object-cover"
@@ -1782,9 +1780,9 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                               onClick={() => setDetailProduct(item)}
                               className="w-full aspect-[4/3] bg-slate-100 border-b border-slate-100 overflow-hidden block relative text-left cursor-pointer group"
                             >
-                              {item.imageUrl && !imgBroken ? (
+                              {sanitizeImageUrl(item.imageUrl) && !imgBroken ? (
                                 <img
-                                  src={item.imageUrl}
+                                  src={sanitizeImageUrl(item.imageUrl)}
                                   alt={item.name}
                                   referrerPolicy="no-referrer"
                                   onError={() =>
@@ -2645,13 +2643,13 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                 {hasAnyDirectContact ? (
                   <div className="space-y-2 text-xs text-slate-600 pb-2 border-b border-slate-100">
                     {phone && (
-                      <a href={`tel:${phone}`} className="flex items-center gap-2.5 hover:text-slate-900">
+                      <a href={sanitizePhoneHref(phone) || '#contact'} className="flex items-center gap-2.5 hover:text-slate-900">
                         <Phone className="w-3.5 h-3.5 shrink-0" style={{ color: brandColor }} />
                         <span className="font-mono tabular-nums">{phone}</span>
                       </a>
                     )}
                     {email && (
-                      <a href={`mailto:${email}`} className="flex items-center gap-2.5 hover:text-slate-900">
+                      <a href={sanitizeEmailHref(email) || '#contact'} className="flex items-center gap-2.5 hover:text-slate-900">
                         <Mail className="w-3.5 h-3.5 shrink-0" style={{ color: brandColor }} />
                         <span>{email}</span>
                       </a>
@@ -3065,9 +3063,9 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                 onClick={!isPublicView && onSelectSection ? (e) => e.preventDefault() : undefined}
                 className="flex items-center gap-2 sm:gap-2.5 min-w-0 flex-1"
               >
-                {site.logoUrl && !brokenLogoImg ? (
+                {sanitizeImageUrl(site.logoUrl) && !brokenLogoImg ? (
                   <img
-                    src={site.logoUrl}
+                    src={sanitizeImageUrl(site.logoUrl)}
                     alt={businessName}
                     referrerPolicy="no-referrer"
                     onError={() => setBrokenLogoImg(true)}
@@ -3179,10 +3177,10 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                         onClick={() => setIsAccountMenuOpen((prev) => !prev)}
                         className="min-h-[36px] inline-flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-[11px] sm:text-xs font-semibold text-slate-800 whitespace-nowrap shrink-0 cursor-pointer shadow-2xs"
                       >
-                        {customerUser?.avatar ? (
+                        {sanitizeImageUrl(customerUser?.avatar) ? (
                           <img
-                            src={customerUser.avatar}
-                            alt={customerUser.name}
+                            src={sanitizeImageUrl(customerUser?.avatar)}
+                            alt={customerUser?.name || ''}
                             referrerPolicy="no-referrer"
                             className="w-5 h-5 rounded-full object-cover shrink-0"
                           />
@@ -3293,7 +3291,7 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                   </a>
                 ) : !hasOrderableStorefront && phone ? (
                   <a
-                    href={`tel:${phone}`}
+                    href={sanitizePhoneHref(phone) || '#contact'}
                     aria-label="Call"
                     className={`min-h-[36px] inline-flex items-center gap-1.5 px-2.5 sm:px-3.5 py-1.5 ${buttonRadiusClass} text-xs font-semibold text-white shadow-xs transition-opacity hover:opacity-90 shrink-0`}
                     style={{ backgroundColor: brandColor }}
@@ -3328,10 +3326,10 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                 {isCustomerAuthenticated ? (
                   <div className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-200/80 flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2 min-w-0">
-                      {customerUser?.avatar ? (
+                      {sanitizeImageUrl(customerUser?.avatar) ? (
                         <img
-                          src={customerUser.avatar}
-                          alt={customerUser.name}
+                          src={sanitizeImageUrl(customerUser?.avatar)}
+                          alt={customerUser?.name || ''}
                           referrerPolicy="no-referrer"
                           className="w-7 h-7 rounded-full object-cover shrink-0"
                         />
@@ -3520,10 +3518,10 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                   </button>
                 </div>
 
-                {detailProduct.imageUrl && (
+                {sanitizeImageUrl(detailProduct.imageUrl) && (
                   <div className="w-full aspect-[16/10] bg-slate-100 border-b border-slate-100 overflow-hidden">
                     <img
-                      src={detailProduct.imageUrl}
+                      src={sanitizeImageUrl(detailProduct.imageUrl)}
                       alt={detailProduct.name}
                       referrerPolicy="no-referrer"
                       className="w-full h-full object-cover"
@@ -3615,9 +3613,9 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
               <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
                 <div className="space-y-1.5 text-left">
                   <div className="flex items-center gap-2.5">
-                    {site.logoUrl && !brokenLogoImg && (
+                    {sanitizeImageUrl(site.logoUrl) && !brokenLogoImg && (
                       <img
-                        src={site.logoUrl}
+                        src={sanitizeImageUrl(site.logoUrl)}
                         alt={businessName}
                         referrerPolicy="no-referrer"
                         className="w-7 h-7 rounded-lg object-contain bg-white p-0.5"
@@ -3629,13 +3627,13 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                   {(phone || email) && (
                     <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-400 pt-0.5">
                       {phone && (
-                        <a href={`tel:${phone}`} className="hover:text-white font-mono tabular-nums">
+                        <a href={sanitizePhoneHref(phone) || '#contact'} className="hover:text-white font-mono tabular-nums">
                           {phone}
                         </a>
                       )}
                       {phone && email && <span aria-hidden="true">·</span>}
                       {email && (
-                        <a href={`mailto:${email}`} className="hover:text-white">
+                        <a href={sanitizeEmailHref(email) || '#contact'} className="hover:text-white">
                           {email}
                         </a>
                       )}

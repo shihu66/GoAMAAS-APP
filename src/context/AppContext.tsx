@@ -1833,7 +1833,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (isSupabaseConfigured && user?.id && UUID_REGEX.test(id)) {
       setProductSyncStatusMap((prev) => ({ ...prev, [id]: 'saving' }));
-      const { data, error } = await updateProductInDb(id, sanitizedPatch);
+      const { data, error } = await updateProductInDb(id, sanitizedPatch, existing.storeId || activeStore.id);
       if (error || !data) {
         setProducts(prevSnapshot);
         setProductSyncStatusMap((prev) => ({ ...prev, [id]: 'error' }));
@@ -1907,7 +1907,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setProducts((prev) => prev.filter((p) => p.id !== id));
 
     if (isSupabaseConfigured && user?.id && UUID_REGEX.test(id)) {
-      const { error } = await deleteProductInDb(id);
+      const { error } = await deleteProductInDb(id, prod?.storeId || activeStore.id);
       if (error) {
         setProducts(prevSnapshot);
         showToast(error.message || 'Failed to delete product', 'error');
@@ -2405,7 +2405,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (isSupabaseConfigured && user?.id && UUID_REGEX.test(id)) {
       void (async () => {
-        const { data, error } = await updateCustomerInDb(id, updated);
+        const targetCust = customers.find((c) => c.id === id);
+        const { data, error } = await updateCustomerInDb(id, updated, targetCust?.storeId || activeStore.id);
         if (error || !data) {
           setCustomers(prevSnapshot);
           showToast(error?.message || 'Failed to update customer in database', 'error');
@@ -2422,7 +2423,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (isSupabaseConfigured && user?.id && UUID_REGEX.test(id)) {
       void (async () => {
-        const { error } = await deleteCustomerInDb(id);
+        const targetCust = customers.find((c) => c.id === id);
+        const { error } = await deleteCustomerInDb(id, targetCust?.storeId || activeStore.id);
         if (error) {
           setCustomers(prevSnapshot);
           showToast(error.message || 'Failed to remove customer record', 'error');
@@ -2444,7 +2446,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (isSupabaseConfigured && user?.id && UUID_REGEX.test(id)) {
       void (async () => {
-        const { data, error } = await updateCustomerInDb(id, { notes: note });
+        const targetCust = customers.find((c) => c.id === id);
+        const { data, error } = await updateCustomerInDb(id, { notes: note }, targetCust?.storeId || activeStore.id);
         if (error || !data) {
           setCustomers(prevSnapshot);
           showToast(error?.message || 'Failed to save customer note', 'error');
@@ -2508,10 +2511,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (matchingProd && UUID_REGEX.test(matchingProd.id)) {
             const nextSales = (matchingProd.salesCount || 0) + item.quantity;
             const nextStock = Math.max(0, matchingProd.stock - item.quantity);
-            const { data: updatedProd } = await updateProductInDb(matchingProd.id, {
-              salesCount: nextSales,
-              stock: nextStock,
-            });
+            const { data: updatedProd } = await updateProductInDb(
+              matchingProd.id,
+              {
+                salesCount: nextSales,
+                stock: nextStock,
+              },
+              targetStoreId
+            );
             if (updatedProd) {
               const mergedProd: Product = {
                 ...matchingProd,
@@ -2915,10 +2922,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         }
 
-        const { data, error } = await updateOrderInDb(id, {
-          status,
-          ...(Array.isArray(nextItems) && nextItems.length > 0 ? { items: nextItems } : {}),
-        });
+        const { data, error } = await updateOrderInDb(
+          id,
+          {
+            status,
+            ...(Array.isArray(nextItems) && nextItems.length > 0 ? { items: nextItems } : {}),
+          },
+          targetOrder?.storeId || activeStore.id
+        );
         if (error || !data) {
           setOrders(prevSnapshot);
           showToast(error?.message || 'Failed to update order status', 'error');
@@ -2934,10 +2945,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               const delta = isNowCancelling ? item.quantity : -item.quantity;
               const nextStock = Math.max(0, matchingProd.stock + delta);
               const nextSales = Math.max(0, (matchingProd.salesCount || 0) - delta);
-              const { data: updatedDbProd } = await updateProductInDb(matchingProd.id, {
-                stock: nextStock,
-                salesCount: nextSales,
-              });
+              const { data: updatedDbProd } = await updateProductInDb(
+                matchingProd.id,
+                {
+                  stock: nextStock,
+                  salesCount: nextSales,
+                },
+                matchingProd.storeId || targetOrder?.storeId || activeStore.id
+              );
               if (updatedDbProd) {
                 const mergedProd: Product = {
                   ...matchingProd,
@@ -3021,7 +3036,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (isSupabaseConfigured && user?.id && UUID_REGEX.test(id)) {
       void (async () => {
-        const { data, error } = await updateOrderInDb(id, { paymentStatus });
+        const targetOrder = orders.find((o) => o.id === id);
+        const { data, error } = await updateOrderInDb(id, { paymentStatus }, targetOrder?.storeId || activeStore.id);
         if (error || !data) {
           setOrders(prevSnapshot);
           showToast(error?.message || 'Failed to update order payment status', 'error');
@@ -3085,12 +3101,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (isSupabaseConfigured && user?.id && UUID_REGEX.test(id)) {
       void (async () => {
-        const { data, error } = await updateOrderInDb(id, {
-          courierName,
-          trackingCode,
-          status: nextStatus,
-          ...(nextItems ? { items: nextItems } : {}),
-        });
+        const { data, error } = await updateOrderInDb(
+          id,
+          {
+            courierName,
+            trackingCode,
+            status: nextStatus,
+            ...(nextItems ? { items: nextItems } : {}),
+          },
+          targetOrder?.storeId || activeStore.id
+        );
         if (error || !data) {
           setOrders(prevSnapshot);
           showToast(error?.message || 'Failed to assign tracking code', 'error');
@@ -5781,7 +5801,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (isSupabaseConfigured && user?.id && UUID_REGEX.test(id)) {
       void (async () => {
-        const { error } = await removeStoreMemberInDb(id);
+        const { error } = await removeStoreMemberInDb(id, activeStore.id);
         if (error) {
           setTeamMembers(prevSnapshot);
           showToast(error.message || 'Failed to revoke team member access', 'error');

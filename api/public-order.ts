@@ -50,15 +50,132 @@ function sendJson(res: ServerResponse, statusCode: number, payload: Record<strin
   res.end(JSON.stringify(normalized));
 }
 
-async function readJsonBody(req: RequestWithBody): Promise<Record<string, any> | null> {
+function isAllowedStorefrontOrigin(originRaw: string): boolean {
+  const origin = String(originRaw || '').trim();
+  if (!origin) return false;
+  if (origin === 'https://amaas.xyz' || origin === 'https://www.amaas.xyz' || origin === 'https://app.amaas.xyz') {
+    return true;
+  }
+  try {
+    const parsed = new URL(origin);
+    const host = parsed.hostname.toLowerCase();
+    if (parsed.protocol === 'https:' && host.endsWith('.amaas.xyz')) {
+      const sub = host.slice(0, -'.amaas.xyz'.length);
+      if (
+        sub.length >= 3 &&
+        sub.length <= 30 &&
+        !sub.includes('.') &&
+        !sub.startsWith('xn--') &&
+        !RESERVED_SUBDOMAINS.has(sub) &&
+        /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(sub)
+      ) {
+        return true;
+      }
+    }
+    const envAppUrl = String(process.env.APP_URL || '').trim();
+    if (envAppUrl) {
+      try {
+        if (new URL(envAppUrl).origin === parsed.origin) return true;
+      } catch {}
+    }
+    const isProd = process.env.VERCEL_ENV === 'production' || process.env.NODE_ENV === 'production';
+    if (!isProd && parsed.protocol === 'http:' && (host === 'localhost' || host === '127.0.0.1' || host.endsWith('.localhost'))) {
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+const ORDER_RATE_BUCKETS = new Map<string, { count: number; resetAt: number }>();
+
+function getClientIp(req: IncomingMessage): string {
+  const rawVercel = String(req.headers['x-vercel-forwarded-for'] || '').split(',')[0].trim();
+  if (rawVercel) return rawVercel.slice(0, 64);
+  const rawCf = String(req.headers['cf-connecting-ip'] || '').trim();
+  if (rawCf) return rawCf.slice(0, 64);
+  const rawReal = String(req.headers['x-real-ip'] || '').trim();
+  if (rawReal) return rawReal.slice(0, 64);
+  const rawFwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  if (rawFwd) return rawFwd.slice(0, 64);
+  return String(req.socket?.remoteAddress || 'unknown').slice(0, 64);
+}
+
+async function checkOrderRateLimit(ip: string): Promise<{ allowed: boolean; retryAfterSec: number }> {
+  const bucketKey = `rl:public-order:${ip}`;
+  const maxReq = 20;
+  const windowSec = 60;
+  const upstashUrl = String(process.env.UPSTASH_REDIS_REST_URL || '').trim().replace(/\/+$/, '');
+  const upstashToken = String(process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
+  if (upstashUrl.startsWith('https://') && upstashToken) {
+    try {
+      const resp = await fetch(`${upstashUrl}/pipeline`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${upstashToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify([['INCR', bucketKey], ['EXPIRE', bucketKey, String(windowSec), 'NX'], ['TTL', bucketKey]]),
+      });
+      if (resp.ok) {
+        const resArr = (await resp.json()) as Array<{ result?: number }>;
+        const count = Number(resArr?.[0]?.result || 0);
+        const ttl = Math.max(1, Number(resArr?.[2]?.result || windowSec));
+        if (count > 0) return { allowed: count <= maxReq, retryAfterSec: ttl };
+      }
+    } catch {}
+  }
+
+  const now = Date.now();
+  const windowMs = windowSec * 1000;
+  if (ORDER_RATE_BUCKETS.size >= 5000) {
+    for (const [k, v] of ORDER_RATE_BUCKETS.entries()) {
+      if (v.resetAt <= now) ORDER_RATE_BUCKETS.delete(k);
+    }
+    if (ORDER_RATE_BUCKETS.size >= 5000) {
+      const oldestKey = ORDER_RATE_BUCKETS.keys().next().value;
+      if (oldestKey) ORDER_RATE_BUCKETS.delete(oldestKey);
+    }
+  }
+  const existing = ORDER_RATE_BUCKETS.get(bucketKey);
+  if (!existing || existing.resetAt <= now) {
+    ORDER_RATE_BUCKETS.set(bucketKey, { count: 1, resetAt: now + windowMs });
+    return { allowed: true, retryAfterSec: windowSec };
+  }
+  existing.count += 1;
+  return {
+    allowed: existing.count <= maxReq,
+    retryAfterSec: Math.max(1, Math.ceil((existing.resetAt - now) / 1000)),
+  };
+}
+
+type ReadBodyResult =
+  | { kind: 'ok'; body: Record<string, any> }
+  | { kind: 'unsupported_media_type' }
+  | { kind: 'too_large' }
+  | { kind: 'invalid_json' };
+
+async function readJsonBody(req: RequestWithBody): Promise<ReadBodyResult> {
+  const rawCt = String(req.headers['content-type'] || '').trim().toLowerCase();
+  if (rawCt && !rawCt.includes('application/json') && !rawCt.includes('+json')) {
+    return { kind: 'unsupported_media_type' };
+  }
+  const rawContentLen = Number(req.headers['content-length']);
+  if (Number.isFinite(rawContentLen) && rawContentLen > 65536) {
+    return { kind: 'too_large' };
+  }
+
   if (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) {
-    return req.body as Record<string, any>;
+    if (Array.isArray(req.body)) return { kind: 'invalid_json' };
+    return { kind: 'ok', body: req.body as Record<string, any> };
   }
   if (typeof req.body === 'string') {
+    if (req.body.length > 65536) return { kind: 'too_large' };
     try {
-      return JSON.parse(req.body);
+      const parsed = JSON.parse(req.body);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? { kind: 'ok', body: parsed }
+        : { kind: 'invalid_json' };
     } catch {
-      return null;
+      return { kind: 'invalid_json' };
     }
   }
   return new Promise((resolve) => {
@@ -72,7 +189,10 @@ async function readJsonBody(req: RequestWithBody): Promise<Record<string, any> |
       totalBytes += buf.length;
       if (totalBytes > 65536) {
         settled = true;
-        resolve(null);
+        try {
+          req.destroy();
+        } catch {}
+        resolve({ kind: 'too_large' });
         return;
       }
       chunks.push(buf);
@@ -80,21 +200,26 @@ async function readJsonBody(req: RequestWithBody): Promise<Record<string, any> |
     req.on('end', () => {
       if (settled) return;
       settled = true;
+      if (!rawCt) {
+        resolve({ kind: 'unsupported_media_type' });
+        return;
+      }
       try {
         const raw = Buffer.concat(chunks).toString('utf8').trim();
         if (!raw) {
-          resolve({});
+          resolve({ kind: 'ok', body: {} });
           return;
         }
-        resolve(JSON.parse(raw));
+        const parsed = JSON.parse(raw);
+        resolve(parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? { kind: 'ok', body: parsed } : { kind: 'invalid_json' });
       } catch {
-        resolve(null);
+        resolve({ kind: 'invalid_json' });
       }
     });
     req.on('error', () => {
       if (settled) return;
       settled = true;
-      resolve(null);
+      resolve({ kind: 'invalid_json' });
     });
   });
 }
@@ -113,12 +238,21 @@ function buildDeterministicOrderNumber(subdomain: string, attemptId: string): st
 }
 
 export default async function handler(req: RequestWithBody, res: ServerResponse) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  const originHeader = String(req.headers.origin || '').trim();
+  const originAllowed = originHeader ? isAllowedStorefrontOrigin(originHeader) : false;
+  if (originAllowed) {
+    res.setHeader('Access-Control-Allow-Origin', originHeader);
+  }
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Vary', 'Origin, Host, X-Forwarded-Host');
 
   if (req.method === 'OPTIONS') {
+    if (originHeader && !originAllowed) {
+      sendJson(res, 403, { ok: false, code: 'CORS_ORIGIN_FORBIDDEN', error: 'Origin not allowed.' });
+      return;
+    }
     res.statusCode = 204;
     res.end();
     return;
@@ -130,12 +264,28 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
     return;
   }
 
+  const rl = await checkOrderRateLimit(getClientIp(req));
+  if (!rl.allowed) {
+    res.setHeader('Retry-After', String(rl.retryAfterSec));
+    sendJson(res, 429, { ok: false, code: 'RATE_LIMITED', error: 'Too many order requests. Please wait before retrying.' });
+    return;
+  }
+
   try {
-    const body = await readJsonBody(req);
-    if (!body || typeof body !== 'object') {
+    const bodyResult = await readJsonBody(req);
+    if (bodyResult.kind === 'unsupported_media_type') {
+      sendJson(res, 415, { ok: false, code: 'UNSUPPORTED_MEDIA_TYPE', error: 'Content-Type must be application/json.' });
+      return;
+    }
+    if (bodyResult.kind === 'too_large') {
+      sendJson(res, 413, { ok: false, code: 'PAYLOAD_TOO_LARGE', error: 'Request payload too large.' });
+      return;
+    }
+    if (bodyResult.kind === 'invalid_json') {
       sendJson(res, 400, { ok: false, code: 'INVALID_JSON', error: 'Invalid order request body.' });
       return;
     }
+    const body = bodyResult.body;
 
     const subdomain = String(body.subdomain || '').trim().toLowerCase();
     if (

@@ -19,6 +19,7 @@ import {
   WebsiteEditableFields,
   AdminPaymentApprovalRpcResult,
 } from '../types';
+import { validateImageFileBinaryAndExtension } from './security';
 import {
   AI_AUTOMATION_PACKAGES,
   DASHBOARD_SUBSCRIPTION_PLANS,
@@ -714,13 +715,15 @@ const ADMIN_OAUTH_INTENT_MAX_AGE_MS = 10 * 60 * 1000;
 
 export function isSafeInternalRedirectPath(path?: string | null): boolean {
   if (!path || typeof path !== 'string') return false;
+  if (/[\u0000-\u001f\u007f\\]/.test(path)) return false;
   const trimmed = path.trim();
-  if (!trimmed.startsWith('/') || trimmed.startsWith('//')) return false;
+  if (!trimmed.startsWith('/') || trimmed.startsWith('//') || trimmed.startsWith('/\\')) return false;
+  const lower = trimmed.toLowerCase();
   if (
-    trimmed.startsWith('/login') ||
-    trimmed.startsWith('/register') ||
-    trimmed.startsWith('/auth/callback') ||
-    trimmed.startsWith('/admin')
+    lower.startsWith('/login') ||
+    lower.startsWith('/register') ||
+    lower.startsWith('/auth/callback') ||
+    lower.startsWith('/admin')
   ) {
     return false;
   }
@@ -3182,6 +3185,13 @@ export async function uploadWebsiteAssetToStorage(params: {
       error: new Error('Unsupported file type. Please upload PNG, JPG, WEBP, GIF, or AVIF images.'),
     };
   }
+  const binaryCheck = await validateImageFileBinaryAndExtension(file, MAX_WEBSITE_ASSET_BYTES);
+  if (!binaryCheck.ok) {
+    return {
+      publicUrl: null,
+      error: new Error(binaryCheck.error),
+    };
+  }
 
   // Offline demo mode only (when Supabase credentials are not configured)
   if (!isSupabaseConfigured || !supabase) {
@@ -5272,11 +5282,13 @@ export async function createProductInDb(
 
 export async function updateProductInDb(
   productId: string,
-  updates: Partial<Product>
+  updates: Partial<Product>,
+  storeId?: string
 ): Promise<{ data: Product | null; error: Error | null }> {
   if (!isSupabaseConfigured || !supabase || !UUID_REGEX.test(productId)) {
     return { data: null, error: new Error('Invalid product ID') };
   }
+  const scopedStoreId = storeId && UUID_REGEX.test(storeId.trim()) ? storeId.trim() : undefined;
   try {
     const basePayload: Record<string, unknown> = {};
     if (updates.name !== undefined) basePayload.name = updates.name.trim();
@@ -5327,12 +5339,12 @@ export async function updateProductInDb(
       };
     }
 
-    let { data, error } = await supabase
+    let updateQuery = supabase
       .from('products')
       .update(extendedPayload)
-      .eq('id', productId)
-      .select('*')
-      .single();
+      .eq('id', productId);
+    if (scopedStoreId) updateQuery = updateQuery.eq('store_id', scopedStoreId);
+    let { data, error } = await updateQuery.select('*').single();
 
     let usedBaseColumnFallback = false;
     if (
@@ -5343,20 +5355,21 @@ export async function updateProductInDb(
     ) {
       usedBaseColumnFallback = true;
       if (Object.keys(basePayload).length > 0) {
-        const retry = await supabase
+        let retryQuery = supabase
           .from('products')
           .update(basePayload)
-          .eq('id', productId)
-          .select('*')
-          .single();
+          .eq('id', productId);
+        if (scopedStoreId) retryQuery = retryQuery.eq('store_id', scopedStoreId);
+        const retry = await retryQuery.select('*').single();
         data = retry.data;
         error = retry.error;
       } else {
-        const verifyExisting = await supabase
+        let verifyQuery = supabase
           .from('products')
           .select('*')
-          .eq('id', productId)
-          .single();
+          .eq('id', productId);
+        if (scopedStoreId) verifyQuery = verifyQuery.eq('store_id', scopedStoreId);
+        const verifyExisting = await verifyQuery.single();
         data = verifyExisting.data;
         error = verifyExisting.error;
       }
@@ -5391,12 +5404,16 @@ export async function updateProductInDb(
   }
 }
 
-export async function deleteProductInDb(productId: string): Promise<{ error: Error | null }> {
+export async function deleteProductInDb(productId: string, storeId?: string): Promise<{ error: Error | null }> {
   if (!isSupabaseConfigured || !supabase || !UUID_REGEX.test(productId)) {
     return { error: new Error('Invalid product ID') };
   }
   try {
-    const { error } = await supabase.from('products').delete().eq('id', productId);
+    let query = supabase.from('products').delete().eq('id', productId);
+    if (storeId && UUID_REGEX.test(storeId.trim())) {
+      query = query.eq('store_id', storeId.trim());
+    }
+    const { error } = await query;
     return { error: error ? new Error(error.message || 'Failed to delete product') : null };
   } catch (err: unknown) {
     return { error: err instanceof Error ? err : new Error('Failed to delete product') };
@@ -5805,7 +5822,8 @@ export async function updateOrderInDb(
     courierName: string;
     trackingCode: string;
     items: OrderItem[];
-  }>
+  }>,
+  storeId?: string
 ): Promise<{ data: Order | null; error: Error | null }> {
   if (!isSupabaseConfigured || !supabase || !UUID_REGEX.test(orderId)) {
     return { data: null, error: new Error('Invalid order ID') };
@@ -5825,12 +5843,14 @@ export async function updateOrderInDb(
     if (updates.trackingCode !== undefined) payload.tracking_code = updates.trackingCode;
     if (updates.items !== undefined) payload.items = updates.items;
 
-    const { data, error } = await supabase
+    let query = supabase
       .from('orders')
       .update(payload)
-      .eq('id', orderId)
-      .select('*')
-      .single();
+      .eq('id', orderId);
+    if (storeId && UUID_REGEX.test(storeId.trim())) {
+      query = query.eq('store_id', storeId.trim());
+    }
+    const { data, error } = await query.select('*').single();
 
     if (error || !data) {
       return { data: null, error: new Error(error?.message || 'Failed to update order') };
@@ -5971,7 +5991,8 @@ export async function createCustomerInDb(
 
 export async function updateCustomerInDb(
   customerId: string,
-  updates: Partial<Customer>
+  updates: Partial<Customer>,
+  storeId?: string
 ): Promise<{ data: Customer | null; error: Error | null }> {
   if (!isSupabaseConfigured || !supabase || !UUID_REGEX.test(customerId)) {
     return { data: null, error: new Error('Invalid customer ID') };
@@ -5986,12 +6007,14 @@ export async function updateCustomerInDb(
     if (updates.ordersCount !== undefined) payload.orders_count = Math.max(0, Math.trunc(updates.ordersCount));
     if (updates.totalSpent !== undefined) payload.total_spent = Number(updates.totalSpent) || 0;
 
-    const { data, error } = await supabase
+    let query = supabase
       .from('customers')
       .update(payload)
-      .eq('id', customerId)
-      .select('*')
-      .single();
+      .eq('id', customerId);
+    if (storeId && UUID_REGEX.test(storeId.trim())) {
+      query = query.eq('store_id', storeId.trim());
+    }
+    const { data, error } = await query.select('*').single();
 
     if (error || !data) {
       return { data: null, error: new Error(error?.message || 'Failed to update customer') };
@@ -6002,12 +6025,16 @@ export async function updateCustomerInDb(
   }
 }
 
-export async function deleteCustomerInDb(customerId: string): Promise<{ error: Error | null }> {
+export async function deleteCustomerInDb(customerId: string, storeId?: string): Promise<{ error: Error | null }> {
   if (!isSupabaseConfigured || !supabase || !UUID_REGEX.test(customerId)) {
     return { error: new Error('Invalid customer ID') };
   }
   try {
-    const { error } = await supabase.from('customers').delete().eq('id', customerId);
+    let query = supabase.from('customers').delete().eq('id', customerId);
+    if (storeId && UUID_REGEX.test(storeId.trim())) {
+      query = query.eq('store_id', storeId.trim());
+    }
+    const { error } = await query;
     return { error: error ? new Error(error.message || 'Failed to delete customer') : null };
   } catch (err: unknown) {
     return { error: err instanceof Error ? err : new Error('Failed to delete customer') };
@@ -6270,12 +6297,16 @@ export async function inviteStoreMemberInDb(
   }
 }
 
-export async function removeStoreMemberInDb(memberId: string): Promise<{ error: Error | null }> {
+export async function removeStoreMemberInDb(memberId: string, storeId?: string): Promise<{ error: Error | null }> {
   if (!isSupabaseConfigured || !supabase || !UUID_REGEX.test(memberId)) {
     return { error: new Error('Invalid team member ID') };
   }
   try {
-    const { error } = await supabase.from('store_members').delete().eq('id', memberId);
+    let query = supabase.from('store_members').delete().eq('id', memberId);
+    if (storeId && UUID_REGEX.test(storeId.trim())) {
+      query = query.eq('store_id', storeId.trim());
+    }
+    const { error } = await query;
     return { error: error ? new Error(error.message || 'Failed to remove team member') : null };
   } catch (err: unknown) {
     return { error: err instanceof Error ? err : new Error('Failed to remove team member') };

@@ -28,6 +28,7 @@ import {
   buildGoogleMapsDirectionsUrl,
   validateAndNormalizeGoogleMapsUrl,
 } from '../../lib/storefrontSync';
+import { sanitizeImageUrl } from '../../lib/security';
 import {
   Globe,
   CreditCard,
@@ -2039,7 +2040,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                     {editHeroImageUrl ? (
                       <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 space-y-2.5">
                         <img
-                          src={editHeroImageUrl}
+                          src={sanitizeImageUrl(editHeroImageUrl)}
                           alt="Hero banner"
                           referrerPolicy="no-referrer"
                           className="w-full h-36 rounded-lg object-cover border border-slate-200 dark:border-slate-700"
@@ -2492,7 +2493,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                     {editBannerImageUrl ? (
                       <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 space-y-2">
                         <img
-                          src={editBannerImageUrl}
+                          src={sanitizeImageUrl(editBannerImageUrl)}
                           alt="Promotional banner"
                           className="w-full h-28 rounded-lg object-cover"
                         />
@@ -2501,7 +2502,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                             <span>Replace Banner Image</span>
                             <input
                               type="file"
-                              accept="image/*"
+                              accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
                               className="hidden"
                               onChange={(e) =>
                                 void handleUploadImage(
@@ -2542,7 +2543,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                         <span>Upload Banner Image</span>
                         <input
                           type="file"
-                          accept="image/*"
+                          accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
                           className="hidden"
                           onChange={(e) =>
                             void handleUploadImage(
@@ -2932,7 +2933,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                                   {sec.imageUrl ? (
                                     <div className="flex items-center gap-2">
                                       <img
-                                        src={sec.imageUrl}
+                                        src={sanitizeImageUrl(sec.imageUrl)}
                                         alt="Section"
                                         className="w-12 h-10 rounded object-cover"
                                       />
@@ -2952,7 +2953,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                                       <span>Upload About Image</span>
                                       <input
                                         type="file"
-                                        accept="image/*"
+                                        accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
                                         className="hidden"
                                         onChange={(e) =>
                                           void handleUploadImage(
@@ -3136,7 +3137,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                           <div className="flex items-center gap-3 min-w-0">
                             {p.image ? (
                               <img
-                                src={p.image}
+                                src={sanitizeImageUrl(p.image)}
                                 alt={p.name}
                                 className="w-12 h-12 rounded-lg object-cover border border-slate-200 shrink-0"
                               />
@@ -3244,7 +3245,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                           <div className="flex items-center gap-3 min-w-0">
                             {item.imageUrl ? (
                               <img
-                                src={item.imageUrl}
+                                src={sanitizeImageUrl(item.imageUrl)}
                                 alt={item.name}
                                 className="w-12 h-12 rounded-lg object-cover border border-slate-200 shrink-0"
                               />
@@ -3387,7 +3388,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                   {editLogoUrl ? (
                     <div className="flex items-center gap-4 p-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
                       <img
-                        src={editLogoUrl}
+                        src={sanitizeImageUrl(editLogoUrl)}
                         alt="Business logo"
                         className="w-14 h-14 rounded-xl object-contain bg-white p-1 border border-slate-200"
                       />
@@ -3398,7 +3399,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                           </span>
                           <input
                             type="file"
-                            accept="image/*"
+                            accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
                             className="hidden"
                             onChange={(e) =>
                               void handleUploadImage(
@@ -3432,7 +3433,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                       <span>Upload Business Logo (PNG/JPG/SVG)</span>
                       <input
                         type="file"
-                        accept="image/*"
+                        accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
                         className="hidden"
                         onChange={(e) =>
                           void handleUploadImage(
@@ -4553,7 +4554,7 @@ export const SubscribedWebsitePage: React.FC = () => {
             {prodImageUrl ? (
               <div className="flex items-center gap-3 p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
                 <img
-                  src={prodImageUrl}
+                  src={sanitizeImageUrl(prodImageUrl)}
                   alt={prodName}
                   className="w-14 h-14 rounded-lg object-cover border border-slate-200"
                 />
@@ -4562,7 +4563,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                     <span>{uploadingKey === 'modal-prod' ? 'Uploading...' : 'Replace Image'}</span>
                     <input
                       type="file"
-                      accept="image/*"
+                      accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
                       className="hidden"
                       onChange={(e) =>
                         void handleUploadImage(
@@ -4593,7 +4594,7 @@ export const SubscribedWebsitePage: React.FC = () => {
                 <span>Upload Product Photo (PNG/JPG/WEBP)</span>
                 <input
                   type="file"
-                  accept="image/*"
+                  accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
                   className="hidden"
                   onChange={(e) =>
                     void handleUploadImage(

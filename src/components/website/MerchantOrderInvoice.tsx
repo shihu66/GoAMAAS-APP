@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Order, Store, SubscribedWebsite } from '../../types';
 import { resolveOrderBranding, StorefrontLang } from '../../lib/customerPortal';
+import { sanitizeImageUrl } from '../../lib/security';
 import { Download, FileDown, Printer, X, MapPin, Phone, Mail, Globe, Truck } from 'lucide-react';
 
 interface MerchantOrderInvoiceProps {
@@ -148,7 +149,7 @@ export const MerchantOrderInvoice: React.FC<MerchantOrderInvoiceProps> = ({
   const t = LABELS[lang];
   const branding = resolveOrderBranding(order, websites, stores, site);
   const accent = sanitizeCssHexColor(branding.brandColor);
-  const safeLogoUrl = sanitizeHttpUrl(branding.logoUrl);
+  const safeLogoUrl = sanitizeImageUrl(branding.logoUrl) || null;
 
   const itemsSubtotal =
     typeof order.subtotal === 'number' && Number.isFinite(order.subtotal) && order.subtotal >= 0
@@ -384,9 +385,9 @@ export const MerchantOrderInvoice: React.FC<MerchantOrderInvoiceProps> = ({
           {/* Merchant Brand Header */}
           <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 pb-5 border-b border-slate-200">
             <div className="flex items-start gap-3.5 min-w-0">
-              {branding.logoUrl && !logoBroken ? (
+              {safeLogoUrl && !logoBroken ? (
                 <img
-                  src={branding.logoUrl}
+                  src={safeLogoUrl}
                   alt={branding.businessName}
                   referrerPolicy="no-referrer"
                   onError={() => setLogoBroken(true)}

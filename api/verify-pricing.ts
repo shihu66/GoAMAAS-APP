@@ -253,40 +253,173 @@ function logServerPricingDiagnostic(params: {
   }
 }
 
-async function readJsonBody(req: RequestWithBody): Promise<Record<string, unknown>> {
-  if (req.body && typeof req.body === 'object') {
-    return req.body as Record<string, unknown>;
+const PRICING_ALLOWED_EXACT_ORIGINS = new Set([
+  'https://amaas.xyz',
+  'https://www.amaas.xyz',
+  'https://app.amaas.xyz',
+]);
+
+function isAllowedPricingOrigin(originRaw: string): boolean {
+  const origin = String(originRaw || '').trim();
+  if (!origin) return false;
+  if (PRICING_ALLOWED_EXACT_ORIGINS.has(origin)) return true;
+  try {
+    const parsed = new URL(origin);
+    const host = parsed.hostname.toLowerCase();
+    const envAppUrl = String(process.env.APP_URL || '').trim();
+    if (envAppUrl) {
+      try {
+        if (new URL(envAppUrl).origin === parsed.origin) return true;
+      } catch {}
+    }
+    const isProd = process.env.VERCEL_ENV === 'production' || process.env.NODE_ENV === 'production';
+    if (!isProd && parsed.protocol === 'http:' && (host === 'localhost' || host === '127.0.0.1' || host.endsWith('.localhost'))) {
+      return true;
+    }
+  } catch {
+    return false;
   }
-  if (typeof req.body === 'string' && req.body.trim()) {
+  return false;
+}
+
+const PRICING_RATE_BUCKETS = new Map<string, { count: number; resetAt: number }>();
+
+function getPricingClientIp(req: IncomingMessage): string {
+  const rawVercel = String(req.headers['x-vercel-forwarded-for'] || '').split(',')[0].trim();
+  if (rawVercel) return rawVercel.slice(0, 64);
+  const rawCf = String(req.headers['cf-connecting-ip'] || '').trim();
+  if (rawCf) return rawCf.slice(0, 64);
+  const rawReal = String(req.headers['x-real-ip'] || '').trim();
+  if (rawReal) return rawReal.slice(0, 64);
+  const rawFwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  if (rawFwd) return rawFwd.slice(0, 64);
+  return String(req.socket?.remoteAddress || 'unknown').slice(0, 64);
+}
+
+async function checkPricingRateLimit(ip: string): Promise<{ allowed: boolean; retryAfterSec: number }> {
+  const bucketKey = `rl:verify-pricing:${ip}`;
+  const maxReq = 40;
+  const windowSec = 60;
+  const upstashUrl = String(process.env.UPSTASH_REDIS_REST_URL || '').trim().replace(/\/+$/, '');
+  const upstashToken = String(process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
+  if (upstashUrl.startsWith('https://') && upstashToken) {
     try {
-      return JSON.parse(req.body) as Record<string, unknown>;
+      const resp = await fetch(`${upstashUrl}/pipeline`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${upstashToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify([['INCR', bucketKey], ['EXPIRE', bucketKey, String(windowSec), 'NX'], ['TTL', bucketKey]]),
+      });
+      if (resp.ok) {
+        const resArr = (await resp.json()) as Array<{ result?: number }>;
+        const count = Number(resArr?.[0]?.result || 0);
+        const ttl = Math.max(1, Number(resArr?.[2]?.result || windowSec));
+        if (count > 0) return { allowed: count <= maxReq, retryAfterSec: ttl };
+      }
+    } catch {}
+  }
+
+  const now = Date.now();
+  const windowMs = windowSec * 1000;
+  if (PRICING_RATE_BUCKETS.size >= 5000) {
+    for (const [k, v] of PRICING_RATE_BUCKETS.entries()) {
+      if (v.resetAt <= now) PRICING_RATE_BUCKETS.delete(k);
+    }
+    if (PRICING_RATE_BUCKETS.size >= 5000) {
+      const oldestKey = PRICING_RATE_BUCKETS.keys().next().value;
+      if (oldestKey) PRICING_RATE_BUCKETS.delete(oldestKey);
+    }
+  }
+  const existing = PRICING_RATE_BUCKETS.get(bucketKey);
+  if (!existing || existing.resetAt <= now) {
+    PRICING_RATE_BUCKETS.set(bucketKey, { count: 1, resetAt: now + windowMs });
+    return { allowed: true, retryAfterSec: windowSec };
+  }
+  existing.count += 1;
+  return {
+    allowed: existing.count <= maxReq,
+    retryAfterSec: Math.max(1, Math.ceil((existing.resetAt - now) / 1000)),
+  };
+}
+
+type ReadBodyResult =
+  | { kind: 'ok'; body: Record<string, unknown> }
+  | { kind: 'unsupported_media_type' }
+  | { kind: 'too_large' }
+  | { kind: 'invalid_json' };
+
+async function readJsonBody(req: RequestWithBody): Promise<ReadBodyResult> {
+  const rawCt = String(req.headers['content-type'] || '').trim().toLowerCase();
+  if (rawCt && !rawCt.includes('application/json') && !rawCt.includes('+json')) {
+    return { kind: 'unsupported_media_type' };
+  }
+  const rawContentLen = Number(req.headers['content-length']);
+  if (Number.isFinite(rawContentLen) && rawContentLen > 32_768) {
+    return { kind: 'too_large' };
+  }
+
+  if (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) {
+    if (Array.isArray(req.body)) return { kind: 'invalid_json' };
+    return { kind: 'ok', body: req.body as Record<string, unknown> };
+  }
+  if (typeof req.body === 'string') {
+    if (req.body.length > 32_768) return { kind: 'too_large' };
+    if (!req.body.trim()) return { kind: 'ok', body: {} };
+    try {
+      const parsed = JSON.parse(req.body);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? { kind: 'ok', body: parsed as Record<string, unknown> }
+        : { kind: 'invalid_json' };
     } catch {
-      return {};
+      return { kind: 'invalid_json' };
     }
   }
 
   return new Promise((resolve) => {
-    let raw = '';
-    req.on('data', (chunk) => {
-      raw += String(chunk);
-      if (raw.length > 32_768) {
-        req.destroy();
-        resolve({});
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    let settled = false;
+    req.on('data', (chunk: Buffer | string) => {
+      if (settled) return;
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += buf.length;
+      if (totalBytes > 32_768) {
+        settled = true;
+        try {
+          req.destroy();
+        } catch {}
+        resolve({ kind: 'too_large' });
+        return;
       }
+      chunks.push(buf);
     });
     req.on('end', () => {
-      if (!raw.trim()) {
-        resolve({});
+      if (settled) return;
+      settled = true;
+      const raw = Buffer.concat(chunks).toString('utf8').trim();
+      if (!raw) {
+        resolve({ kind: 'ok', body: {} });
+        return;
+      }
+      if (!rawCt) {
+        resolve({ kind: 'unsupported_media_type' });
         return;
       }
       try {
         const parsed = JSON.parse(raw);
-        resolve(parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {});
+        resolve(
+          parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+            ? { kind: 'ok', body: parsed as Record<string, unknown> }
+            : { kind: 'invalid_json' }
+        );
       } catch {
-        resolve({});
+        resolve({ kind: 'invalid_json' });
       }
     });
-    req.on('error', () => resolve({}));
+    req.on('error', () => {
+      if (settled) return;
+      settled = true;
+      resolve({ kind: 'invalid_json' });
+    });
   });
 }
 
@@ -298,12 +431,21 @@ function sendJson(res: ServerResponse, statusCode: number, payload: Record<strin
 }
 
 export default async function handler(req: RequestWithBody, res: ServerResponse) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  const originHeader = String(req.headers.origin || '').trim();
+  const originAllowed = originHeader ? isAllowedPricingOrigin(originHeader) : false;
+  if (originAllowed) {
+    res.setHeader('Access-Control-Allow-Origin', originHeader);
+  }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Vary', 'Origin, Host, X-Forwarded-Host');
 
   if (req.method === 'OPTIONS') {
+    if (originHeader && !originAllowed) {
+      sendJson(res, 403, { ok: false, code: 'CORS_ORIGIN_FORBIDDEN', error: 'Origin not allowed.' });
+      return;
+    }
     res.statusCode = 204;
     res.end();
     return;
@@ -312,6 +454,13 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
   if (req.method !== 'GET' && req.method !== 'POST') {
     res.setHeader('Allow', 'GET, POST, OPTIONS');
     sendJson(res, 405, { ok: false, code: 'METHOD_NOT_ALLOWED', error: 'Method not allowed.' });
+    return;
+  }
+
+  const rl = await checkPricingRateLimit(getPricingClientIp(req));
+  if (!rl.allowed) {
+    res.setHeader('Retry-After', String(rl.retryAfterSec));
+    sendJson(res, 429, { ok: false, code: 'RATE_LIMITED', error: 'Too many pricing verification requests. Please wait a moment.' });
     return;
   }
 
@@ -400,7 +549,23 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
     const hostHeader = (req.headers['x-forwarded-host'] as string) || req.headers.host || 'localhost';
     const cleanHost = hostHeader.split(':')[0].toLowerCase();
     const parsedUrl = new URL(req.url || '/', `http://${cleanHost}`);
-    const body = req.method === 'POST' ? await readJsonBody(req) : {};
+    let body: Record<string, unknown> = {};
+    if (req.method === 'POST') {
+      const bodyResult = await readJsonBody(req);
+      if (bodyResult.kind === 'unsupported_media_type') {
+        sendJson(res, 415, { ok: false, code: 'UNSUPPORTED_MEDIA_TYPE', error: 'Content-Type must be application/json.' });
+        return;
+      }
+      if (bodyResult.kind === 'too_large') {
+        sendJson(res, 413, { ok: false, code: 'PAYLOAD_TOO_LARGE', error: 'Request payload too large.' });
+        return;
+      }
+      if (bodyResult.kind === 'invalid_json') {
+        sendJson(res, 400, { ok: false, code: 'INVALID_JSON', error: 'Invalid JSON request body.' });
+        return;
+      }
+      body = bodyResult.body;
+    }
 
     const serviceType = String(
       body.serviceType ?? parsedUrl.searchParams.get('serviceType') ?? ''
@@ -482,7 +647,7 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
         sendJson(res, 502, {
           ok: false,
           code: 'PRICING_QUERY_FAILED',
-          error: errMsg || 'Unable to query active service pricing from database.',
+          error: 'Unable to query active service pricing from database.',
         });
         return;
       }

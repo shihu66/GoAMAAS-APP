@@ -70,6 +70,7 @@ export default defineConfig(({ mode }) => {
     name: 'goamaas-resolve-tenant-api',
     configureServer(server: any) {
       server.middlewares.use(async (req: any, res: any, next: any) => {
+        res.setHeader('X-Content-Type-Options', 'nosniff');
         const pathname = (req.url || '').split('?')[0];
         if (pathname === '/api/resolve-tenant') {
           try {
@@ -200,6 +201,9 @@ export default defineConfig(({ mode }) => {
         '@supabase/supabase-js',
       ],
       exclude: ['@electric-sql/pglite', 'vite', '@tailwindcss/vite', '@vitejs/plugin-react'],
+    },
+    build: {
+      sourcemap: false,
     },
     resolve: {
       alias: {

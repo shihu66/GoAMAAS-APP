@@ -4,7 +4,7 @@ import { useApp } from '../../context/AppContext';
 import { useLanguage, usePageSeo } from '../../context/LanguageContext';
 import { LanguageSwitcher } from '../../components/ui/LanguageSwitcher';
 import { ThemeSelector } from '../../components/ui/ThemeSelector';
-import { isSupabaseConfigured, getSupabaseConfigStatus, getUserProfile } from '../../lib/supabase';
+import { isSupabaseConfigured, getSupabaseConfigStatus, getUserProfile, isSafeInternalRedirectPath } from '../../lib/supabase';
 import {
   Eye,
   EyeOff,
@@ -28,7 +28,8 @@ export const LoginPage: React.FC = () => {
 
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const redirectTarget = searchParams.get('redirect') || '/dashboard';
+  const rawRedirect = searchParams.get('redirect');
+  const redirectTarget = isSafeInternalRedirectPath(rawRedirect) ? rawRedirect!.trim() : '/dashboard';
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');

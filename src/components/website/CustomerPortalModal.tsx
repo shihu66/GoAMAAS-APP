@@ -14,6 +14,7 @@ import {
   updateCustomerProfileInPortal,
 } from '../../lib/customerPortal';
 import { CustomerOrderTracker } from './CustomerOrderTracker';
+import { sanitizeImageUrl } from '../../lib/security';
 import {
   ArrowLeft,
   ArrowRight,
@@ -410,10 +411,10 @@ export const CustomerPortalModal: React.FC<CustomerPortalModalProps> = ({
         {/* Merchant-themed Header */}
         <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-3 bg-slate-50/70 shrink-0">
           <div className="flex items-center gap-3 min-w-0">
-            {user?.avatar ? (
+            {sanitizeImageUrl(user?.avatar) ? (
               <img
-                src={user.avatar}
-                alt={user.name}
+                src={sanitizeImageUrl(user?.avatar)}
+                alt={user?.name || ''}
                 referrerPolicy="no-referrer"
                 className="w-9 h-9 rounded-full object-cover border border-slate-200 shrink-0"
               />
