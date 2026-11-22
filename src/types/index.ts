@@ -425,6 +425,9 @@ export interface WebsiteThemeSettings {
   bannerAlignment?: 'left' | 'center' | 'right';
   bannerImagePosition?: 'left' | 'right' | 'background';
   bannerCtaStyle?: 'solid' | 'outline' | 'ghost';
+  // Product Showcase Presentation Controls
+  productShowcaseDefaultSort?: 'custom' | 'featured' | 'price-low' | 'price-high' | 'name' | 'newest';
+  productShowcaseColumns?: 2 | 3;
   // Animation & Location Embeds
   animations?: WebsiteAnimationSettings;
   location?: WebsiteLocationSettings;
@@ -442,6 +445,7 @@ export interface ProductCatalogMetaEntry {
   websiteId?: string;
   isVisible?: boolean;
   sortOrder?: number;
+  isFeatured?: boolean;
   updatedAt?: string;
 }
 
@@ -724,7 +728,7 @@ export interface WebsiteLifecycleAuditLog {
   id: string;
   websiteId: string;
   adminId: string;
-  action: 'suspend' | 'reactivate' | 'renew';
+  action: 'suspend' | 'reactivate' | 'renew' | 'delete';
   reason: string;
   verifiedPaymentRequestId?: string | null;
   previousStatus?: string | null;

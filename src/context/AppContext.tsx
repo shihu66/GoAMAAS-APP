@@ -255,7 +255,11 @@ interface AppContextType {
   productSyncStatusMap: Record<string, 'saving' | 'saved' | 'syncing' | 'synced' | 'error'>;
   retryProductWebsiteSync: (productId: string) => Promise<{ success: boolean; message: string }>;
   addProduct: (product: Omit<Product, 'id' | 'salesCount' | 'rating'>) => Promise<Product | null>;
-  updateProduct: (id: string, product: Partial<Product>) => Promise<Product | null>;
+  updateProduct: (
+    id: string,
+    product: Partial<Product>,
+    options?: { silentToast?: boolean }
+  ) => Promise<Product | null>;
   deleteProduct: (id: string) => Promise<boolean>;
   adjustProductStock: (id: string, delta: number, reason: string) => void;
   publishProductToWebsite: (
@@ -340,7 +344,10 @@ interface AppContextType {
   renewSubscribedWebsite: (id: string, reason?: string) => Promise<{ success: boolean; message: string }>;
   suspendSubscribedWebsite: (id: string, reason?: string) => Promise<{ success: boolean; message: string }>;
   reactivateSubscribedWebsite: (id: string, reason?: string) => Promise<{ success: boolean; message: string }>;
-  adminDeleteSubscribedWebsite: (id: string) => Promise<{ success: boolean; message: string }>;
+  adminDeleteSubscribedWebsite: (
+    id: string,
+    confirm?: { confirmSubdomain?: string; explicitConfirmed?: boolean; reason?: string }
+  ) => Promise<{ success: boolean; message: string }>;
   websiteLifecycleAuditLogs: WebsiteLifecycleAuditLog[];
   refreshWebsiteLifecycleAuditLogs: () => Promise<void>;
   servicePricingCatalog: ServicePricingCatalogEntry[];
@@ -1553,7 +1560,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       deleteMetaEntry?: boolean;
     }
   ): Promise<{ success: boolean; website?: SubscribedWebsite; error?: Error }> => {
-    const site = resolveTargetWebsiteForProduct(prod, opts?.targetWebsiteId);
+    const latestWebsites =
+      subscribedWebsitesRef.current.length > 0 ? subscribedWebsitesRef.current : subscribedWebsites;
+    const site =
+      (opts?.targetWebsiteId ? latestWebsites.find((w) => w.id === opts.targetWebsiteId) : null) ||
+      resolveTargetWebsiteForProduct(prod, opts?.targetWebsiteId);
     if (!site) {
       if (prod.id) {
         setProductSyncStatusMap((prev) => ({ ...prev, [prod.id]: 'saved' }));
@@ -1578,6 +1589,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         websiteId: prod.websiteId ?? site.id,
         isVisible: opts?.removeFromCatalog ? false : prod.isVisible !== false,
         sortOrder: prod.sortOrder,
+        isFeatured: prod.isFeatured === true,
         updatedAt: new Date().toISOString(),
       };
     }
@@ -1621,8 +1633,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const today = new Date().toISOString().split('T')[0];
-    setSubscribedWebsites((prev) =>
-      prev.map((w) =>
+    const applySyncUpdate = (list: SubscribedWebsite[]) =>
+      list.map((w) =>
         w.id === site.id
           ? {
               ...w,
@@ -1631,8 +1643,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               lastUpdatedAt: today,
             }
           : w
-      )
-    );
+      );
+    subscribedWebsitesRef.current = applySyncUpdate(subscribedWebsitesRef.current);
+    setSubscribedWebsites((prev) => applySyncUpdate(prev));
 
     if (prod.id && !opts?.deleteMetaEntry) {
       setProductSyncStatusMap((prev) => ({
@@ -1800,7 +1813,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return newProduct;
   };
 
-  const updateProduct = async (id: string, updated: Partial<Product>): Promise<Product | null> => {
+  const updateProduct = async (
+    id: string,
+    updated: Partial<Product>,
+    options?: { silentToast?: boolean }
+  ): Promise<Product | null> => {
     const existing = products.find((p) => p.id === id);
     if (!existing) {
       showToast('Product not found.', 'error');
@@ -1888,7 +1905,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         );
       }
 
-      showToast('Product details updated', 'success');
+      if (!options?.silentToast) {
+        showToast('Product details updated', 'success');
+      }
       return mergedConfirmed;
     }
 
@@ -1897,7 +1916,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       forcePublish: optimisticItem.status === 'active' && optimisticItem.isVisible !== false,
       removeFromCatalog: optimisticItem.status !== 'active' || optimisticItem.isVisible === false,
     });
-    showToast('Product details updated', 'success');
+    if (!options?.silentToast) {
+      showToast('Product details updated', 'success');
+    }
     return optimisticItem;
   };
 
@@ -3667,6 +3688,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: 'Website not found' };
     }
 
+    if (site.subscriptionStatus === 'suspended' || site.deploymentStatus === 'suspended') {
+      const msg =
+        'This website is suspended by an administrator and cannot be republished until reactivated.';
+      showToast(msg, 'error');
+      return { success: false, message: msg };
+    }
+    if (site.subscriptionStatus === 'cancelled') {
+      const msg = 'This website subscription is cancelled and cannot be republished.';
+      showToast(msg, 'error');
+      return { success: false, message: msg };
+    }
+
     const effectiveUpdates = updates || (site.draftConfig as Partial<SubscribedWebsite>) || {};
     if (Object.keys(effectiveUpdates).length > 0) {
       const saveRes = await updateSubscribedWebsite(id, effectiveUpdates, {
@@ -3941,7 +3974,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const adminDeleteSubscribedWebsite = async (
-    id: string
+    id: string,
+    confirm?: { confirmSubdomain?: string; explicitConfirmed?: boolean; reason?: string }
   ): Promise<{ success: boolean; message: string }> => {
     if (role !== 'admin' || (isSupabaseConfigured && user?.role !== 'admin')) {
       const msg = 'Unauthorized: Only verified administrators can delete websites.';
@@ -3949,33 +3983,155 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: msg };
     }
 
+    const targetSite = subscribedWebsites.find((w) => w.id === id);
+    const effectiveConfirm = {
+      confirmSubdomain: confirm?.confirmSubdomain || '',
+      explicitConfirmed: confirm?.explicitConfirmed === true,
+      ...(confirm?.reason ? { reason: confirm.reason } : {}),
+    };
+
     if (isSupabaseConfigured) {
-      const res = await adminDeleteSubscribedWebsiteInDb(id);
+      const res = await adminDeleteSubscribedWebsiteInDb(id, effectiveConfirm);
       if (!res.success) {
-        const msg = res.message || res.error?.message || 'Failed to delete website';
+        const msg = res.message || res.error?.message || 'Failed to permanently delete website';
         showToast(msg, 'error');
         return { success: false, message: msg };
       }
-      await refreshSubscribedWebsites();
-      showToast('Website record deleted permanently.', 'info');
-      return { success: true, message: res.message || 'Website deleted' };
+
+      const deletedStoreId = res.deletedStoreId || null;
+      const isSharedStore = res.isSharedStore === true;
+      setSubscribedWebsites((prev) => prev.filter((w) => w.id !== id));
+
+      if (isSharedStore) {
+        setProducts((prev) =>
+          prev.map((p) => (p.websiteId === id ? { ...p, websiteId: undefined } : p))
+        );
+      } else {
+        const deletedProdIds = new Set(
+          products
+            .filter(
+              (p) =>
+                p.websiteId === id ||
+                (deletedStoreId !== null && p.storeId === deletedStoreId)
+            )
+            .map((p) => p.id)
+        );
+        setProducts((prev) => prev.filter((p) => !deletedProdIds.has(p.id)));
+
+        if (deletedStoreId) {
+          setStores((prev) => prev.filter((s) => s.id !== deletedStoreId));
+          setOrders((prev) => prev.filter((o) => o.storeId !== deletedStoreId));
+          setCustomers((prev) => prev.filter((c) => c.storeId !== deletedStoreId));
+          setInventoryLogs((prev) =>
+            prev.filter((l) => l.storeId !== deletedStoreId && !deletedProdIds.has(l.productId))
+          );
+          if (activeStoreId === deletedStoreId) {
+            setTeamMembers([]);
+            setActiveStoreIdState('');
+          }
+        } else if (deletedProdIds.size > 0) {
+          setInventoryLogs((prev) => prev.filter((l) => !deletedProdIds.has(l.productId)));
+        }
+      }
+
+      await Promise.all([refreshSubscribedWebsites(), refreshWebsiteLifecycleAuditLogs()]);
+      const baseOkMsg =
+        res.message ||
+        'Website and all exclusively associated store data were permanently deleted.';
+      const okMsg = res.storageCleanupWarning
+        ? `${baseOkMsg} Warning: ${res.storageCleanupWarning}`
+        : baseOkMsg;
+      showToast(okMsg, res.storageCleanupWarning ? 'error' : 'info');
+      return { success: true, message: okMsg };
     }
 
-    const hasPayments = paymentRequests.some(
-      (r) =>
-        (r.serviceType === 'website_subscription' || r.serviceType === 'website_package') &&
-        r.serviceId === id
-    );
-    if (hasPayments) {
-      const msg =
-        'Cannot delete website with payment history. Suspend or cancel the subscription instead to preserve financial audit records.';
-      showToast(msg, 'warning');
+    if (!targetSite) {
+      const msg = 'Website record not found or already deleted.';
+      showToast(msg, 'error');
       return { success: false, message: msg };
     }
 
+    if (
+      !effectiveConfirm.explicitConfirmed ||
+      !effectiveConfirm.confirmSubdomain.trim() ||
+      (effectiveConfirm.confirmSubdomain.trim().toLowerCase() !== targetSite.subdomain.toLowerCase() &&
+        effectiveConfirm.confirmSubdomain.trim().toLowerCase() !== targetSite.fullDomainUrl.toLowerCase())
+    ) {
+      const msg = 'Subdomain confirmation mismatch or missing explicit confirmation.';
+      showToast(msg, 'error');
+      return { success: false, message: msg };
+    }
+
+    const otherSites = subscribedWebsites.filter((w) => w.id !== id);
+    let exclusiveStoreId: string | null = null;
+    if (targetSite.storeId) {
+      const sharedBySibling = otherSites.some((w) => w.storeId === targetSite.storeId);
+      if (!sharedBySibling) {
+        exclusiveStoreId = targetSite.storeId;
+      }
+    } else if (
+      otherSites.filter((w) => w.userId === targetSite.userId).length === 0 &&
+      stores.length === 1
+    ) {
+      exclusiveStoreId = stores[0].id;
+    }
+
+    const deletedProdIds = new Set(
+      products
+        .filter(
+          (p) =>
+            p.websiteId === id ||
+            (exclusiveStoreId !== null && p.storeId === exclusiveStoreId)
+        )
+        .map((p) => p.id)
+    );
+
     setSubscribedWebsites((prev) => prev.filter((w) => w.id !== id));
-    showToast('Website record deleted permanently.', 'info');
-    return { success: true, message: 'Website deleted' };
+    setProducts((prev) => prev.filter((p) => !deletedProdIds.has(p.id)));
+    if (exclusiveStoreId) {
+      setStores((prev) => prev.filter((s) => s.id !== exclusiveStoreId));
+      setOrders((prev) => prev.filter((o) => o.storeId !== exclusiveStoreId));
+      setCustomers((prev) => prev.filter((c) => c.storeId !== exclusiveStoreId));
+      setInventoryLogs((prev) =>
+        prev.filter((l) => l.storeId !== exclusiveStoreId && !deletedProdIds.has(l.productId))
+      );
+      if (activeStoreId === exclusiveStoreId) {
+        setTeamMembers([]);
+        setActiveStoreIdState('');
+      }
+    } else if (deletedProdIds.size > 0) {
+      setInventoryLogs((prev) => prev.filter((l) => !deletedProdIds.has(l.productId)));
+    }
+
+    setWebsiteLifecycleAuditLogs((prev) => [
+      {
+        id: `audit-${Date.now()}`,
+        websiteId: id,
+        adminId: user?.id || 'admin',
+        action: 'delete',
+        reason:
+          effectiveConfirm.reason ||
+          'Permanent admin deletion of website and exclusively associated store data',
+        previousStatus: targetSite.subscriptionStatus,
+        newStatus: 'deleted',
+        previousDeploymentStatus: targetSite.deploymentStatus,
+        newDeploymentStatus: 'deleted',
+        paymentStatusSnapshot: targetSite.paymentStatus,
+        previousPeriodEnd: targetSite.currentPeriodEnd || null,
+        newPeriodEnd: null,
+        createdAt: new Date().toISOString(),
+      },
+      ...prev,
+    ]);
+
+    showToast(
+      'Website and all exclusively associated store, product, inventory, customer, and order data deleted permanently.',
+      'info'
+    );
+    return {
+      success: true,
+      message: 'Website and exclusively associated store data permanently deleted.',
+    };
   };
 
   const requestWebsiteContentUpdate = (websiteId: string, details: string) => {
@@ -4192,6 +4348,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!site) {
       showToast('Website not found.', 'error');
       return { success: false, message: 'Website not found' };
+    }
+
+    if (site.subscriptionStatus === 'suspended' || site.deploymentStatus === 'suspended') {
+      const msg =
+        'This website has been suspended by an administrator and cannot be republished until reactivated.';
+      showToast(msg, 'error');
+      return { success: false, message: msg };
+    }
+
+    if (site.subscriptionStatus === 'cancelled') {
+      const msg = 'Cancelled website subscriptions cannot be republished.';
+      showToast(msg, 'error');
+      return { success: false, message: msg };
     }
 
     if (site.paymentStatus !== 'paid' && role !== 'admin') {

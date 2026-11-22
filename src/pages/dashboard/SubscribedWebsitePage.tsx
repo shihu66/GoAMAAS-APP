@@ -60,7 +60,6 @@ import {
   EyeOff,
   Save,
   Upload,
-  Edit3,
   ChevronDown,
   ChevronUp,
   Link2,
@@ -157,7 +156,7 @@ const SECTION_TYPE_LABELS: Record<WebsiteSectionType, string> = {
   banner: 'Promotional Banner',
   about: 'About Story',
   highlights: 'Key Highlights',
-  products: 'Products Catalog',
+  products: 'Product Showcase',
   testimonials: 'Customer Testimonials',
   faq: 'FAQ Accordion',
   contact: 'Contact & Details',
@@ -172,9 +171,7 @@ export const SubscribedWebsitePage: React.FC = () => {
     isWebsitesLoading,
     websiteSubscriptionPlan,
     products,
-    addProduct,
     updateProduct,
-    deleteProduct,
     updateSubscribedWebsite,
     saveWebsiteDraft,
     publishWebsiteUpdates,
@@ -247,26 +244,6 @@ export const SubscribedWebsitePage: React.FC = () => {
   const [isUnpublishDialogOpen, setIsUnpublishDialogOpen] = useState(false);
   const [isCancelSubDialogOpen, setIsCancelSubDialogOpen] = useState(false);
   const [receiptTargetRequest, setReceiptTargetRequest] = useState<PaymentRequest | null>(null);
-
-  // Product Add/Edit & Delete Confirmation State
-  const [isProductModalOpen, setIsProductModalOpen] = useState(false);
-  const [editingProductTarget, setEditingProductTarget] = useState<{
-    mode: 'add' | 'edit';
-    dbProduct?: Product;
-    legacyIndex?: number;
-  } | null>(null);
-  const [prodName, setProdName] = useState('');
-  const [prodPrice, setProdPrice] = useState<number>(1200);
-  const [prodCategory, setProdCategory] = useState('General');
-  const [prodDescription, setProdDescription] = useState('');
-  const [prodImageUrl, setProdImageUrl] = useState('');
-  const [prodVisible, setProdVisible] = useState(true);
-  const [isSavingProduct, setIsSavingProduct] = useState(false);
-  const [productToDelete, setProductToDelete] = useState<{
-    dbProduct?: Product;
-    legacyIndex?: number;
-    name: string;
-  } | null>(null);
 
   // Editable Website State (Hydrated from activeWebsite + draftConfig)
   const [editBusinessName, setEditBusinessName] = useState('');
@@ -385,6 +362,8 @@ export const SubscribedWebsitePage: React.FC = () => {
       bannerAlignment: srcTheme.bannerAlignment || 'left',
       bannerImagePosition: srcTheme.bannerImagePosition || 'left',
       bannerCtaStyle: srcTheme.bannerCtaStyle || 'solid',
+      productShowcaseDefaultSort: srcTheme.productShowcaseDefaultSort || 'custom',
+      productShowcaseColumns: srcTheme.productShowcaseColumns === 2 ? 2 : 3,
       animations: srcTheme.animations || {
         enabled: true,
         intensity: 'normal',
@@ -424,7 +403,7 @@ export const SubscribedWebsitePage: React.FC = () => {
     activeWebsite?.deploymentStatus,
   ]);
 
-  // Database products linked to this website (by websiteId, productCatalogMeta, or servicesOrProducts)
+  // Auto-synced store products from the single Products & Inventory catalog (tenant-scoped to activeWebsite's store)
   const websiteDbProducts = useMemo(() => {
     if (!activeWebsite) return [];
     const catalogProdIds = new Set(
@@ -433,36 +412,65 @@ export const SubscribedWebsitePage: React.FC = () => {
         .filter(Boolean)
     );
     return products
-      .filter(
-        (p) =>
-          p.status !== 'archived' &&
-          (p.websiteId === activeWebsite.id ||
-            Boolean(activeWebsite.productCatalogMeta?.[p.id]) ||
-            catalogProdIds.has(p.id))
-      )
+      .filter((p) => {
+        if (p.status === 'archived') return false;
+        if (activeWebsite.storeId && p.storeId && p.storeId !== activeWebsite.storeId) {
+          return false;
+        }
+        if (p.websiteId === activeWebsite.id) return true;
+        if (activeWebsite.productCatalogMeta?.[p.id]) return true;
+        if (catalogProdIds.has(p.id)) return true;
+        if (activeWebsite.storeId && p.storeId) {
+          return (
+            p.storeId === activeWebsite.storeId &&
+            (!p.websiteId || !subscribedWebsites.some((w) => w.id === p.websiteId))
+          );
+        }
+        return !p.storeId && !p.websiteId;
+      })
       .slice()
       .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
-  }, [products, activeWebsite]);
+  }, [products, activeWebsite, subscribedWebsites]);
 
-  // Unified product items for preview and syncing (preserving SKU, discountPrice, stock, and inStock)
+  // Unified showcase product items for preview and publishing (preserving SKU, discountPrice, stock, and inStock)
   const unifiedWebsiteProducts = useMemo<WebsiteProductItem[]>(() => {
+    if (!activeWebsite) return [];
+    const catalogProdIds = new Set(
+      (activeWebsite.servicesOrProducts || [])
+        .map((it) => it.productId || it.id)
+        .filter(Boolean)
+    );
     const visibleDbMapped: WebsiteProductItem[] = websiteDbProducts
-      .filter((p) => p.isVisible !== false && p.status === 'active')
-      .map((p, idx) => buildWebsiteProductItemFromProduct(p, idx));
+      .filter((p) => {
+        if (p.status !== 'active' || p.isVisible === false) return false;
+        return (
+          p.websiteId === activeWebsite.id ||
+          Boolean(activeWebsite.productCatalogMeta?.[p.id]) ||
+          catalogProdIds.has(p.id) ||
+          !p.websiteId
+        );
+      })
+      .map((p, idx) => buildWebsiteProductItemFromProduct(p, p.sortOrder ?? idx));
 
     const dbIds = new Set(websiteDbProducts.map((p) => p.id));
+    const dbSkus = new Set(
+      websiteDbProducts.map((p) => (p.sku || '').trim().toLowerCase()).filter(Boolean)
+    );
     const dbNames = new Set(websiteDbProducts.map((p) => p.name.trim().toLowerCase()));
 
-    const remainingLegacy = editLegacyItems.filter(
-      (item) =>
+    const remainingLegacy = editLegacyItems.filter((item) => {
+      const itemSku = (item.sku || '').trim().toLowerCase();
+      return (
         item.isVisible !== false &&
         (!item.productId || !dbIds.has(item.productId)) &&
         !dbIds.has(item.id) &&
+        (!itemSku || !dbSkus.has(itemSku)) &&
         !dbNames.has((item.name || '').trim().toLowerCase())
-    );
+      );
+    });
 
     return [...visibleDbMapped, ...remainingLegacy];
-  }, [websiteDbProducts, editLegacyItems]);
+  }, [activeWebsite, websiteDbProducts, editLegacyItems]);
 
   const markDirty = () => setIsDirty(true);
   const [heroUploadError, setHeroUploadError] = useState<string | null>(null);
@@ -741,6 +749,17 @@ export const SubscribedWebsitePage: React.FC = () => {
 
   const handlePublishUpdatesClick = async () => {
     if (!activeWebsite) return;
+    if (activeWebsite.subscriptionStatus === 'suspended' || activeWebsite.deploymentStatus === 'suspended') {
+      showToast(
+        'This website has been suspended by an administrator and cannot be republished until reactivated.',
+        'error'
+      );
+      return;
+    }
+    if (activeWebsite.subscriptionStatus === 'cancelled') {
+      showToast('This website subscription has been cancelled and cannot be republished.', 'error');
+      return;
+    }
     if (!editBusinessName.trim()) {
       showToast('Business name cannot be empty.', 'error');
       setEditorTab('business');
@@ -983,121 +1002,15 @@ export const SubscribedWebsitePage: React.FC = () => {
     markDirty();
   };
 
-  // Product Management Handlers (Persisted in Supabase public.products + Storage)
-  const openAddProductModal = () => {
-    setEditingProductTarget({ mode: 'add' });
-    setProdName('');
-    setProdPrice(1200);
-    setProdCategory(activeWebsite?.nicheLabel || 'General');
-    setProdDescription('');
-    setProdImageUrl('');
-    setProdVisible(true);
-    setIsProductModalOpen(true);
-  };
-
-  const openEditDbProductModal = (p: Product) => {
-    setEditingProductTarget({ mode: 'edit', dbProduct: p });
-    setProdName(p.name);
-    setProdPrice(p.price);
-    setProdCategory(p.category || 'General');
-    setProdDescription(p.description || '');
-    setProdImageUrl(p.image || '');
-    setProdVisible(p.isVisible !== false && p.status === 'active');
-    setIsProductModalOpen(true);
-  };
-
-  const openEditLegacyProductModal = (item: WebsiteProductItem, legacyIndex: number) => {
-    const parsedPrice =
-      typeof item.priceNumeric === 'number'
-        ? item.priceNumeric
-        : Number(String(item.price || '0').replace(/[^0-9.]/g, '')) || 0;
-    setEditingProductTarget({ mode: 'edit', legacyIndex });
-    setProdName(item.name);
-    setProdPrice(parsedPrice);
-    setProdCategory(item.category || activeWebsite?.nicheLabel || 'General');
-    setProdDescription(item.description || '');
-    setProdImageUrl(item.imageUrl || '');
-    setProdVisible(item.isVisible !== false);
-    setIsProductModalOpen(true);
-  };
-
-  const handleSaveProductModal = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!activeWebsite || !editingProductTarget) return;
-    if (!prodName.trim()) {
-      showToast('Please enter a product name.', 'warning');
-      return;
-    }
-
-    setIsSavingProduct(true);
-    try {
-      if (editingProductTarget.mode === 'add') {
-        const created = await addProduct({
-          name: prodName.trim(),
-          sku: `WEB-${Date.now().toString().slice(-6)}`,
-          category: prodCategory.trim() || 'General',
-          price: Math.max(0, Number(prodPrice) || 0),
-          costPrice: 0,
-          stock: 100,
-          lowStockThreshold: 5,
-          status: prodVisible ? 'active' : 'draft',
-          description: prodDescription.trim(),
-          image: prodImageUrl.trim() || undefined,
-          websiteId: activeWebsite.id,
-          isVisible: prodVisible,
-          sortOrder: websiteDbProducts.length,
-        });
-        if (created) {
-          setIsProductModalOpen(false);
-        }
-      } else if (editingProductTarget.dbProduct) {
-        const updated = await updateProduct(editingProductTarget.dbProduct.id, {
-          name: prodName.trim(),
-          category: prodCategory.trim() || 'General',
-          price: Math.max(0, Number(prodPrice) || 0),
-          status: prodVisible ? 'active' : 'draft',
-          description: prodDescription.trim(),
-          image: prodImageUrl.trim(),
-          websiteId: activeWebsite.id,
-          isVisible: prodVisible,
-        });
-        if (updated) {
-          setIsProductModalOpen(false);
-        }
-      } else if (typeof editingProductTarget.legacyIndex === 'number') {
-        // Promote legacy item into Supabase public.products AND update local list
-        const idx = editingProductTarget.legacyIndex;
-        const created = await addProduct({
-          name: prodName.trim(),
-          sku: `WEB-${Date.now().toString().slice(-6)}`,
-          category: prodCategory.trim() || 'General',
-          price: Math.max(0, Number(prodPrice) || 0),
-          costPrice: 0,
-          stock: 100,
-          lowStockThreshold: 5,
-          status: prodVisible ? 'active' : 'draft',
-          description: prodDescription.trim(),
-          image: prodImageUrl.trim() || undefined,
-          websiteId: activeWebsite.id,
-          isVisible: prodVisible,
-          sortOrder: websiteDbProducts.length,
-        });
-        if (created) {
-          setEditLegacyItems((prev) => prev.filter((_, i) => i !== idx));
-          markDirty();
-          setIsProductModalOpen(false);
-        }
-      }
-    } finally {
-      setIsSavingProduct(false);
-    }
-  };
-
+  // Product Showcase Presentation Controls (visibility, featured, ordering synced to Products catalog)
   const handleToggleDbProductVisibility = async (p: Product) => {
-    const nextVisible = !(p.isVisible !== false && p.status === 'active');
+    if (!activeWebsite) return;
+    const currentlyShown = p.isVisible !== false && p.status === 'active';
+    const nextVisible = !currentlyShown;
     await updateProduct(p.id, {
       isVisible: nextVisible,
-      status: nextVisible ? 'active' : 'draft',
+      status: nextVisible ? 'active' : p.status,
+      websiteId: nextVisible ? activeWebsite.id : p.websiteId,
     });
   };
 
@@ -1116,11 +1029,13 @@ export const SubscribedWebsitePage: React.FC = () => {
     const [moved] = reordered.splice(index, 1);
     reordered.splice(targetIndex, 0, moved);
 
-    await Promise.all(
-      reordered.map((prod, idx) =>
-        prod.sortOrder === idx ? Promise.resolve(prod) : updateProduct(prod.id, { sortOrder: idx })
-      )
-    );
+    for (let i = 0; i < reordered.length; i += 1) {
+      const item = reordered[i];
+      if ((item.sortOrder ?? i) !== i || item.id === moved.id || i === index || i === targetIndex) {
+        await updateProduct(item.id, { sortOrder: i }, { silentToast: true });
+      }
+    }
+    showToast('Product showcase order updated.', 'success');
   };
 
   const handleToggleLegacyProductVisibility = (legacyIndex: number) => {
@@ -1142,18 +1057,6 @@ export const SubscribedWebsitePage: React.FC = () => {
       return next;
     });
     markDirty();
-  };
-
-  const handleConfirmDeleteProduct = async () => {
-    if (!productToDelete) return;
-    if (productToDelete.dbProduct) {
-      await deleteProduct(productToDelete.dbProduct.id);
-    } else if (typeof productToDelete.legacyIndex === 'number') {
-      const targetIdx = productToDelete.legacyIndex;
-      setEditLegacyItems((prev) => prev.filter((_, i) => i !== targetIdx));
-      markDirty();
-    }
-    setProductToDelete(null);
   };
 
   const handleCopyLink = () => {
@@ -1927,9 +1830,9 @@ export const SubscribedWebsitePage: React.FC = () => {
 
             <button
               type="button"
-              disabled={isPublishing || isSavingDraft}
+              disabled={isPublishing || isSavingDraft || isSuspended || isCancelled}
               onClick={() => void handlePublishUpdatesClick()}
-              className="min-h-[38px] px-4 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              className="min-h-[38px] px-4 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isPublishing ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -1937,7 +1840,9 @@ export const SubscribedWebsitePage: React.FC = () => {
                 <Sparkles className="w-3.5 h-3.5 text-amber-300" />
               )}
               <span>
-                {isLive
+                {isSuspended
+                  ? 'Suspended (Admin Hold)'
+                  : isLive
                   ? t.workspace.builder.publishChangesBtn
                   : isPublishEligible
                   ? t.workspace.builder.payAndPublishBtn
@@ -1965,7 +1870,7 @@ export const SubscribedWebsitePage: React.FC = () => {
               },
               {
                 id: 'products',
-                label: `Products (${unifiedWebsiteProducts.length})`,
+                label: `Product Showcase (${unifiedWebsiteProducts.length})`,
                 icon: ShoppingBag,
               },
               { id: 'location', label: 'Contact & Map', icon: MapPin },
@@ -3085,256 +2990,341 @@ export const SubscribedWebsitePage: React.FC = () => {
               </div>
             )}
 
-            {/* TAB 3: PRODUCT CATALOG MANAGEMENT (SUPABASE PRODUCTS + STORAGE) */}
-            {editorTab === 'products' && (
-              <div className="space-y-4">
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                      Website Products &amp; Offerings
-                    </h3>
-                    <p className="text-[11px] text-slate-500 mt-0.5">
-                      Add products, upload photos, toggle visibility, or remove items. Stored in Supabase.
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={openAddProductModal}
-                    className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs inline-flex items-center gap-1 shrink-0 cursor-pointer"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>Add Product</span>
-                  </button>
-                </div>
-
-                {websiteDbProducts.length === 0 && unmigratedLegacyItems.length === 0 ? (
-                  <div className="p-8 text-center rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-dashed border-slate-200 dark:border-slate-700 space-y-2">
-                    <ShoppingBag className="w-7 h-7 text-slate-400 mx-auto" />
-                    <p className="font-semibold text-slate-700 dark:text-slate-300">
-                      No products added to this website yet
-                    </p>
-                    <button
-                      type="button"
-                      onClick={openAddProductModal}
-                      className="text-blue-600 font-semibold hover:underline cursor-pointer"
+            {/* TAB 3: PRODUCT SHOWCASE (AUTO-SYNCED FROM SINGLE PRODUCTS SECTION) */}
+            {editorTab === 'products' && (() => {
+              const productsSection = editSections.find((s) => s.type === 'products');
+              return (
+                <div className="space-y-4">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                        Product Showcase
+                      </h3>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        Products are managed exclusively in the Products section and sync here automatically for storefront display.
+                      </p>
+                    </div>
+                    <Link
+                      to="/dashboard/products"
+                      className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs inline-flex items-center gap-1 shrink-0"
                     >
-                      + Add your first product
-                    </button>
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>Manage Products</span>
+                    </Link>
                   </div>
-                ) : (
-                  <div className="space-y-2.5">
-                    {websiteDbProducts.map((p, dbIdx) => {
-                      const visible = p.isVisible !== false && p.status === 'active';
-                      return (
-                        <div
-                          key={p.id}
-                          className={`p-3 rounded-xl border flex items-center justify-between gap-3 ${
-                            visible
-                              ? 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700'
-                              : 'bg-slate-50 dark:bg-slate-900/50 border-slate-200/60 dark:border-slate-800 opacity-65'
-                          }`}
-                        >
-                          <div className="flex items-center gap-3 min-w-0">
-                            {p.image ? (
-                              <img
-                                src={sanitizeImageUrl(p.image)}
-                                alt={p.name}
-                                className="w-12 h-12 rounded-lg object-cover border border-slate-200 shrink-0"
-                              />
-                            ) : (
-                              <div className="w-12 h-12 rounded-lg bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 shrink-0">
-                                <ShoppingBag className="w-4 h-4" />
-                              </div>
-                            )}
-                            <div className="min-w-0">
-                              <div className="font-bold text-slate-900 dark:text-white truncate">
-                                {p.name}
-                              </div>
-                              <div className="text-[11px] text-slate-500 flex items-center gap-1.5">
-                                <span className="font-mono font-semibold text-blue-600 dark:text-blue-400">
-                                  ৳{p.price.toLocaleString()}
-                                </span>
-                                <span>·</span>
-                                <span>{visible ? 'Visible on site' : 'Hidden'}</span>
-                              </div>
-                            </div>
-                          </div>
 
-                          <div className="flex items-center gap-1 shrink-0">
-                            <button
-                              type="button"
-                              disabled={dbIdx === 0}
-                              onClick={() => void handleMoveDbProduct(dbIdx, 'up')}
-                              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
-                              title="Move up"
-                            >
-                              <ArrowUp className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              type="button"
-                              disabled={dbIdx === websiteDbProducts.length - 1}
-                              onClick={() => void handleMoveDbProduct(dbIdx, 'down')}
-                              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
-                              title="Move down"
-                            >
-                              <ArrowDown className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => void handleToggleDbProductVisibility(p)}
-                              className={`p-1.5 rounded-lg cursor-pointer ${
-                                visible
-                                  ? 'text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/40'
-                                  : 'text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
-                              }`}
-                              title={visible ? 'Hide from website' : 'Show on website'}
-                            >
-                              {visible ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const nextFeatured = !p.isFeatured;
-                                void updateProduct(p.id, { isFeatured: nextFeatured });
-                              }}
-                              className={`p-1.5 rounded-lg cursor-pointer ${
-                                p.isFeatured
-                                  ? 'text-amber-500 hover:bg-amber-50 dark:hover:bg-amber-950/40'
-                                  : 'text-slate-300 hover:text-amber-500 hover:bg-slate-100 dark:hover:bg-slate-800'
-                              }`}
-                              title={
-                                p.isFeatured
-                                  ? 'Featured on storefront (click to unfeature)'
-                                  : 'Mark as Featured on storefront'
-                              }
-                            >
-                              <Star className={`w-4 h-4 ${p.isFeatured ? 'fill-amber-400' : ''}`} />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => openEditDbProductModal(p)}
-                              className="p-1.5 rounded-lg text-slate-500 hover:text-blue-600 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-                              title="Edit product"
-                            >
-                              <Edit3 className="w-4 h-4" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setProductToDelete({ dbProduct: p, name: p.name })}
-                              className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 cursor-pointer"
-                              title="Delete product"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </div>
+                  {/* Showcase Presentation Settings */}
+                  <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-slate-800 dark:text-slate-100">
+                        Showcase Section Presentation
+                      </span>
+                      {productsSection && (
+                        <label className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={productsSection.enabled}
+                            onChange={() => handleToggleSection(productsSection.id)}
+                            className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                          />
+                          <span>Show section on site</span>
+                        </label>
+                      )}
+                    </div>
+
+                    {productsSection && (
+                      <div className="space-y-2">
+                        <div>
+                          <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                            Showcase Heading
+                          </label>
+                          <input
+                            type="text"
+                            value={productsSection.title}
+                            onChange={(e) =>
+                              handleUpdateSectionField(productsSection.id, 'title', e.target.value)
+                            }
+                            placeholder="Featured Products & Offerings"
+                            className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white text-xs"
+                          />
                         </div>
-                      );
-                    })}
+                        <div>
+                          <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                            Showcase Subtitle
+                          </label>
+                          <input
+                            type="text"
+                            value={productsSection.subtitle || ''}
+                            onChange={(e) =>
+                              handleUpdateSectionField(productsSection.id, 'subtitle', e.target.value)
+                            }
+                            placeholder="Explore our current catalog of products and services."
+                            className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white text-xs"
+                          />
+                        </div>
+                      </div>
+                    )}
 
-                    {unmigratedLegacyItems.map(({ item, idx }, listIdx) => {
-                      const visible = item.isVisible !== false;
-                      return (
-                        <div
-                          key={item.id || idx}
-                          className={`p-3 rounded-xl border flex items-center justify-between gap-3 ${
-                            visible
-                              ? 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700'
-                              : 'bg-slate-50 dark:bg-slate-900/50 border-slate-200/60 dark:border-slate-800 opacity-65'
-                          }`}
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <div>
+                        <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                          Default Sort Order
+                        </label>
+                        <select
+                          value={editThemeSettings.productShowcaseDefaultSort || 'custom'}
+                          onChange={(e) => {
+                            const val = e.target.value as NonNullable<
+                              WebsiteThemeSettings['productShowcaseDefaultSort']
+                            >;
+                            setEditThemeSettings((prev) => ({
+                              ...prev,
+                              productShowcaseDefaultSort: val,
+                            }));
+                            markDirty();
+                          }}
+                          className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white text-xs"
                         >
-                          <div className="flex items-center gap-3 min-w-0">
-                            {item.imageUrl ? (
-                              <img
-                                src={sanitizeImageUrl(item.imageUrl)}
-                                alt={item.name}
-                                className="w-12 h-12 rounded-lg object-cover border border-slate-200 shrink-0"
-                              />
-                            ) : (
-                              <div className="w-12 h-12 rounded-lg bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 shrink-0">
-                                <ShoppingBag className="w-4 h-4" />
-                              </div>
-                            )}
-                            <div className="min-w-0">
-                              <div className="font-bold text-slate-900 dark:text-white truncate">
-                                {item.name}
-                              </div>
-                              <div className="text-[11px] text-slate-500 flex items-center gap-1.5">
-                                {item.price && (
-                                  <span className="font-mono font-semibold text-blue-600">
-                                    {item.price}
+                          <option value="custom">Custom Showcase Order</option>
+                          <option value="featured">Featured First</option>
+                          <option value="newest">Newest First</option>
+                          <option value="price-low">Price: Low to High</option>
+                          <option value="price-high">Price: High to Low</option>
+                          <option value="name">Name: A to Z</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                          Desktop Grid Layout
+                        </label>
+                        <select
+                          value={String(editThemeSettings.productShowcaseColumns === 2 ? 2 : 3)}
+                          onChange={(e) => {
+                            const cols = Number(e.target.value) === 2 ? 2 : 3;
+                            setEditThemeSettings((prev) => ({
+                              ...prev,
+                              productShowcaseColumns: cols,
+                            }));
+                            markDirty();
+                          }}
+                          className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white text-xs"
+                        >
+                          <option value="3">3 Columns (Standard)</option>
+                          <option value="2">2 Columns (Large Cards)</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Auto-Synced Products List (Presentation Controls Only) */}
+                  {websiteDbProducts.length === 0 && unmigratedLegacyItems.length === 0 ? (
+                    <div className="p-8 text-center rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-dashed border-slate-200 dark:border-slate-700 space-y-2.5">
+                      <ShoppingBag className="w-7 h-7 text-slate-400 mx-auto" />
+                      <p className="font-semibold text-slate-700 dark:text-slate-300">
+                        No store products available yet
+                      </p>
+                      <p className="text-[11px] text-slate-500 max-w-xs mx-auto">
+                        Add products, pricing, images, and inventory in your dedicated Products section — they will appear here automatically.
+                      </p>
+                      <Link
+                        to="/dashboard/products"
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Add Products in Products Section</span>
+                      </Link>
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5">
+                      {websiteDbProducts.map((p, dbIdx) => {
+                        const visible =
+                          p.isVisible !== false &&
+                          p.status === 'active' &&
+                          (!p.websiteId || p.websiteId === activeWebsite.id);
+                        return (
+                          <div
+                            key={p.id}
+                            className={`p-3 rounded-xl border flex items-center justify-between gap-3 ${
+                              visible
+                                ? 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700'
+                                : 'bg-slate-50 dark:bg-slate-900/50 border-slate-200/60 dark:border-slate-800 opacity-70'
+                            }`}
+                          >
+                            <div className="flex items-center gap-3 min-w-0">
+                              {p.image ? (
+                                <img
+                                  src={sanitizeImageUrl(p.image)}
+                                  alt={p.name}
+                                  className="w-12 h-12 rounded-lg object-cover border border-slate-200 shrink-0"
+                                />
+                              ) : (
+                                <div className="w-12 h-12 rounded-lg bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 shrink-0">
+                                  <ShoppingBag className="w-4 h-4" />
+                                </div>
+                              )}
+                              <div className="min-w-0">
+                                <div className="font-bold text-slate-900 dark:text-white truncate">
+                                  {p.name}
+                                </div>
+                                <div className="text-[11px] text-slate-500 flex flex-wrap items-center gap-1.5">
+                                  <span className="font-mono font-semibold text-blue-600 dark:text-blue-400">
+                                    ৳{(p.discountPrice ?? p.price).toLocaleString()}
                                   </span>
-                                )}
-                                <span>·</span>
-                                <span>{visible ? 'Visible on site' : 'Hidden'}</span>
+                                  {typeof p.discountPrice === 'number' && p.discountPrice < p.price && (
+                                    <span className="font-mono line-through text-slate-400">
+                                      ৳{p.price.toLocaleString()}
+                                    </span>
+                                  )}
+                                  <span>·</span>
+                                  <span>{p.stock > 0 ? `${p.stock} in stock` : 'Out of stock'}</span>
+                                  <span>·</span>
+                                  <span className={visible ? 'text-emerald-600 dark:text-emerald-400 font-semibold' : ''}>
+                                    {visible ? 'Shown on storefront' : 'Hidden'}
+                                  </span>
+                                </div>
                               </div>
                             </div>
-                          </div>
 
-                          <div className="flex items-center gap-1 shrink-0">
-                            <button
-                              type="button"
-                              disabled={listIdx === 0}
-                              onClick={() => handleMoveLegacyProduct(idx, 'up')}
-                              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
-                              title="Move up"
-                            >
-                              <ArrowUp className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              type="button"
-                              disabled={listIdx === unmigratedLegacyItems.length - 1}
-                              onClick={() => handleMoveLegacyProduct(idx, 'down')}
-                              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
-                              title="Move down"
-                            >
-                              <ArrowDown className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleToggleLegacyProductVisibility(idx)}
-                              className={`p-1.5 rounded-lg cursor-pointer ${
-                                visible ? 'text-emerald-600' : 'text-slate-400'
-                              }`}
-                              title={visible ? 'Hide from website' : 'Show on website'}
-                            >
-                              {visible ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => openEditLegacyProductModal(item, idx)}
-                              className="p-1.5 rounded-lg text-slate-500 hover:text-blue-600 cursor-pointer"
-                              title="Edit product"
-                            >
-                              <Edit3 className="w-4 h-4" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setProductToDelete({ legacyIndex: idx, name: item.name })
-                              }
-                              className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 cursor-pointer"
-                              title="Delete product"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                disabled={dbIdx === 0}
+                                onClick={() => void handleMoveDbProduct(dbIdx, 'up')}
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                                title="Move up in showcase"
+                              >
+                                <ArrowUp className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                disabled={dbIdx === websiteDbProducts.length - 1}
+                                onClick={() => void handleMoveDbProduct(dbIdx, 'down')}
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                                title="Move down in showcase"
+                              >
+                                <ArrowDown className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleToggleDbProductVisibility(p)}
+                                className={`p-1.5 rounded-lg cursor-pointer ${
+                                  visible
+                                    ? 'text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/40'
+                                    : 'text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+                                }`}
+                                title={visible ? 'Hide from storefront' : 'Show in storefront'}
+                              >
+                                {visible ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleToggleDbProductFeatured(p)}
+                                className={`p-1.5 rounded-lg cursor-pointer ${
+                                  p.isFeatured
+                                    ? 'text-amber-500 hover:bg-amber-50 dark:hover:bg-amber-950/40'
+                                    : 'text-slate-300 hover:text-amber-500 hover:bg-slate-100 dark:hover:bg-slate-800'
+                                }`}
+                                title={
+                                  p.isFeatured
+                                    ? 'Featured in showcase (click to unfeature)'
+                                    : 'Mark as Featured'
+                                }
+                              >
+                                <Star className={`w-4 h-4 ${p.isFeatured ? 'fill-amber-400' : ''}`} />
+                              </button>
+                            </div>
                           </div>
-                        </div>
-                      );
-                    })}
+                        );
+                      })}
+
+                      {unmigratedLegacyItems.map(({ item, idx }, listIdx) => {
+                        const visible = item.isVisible !== false;
+                        return (
+                          <div
+                            key={item.id || idx}
+                            className={`p-3 rounded-xl border flex items-center justify-between gap-3 ${
+                              visible
+                                ? 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700'
+                                : 'bg-slate-50 dark:bg-slate-900/50 border-slate-200/60 dark:border-slate-800 opacity-65'
+                            }`}
+                          >
+                            <div className="flex items-center gap-3 min-w-0">
+                              {item.imageUrl ? (
+                                <img
+                                  src={sanitizeImageUrl(item.imageUrl)}
+                                  alt={item.name}
+                                  className="w-12 h-12 rounded-lg object-cover border border-slate-200 shrink-0"
+                                />
+                              ) : (
+                                <div className="w-12 h-12 rounded-lg bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 shrink-0">
+                                  <ShoppingBag className="w-4 h-4" />
+                                </div>
+                              )}
+                              <div className="min-w-0">
+                                <div className="font-bold text-slate-900 dark:text-white truncate">
+                                  {item.name}
+                                </div>
+                                <div className="text-[11px] text-slate-500 flex items-center gap-1.5">
+                                  {item.price && (
+                                    <span className="font-mono font-semibold text-blue-600">
+                                      {item.price}
+                                    </span>
+                                  )}
+                                  <span>·</span>
+                                  <span>{visible ? 'Shown on storefront' : 'Hidden'}</span>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                disabled={listIdx === 0}
+                                onClick={() => handleMoveLegacyProduct(idx, 'up')}
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                                title="Move up"
+                              >
+                                <ArrowUp className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                disabled={listIdx === unmigratedLegacyItems.length - 1}
+                                onClick={() => handleMoveLegacyProduct(idx, 'down')}
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                                title="Move down"
+                              >
+                                <ArrowDown className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleToggleLegacyProductVisibility(idx)}
+                                className={`p-1.5 rounded-lg cursor-pointer ${
+                                  visible ? 'text-emerald-600' : 'text-slate-400'
+                                }`}
+                                title={visible ? 'Hide from storefront' : 'Show in storefront'}
+                              >
+                                {visible ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-[11px] text-slate-500">
+                    <span>Add, edit, delete, or restock items:</span>
+                    <Link
+                      to="/dashboard/products"
+                      className="text-blue-600 dark:text-blue-400 font-semibold hover:underline inline-flex items-center gap-1"
+                    >
+                      <span>Go to Products &amp; Inventory</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </Link>
                   </div>
-                )}
-
-                <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-[11px] text-slate-500">
-                  <span>Full inventory &amp; SKU management:</span>
-                  <Link
-                    to="/dashboard/products"
-                    className="text-blue-600 dark:text-blue-400 font-semibold hover:underline"
-                  >
-                    Open Products &amp; Inventory →
-                  </Link>
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* TAB 1: BUSINESS INFO, BRANDING, THEME & DOMAIN */}
             {editorTab === 'business' && (
@@ -4341,9 +4331,9 @@ export const SubscribedWebsitePage: React.FC = () => {
                 <div className="space-y-2 pt-2">
                   <button
                     type="button"
-                    disabled={isPublishing || isSavingDraft}
+                    disabled={isPublishing || isSavingDraft || isSuspended || isCancelled}
                     onClick={() => void handlePublishUpdatesClick()}
-                    className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-sm shadow-md inline-flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                    className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-sm shadow-md inline-flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {isPublishing ? (
                       <Loader2 className="w-4 h-4 animate-spin" />
@@ -4351,7 +4341,9 @@ export const SubscribedWebsitePage: React.FC = () => {
                       <Sparkles className="w-4 h-4 text-amber-300" />
                     )}
                     <span>
-                      {isLive
+                      {isSuspended
+                        ? 'Website Suspended by Administrator'
+                        : isLive
                         ? 'Publish Updates to Live Website'
                         : isPublishEligible
                         ? 'Publish Website Live Now'
@@ -4480,167 +4472,6 @@ export const SubscribedWebsitePage: React.FC = () => {
         </div>
       </div>
 
-      {/* ========================================================================= */}
-      {/* Modal: Add / Edit Website Product                                         */}
-      {/* ========================================================================= */}
-      <Modal
-        isOpen={isProductModalOpen}
-        onClose={() => setIsProductModalOpen(false)}
-        title={editingProductTarget?.mode === 'add' ? 'Add Website Product' : 'Edit Website Product'}
-        description="Saved directly to your Supabase products table and cloud asset storage."
-        maxWidth="md"
-      >
-        <form onSubmit={handleSaveProductModal} className="space-y-4 text-xs">
-          <div>
-            <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-              Product / Service Name *
-            </label>
-            <input
-              type="text"
-              required
-              value={prodName}
-              onChange={(e) => setProdName(e.target.value)}
-              placeholder="e.g. Handwoven Jamdani Saree"
-              className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-semibold"
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                Price (BDT ৳) *
-              </label>
-              <input
-                type="number"
-                min={0}
-                required
-                value={prodPrice}
-                onChange={(e) => setProdPrice(Number(e.target.value))}
-                className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-mono"
-              />
-            </div>
-            <div>
-              <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                Category
-              </label>
-              <input
-                type="text"
-                value={prodCategory}
-                onChange={(e) => setProdCategory(e.target.value)}
-                placeholder="e.g. Apparel"
-                className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
-              />
-            </div>
-          </div>
-
-          <div>
-            <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-              Description
-            </label>
-            <textarea
-              rows={3}
-              value={prodDescription}
-              onChange={(e) => setProdDescription(e.target.value)}
-              placeholder="Key materials, sizing, or specifications..."
-              className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
-            />
-          </div>
-
-          {/* Product Image Upload */}
-          <div className="space-y-2">
-            <label className="block font-semibold text-slate-700 dark:text-slate-300">
-              Product Image
-            </label>
-            {prodImageUrl ? (
-              <div className="flex items-center gap-3 p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
-                <img
-                  src={sanitizeImageUrl(prodImageUrl)}
-                  alt={prodName}
-                  className="w-14 h-14 rounded-lg object-cover border border-slate-200"
-                />
-                <div className="space-y-1">
-                  <label className="text-blue-600 font-semibold hover:underline cursor-pointer block">
-                    <span>{uploadingKey === 'modal-prod' ? 'Uploading...' : 'Replace Image'}</span>
-                    <input
-                      type="file"
-                      accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
-                      className="hidden"
-                      onChange={(e) =>
-                        void handleUploadImage(
-                          e.target.files?.[0],
-                          'products',
-                          'modal-prod',
-                          setProdImageUrl
-                        )
-                      }
-                    />
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => setProdImageUrl('')}
-                    className="text-rose-600 font-semibold hover:underline cursor-pointer block"
-                  >
-                    Remove Image
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <label className="flex items-center justify-center gap-2 p-3 rounded-xl border border-dashed border-slate-300 dark:border-slate-700 hover:border-blue-500 cursor-pointer text-slate-600 dark:text-slate-300 font-semibold">
-                {uploadingKey === 'modal-prod' ? (
-                  <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
-                ) : (
-                  <Upload className="w-4 h-4 text-blue-600" />
-                )}
-                <span>Upload Product Photo (PNG/JPG/WEBP)</span>
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
-                  className="hidden"
-                  onChange={(e) =>
-                    void handleUploadImage(
-                      e.target.files?.[0],
-                      'products',
-                      'modal-prod',
-                      setProdImageUrl
-                    )
-                  }
-                />
-              </label>
-            )}
-          </div>
-
-          <label className="flex items-center gap-2 pt-1 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={prodVisible}
-              onChange={(e) => setProdVisible(e.target.checked)}
-              className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-            />
-            <span className="font-semibold text-slate-700 dark:text-slate-300">
-              Show this product on published website
-            </span>
-          </label>
-
-          <div className="flex justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
-            <button
-              type="button"
-              onClick={() => setIsProductModalOpen(false)}
-              className="px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-semibold cursor-pointer"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={isSavingProduct || uploadingKey === 'modal-prod'}
-              className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold flex items-center gap-1.5 cursor-pointer"
-            >
-              {isSavingProduct && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-              <span>{editingProductTarget?.mode === 'add' ? 'Add Product' : 'Save Product'}</span>
-            </button>
-          </div>
-        </form>
-      </Modal>
-
       {/* Modal: Concierge Update Request */}
       <Modal
         isOpen={isRequestModalOpen}
@@ -4716,18 +4547,6 @@ export const SubscribedWebsitePage: React.FC = () => {
               receiptTargetRequest.id === latestApprovedPayment.id
           )
         }
-      />
-
-      {/* Delete Product Confirmation Dialog */}
-      <ConfirmDialog
-        isOpen={!!productToDelete}
-        onClose={() => setProductToDelete(null)}
-        onConfirm={() => void handleConfirmDeleteProduct()}
-        title="Delete Product"
-        message={`Are you sure you want to permanently delete "${productToDelete?.name}" from your catalog and website?`}
-        confirmLabel="Delete Product"
-        cancelLabel="Keep Product"
-        isDestructive={true}
       />
 
       {/* Unpublish Confirmation Dialog */}

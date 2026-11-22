@@ -9,6 +9,7 @@ import verifyPricingHandler from './api/verify-pricing.ts';
 import publicOrderHandler from './api/public-order.ts';
 import publicInquiryHandler from './api/public-inquiry.ts';
 import customerPortalHandler from './api/customer-portal.ts';
+import adminWebsiteActionHandler from './api/admin-website-action.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -141,6 +142,23 @@ export default defineConfig(({ mode }) => {
                 ok: false,
                 code: 'INTERNAL_PORTAL_ERROR',
                 error: 'Server error handling customer portal request.',
+              })
+            );
+          }
+          return;
+        }
+        if (pathname === '/api/admin-website-action') {
+          try {
+            await adminWebsiteActionHandler(req, res);
+          } catch {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(
+              JSON.stringify({
+                ok: false,
+                success: false,
+                code: 'INTERNAL_ADMIN_ACTION_ERROR',
+                error: 'Server error handling administrative website action.',
               })
             );
           }

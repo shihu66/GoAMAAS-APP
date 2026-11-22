@@ -624,7 +624,8 @@ export default async function handler(req: RequestWithQuery, res: ServerResponse
                           : (item.sortOrder ?? metaEntry.sortOrder),
                       isFeatured: Boolean(item.isFeatured ?? metaEntry.isFeatured),
                     };
-                  });
+                  })
+                  .sort((a: any, b: any) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
 
                 const { store_id: _droppedStoreId, storeId: _droppedCamelStoreId, ...cleanHydrated } = hydratedSite;
                 hydratedSite = {

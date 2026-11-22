@@ -204,8 +204,17 @@ export const AdminDashboardPage: React.FC = () => {
     action: 'suspend' | 'reactivate' | 'renew';
   } | null>(null);
   const [lifecycleReason, setLifecycleReason] = useState('');
+  const [lifecycleError, setLifecycleError] = useState<string | null>(null);
   const [isLifecycleSubmitting, setIsLifecycleSubmitting] = useState(false);
-  const [websiteToDelete, setWebsiteToDelete] = useState<SubscribedWebsite | null>(null);
+  const [deleteWebsiteModal, setDeleteWebsiteModal] = useState<{
+    site: SubscribedWebsite;
+    step: 1 | 2;
+    typedSubdomain: string;
+    acknowledged: boolean;
+    hasPaymentHistory: boolean;
+  } | null>(null);
+  const [isDeletingWebsite, setIsDeletingWebsite] = useState(false);
+  const [deleteWebsiteError, setDeleteWebsiteError] = useState<string | null>(null);
 
   // Plan Settings Modal State
   const [isPlanSettingsModalOpen, setIsPlanSettingsModalOpen] = useState(false);
@@ -686,11 +695,13 @@ export const AdminDashboardPage: React.FC = () => {
     if (!lifecycleModal || isLifecycleSubmitting) return;
     const cleanReason = lifecycleReason.trim();
     if (!cleanReason) {
+      setLifecycleError('Please provide an administrative reason for the audit log.');
       showToast('Please provide an administrative reason for the audit log.', 'warning');
       return;
     }
 
     setIsLifecycleSubmitting(true);
+    setLifecycleError(null);
     try {
       const { site, action } = lifecycleModal;
       const recheck = await revalidateAdminBeforeAction({
@@ -700,13 +711,12 @@ export const AdminDashboardPage: React.FC = () => {
       });
 
       if (!recheck.allowed) {
-        showToast(recheck.errorMessage || 'Session verification failed.', 'error');
+        const msg = recheck.errorMessage || 'Session verification failed.';
+        setLifecycleError(msg);
+        showToast(msg, 'error');
         await refreshVerification();
         return;
       }
-
-      setLifecycleModal(null);
-      setLifecycleReason('');
 
       let res: { success: boolean; message: string };
       if (action === 'suspend') {
@@ -725,34 +735,74 @@ export const AdminDashboardPage: React.FC = () => {
         outcome: res.success ? 'success' : 'failed',
         summary: res.message || `Website ${action} completed (${site.subdomain}.amaas.xyz).`,
       });
+
+      if (res.success) {
+        setLifecycleModal(null);
+        setLifecycleReason('');
+        setLifecycleError(null);
+      } else {
+        setLifecycleError(res.message || `Failed to ${action} website.`);
+      }
     } finally {
       setIsLifecycleSubmitting(false);
     }
   };
 
-  // Sensitive Action 4: Delete Unpaid Website (with server revalidation)
+  // Sensitive Action 4: Permanent Website Deletion (two-step verified, preserves store/products/orders/payments)
   const handleConfirmDeleteWebsite = async () => {
-    if (!websiteToDelete) return;
-    const target = websiteToDelete;
-    const recheck = await revalidateAdminBeforeAction({
-      action: 'delete_unpaid_website',
-      targetType: 'website',
-      targetId: target.id,
-    });
-    if (!recheck.allowed) {
-      showToast(recheck.errorMessage || 'Session verification failed.', 'error');
-      await refreshVerification();
+    if (!deleteWebsiteModal || deleteWebsiteModal.step !== 2 || isDeletingWebsite) return;
+    const { site, typedSubdomain, acknowledged } = deleteWebsiteModal;
+    const normalizedTyped = typedSubdomain.trim().toLowerCase();
+    const expectedSubdomain = site.subdomain.trim().toLowerCase();
+
+    if (!normalizedTyped || (normalizedTyped !== expectedSubdomain && normalizedTyped !== site.fullDomainUrl.trim().toLowerCase())) {
+      setDeleteWebsiteError(`Please enter the exact subdomain "${site.subdomain}" before deleting.`);
       return;
     }
-    const res = await adminDeleteSubscribedWebsite(target.id);
-    recordAdminSessionEvent({
-      adminId: verifiedAdmin.id,
-      action: 'delete_unpaid_website',
-      targetType: 'website',
-      targetId: target.id,
-      outcome: res.success ? 'success' : 'failed',
-      summary: res.message,
-    });
+    if (!acknowledged) {
+      setDeleteWebsiteError('Please check the explicit final confirmation box before deleting.');
+      return;
+    }
+
+    setIsDeletingWebsite(true);
+    setDeleteWebsiteError(null);
+    try {
+      const recheck = await revalidateAdminBeforeAction({
+        action: 'delete_website',
+        targetType: 'website',
+        targetId: site.id,
+      });
+      if (!recheck.allowed) {
+        const msg = recheck.errorMessage || 'Session verification failed.';
+        setDeleteWebsiteError(msg);
+        showToast(msg, 'error');
+        await refreshVerification();
+        return;
+      }
+
+      const res = await adminDeleteSubscribedWebsite(site.id, {
+        confirmSubdomain: normalizedTyped,
+        explicitConfirmed: true,
+      });
+
+      recordAdminSessionEvent({
+        adminId: verifiedAdmin.id,
+        action: 'delete_website',
+        targetType: 'website',
+        targetId: site.id,
+        outcome: res.success ? 'success' : 'failed',
+        summary: res.message,
+      });
+
+      if (res.success) {
+        setDeleteWebsiteModal(null);
+        setDeleteWebsiteError(null);
+      } else {
+        setDeleteWebsiteError(res.message || 'Unable to delete website record.');
+      }
+    } finally {
+      setIsDeletingWebsite(false);
+    }
   };
 
   // MFA Enrollment Handlers
@@ -1918,6 +1968,7 @@ export const AdminDashboardPage: React.FC = () => {
                             disabled={site.paymentStatus !== 'paid' || !isOnline}
                             onClick={() => {
                               setLifecycleReason('');
+                              setLifecycleError(null);
                               setLifecycleModal({ site, action: 'reactivate' });
                             }}
                             className="min-h-[44px] px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
@@ -1931,6 +1982,7 @@ export const AdminDashboardPage: React.FC = () => {
                             disabled={!isOnline}
                             onClick={() => {
                               setLifecycleReason('');
+                              setLifecycleError(null);
                               setLifecycleModal({ site, action: 'suspend' });
                             }}
                             className="min-h-[44px] px-3 py-2 rounded-xl bg-amber-500/15 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-800 disabled:opacity-40 text-amber-800 dark:text-amber-300 font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
@@ -1945,6 +1997,7 @@ export const AdminDashboardPage: React.FC = () => {
                           disabled={site.paymentStatus !== 'paid' || !isOnline}
                           onClick={() => {
                             setLifecycleReason('');
+                            setLifecycleError(null);
                             setLifecycleModal({ site, action: 'renew' });
                           }}
                           className="min-h-[44px] px-3 py-2 rounded-xl bg-blue-50 dark:bg-blue-950/60 border border-blue-200 dark:border-blue-800 disabled:opacity-40 text-blue-700 dark:text-blue-300 font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
@@ -1955,9 +2008,19 @@ export const AdminDashboardPage: React.FC = () => {
 
                         <button
                           type="button"
-                          disabled={hasPaymentHistory || !isOnline}
-                          onClick={() => setWebsiteToDelete(site)}
+                          disabled={!isOnline}
+                          onClick={() => {
+                            setDeleteWebsiteError(null);
+                            setDeleteWebsiteModal({
+                              site,
+                              step: 1,
+                              typedSubdomain: '',
+                              acknowledged: false,
+                              hasPaymentHistory,
+                            });
+                          }}
                           className="min-h-[44px] px-3 py-2 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900 disabled:opacity-30 text-rose-700 dark:text-rose-300 font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                          title="Permanently delete website and all associated business data"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                           <span>Delete</span>
@@ -2090,6 +2153,7 @@ export const AdminDashboardPage: React.FC = () => {
                                   disabled={site.paymentStatus !== 'paid' || !isOnline}
                                   onClick={() => {
                                     setLifecycleReason('');
+                                    setLifecycleError(null);
                                     setLifecycleModal({ site, action: 'reactivate' });
                                   }}
                                   className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
@@ -2103,6 +2167,7 @@ export const AdminDashboardPage: React.FC = () => {
                                   disabled={!isOnline}
                                   onClick={() => {
                                     setLifecycleReason('');
+                                    setLifecycleError(null);
                                     setLifecycleModal({ site, action: 'suspend' });
                                   }}
                                   className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-amber-500/15 dark:bg-amber-900/50 hover:bg-amber-500/25 disabled:opacity-40 text-amber-800 dark:text-amber-200 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
@@ -2117,6 +2182,7 @@ export const AdminDashboardPage: React.FC = () => {
                                 disabled={site.paymentStatus !== 'paid' || !isOnline}
                                 onClick={() => {
                                   setLifecycleReason('');
+                                  setLifecycleError(null);
                                   setLifecycleModal({ site, action: 'renew' });
                                 }}
                                 className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-blue-50 dark:bg-blue-900/50 hover:bg-blue-100 dark:hover:bg-blue-800 disabled:opacity-40 text-blue-700 dark:text-blue-200 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
@@ -2127,14 +2193,19 @@ export const AdminDashboardPage: React.FC = () => {
 
                               <button
                                 type="button"
-                                disabled={hasPaymentHistory || !isOnline}
-                                onClick={() => setWebsiteToDelete(site)}
+                                disabled={!isOnline}
+                                onClick={() => {
+                                  setDeleteWebsiteError(null);
+                                  setDeleteWebsiteModal({
+                                    site,
+                                    step: 1,
+                                    typedSubdomain: '',
+                                    acknowledged: false,
+                                    hasPaymentHistory,
+                                  });
+                                }}
                                 className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-rose-50 dark:bg-rose-950/60 hover:bg-rose-100 dark:hover:bg-rose-900 disabled:opacity-30 text-rose-700 dark:text-rose-300 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
-                                title={
-                                  hasPaymentHistory
-                                    ? 'Websites with payment history cannot be deleted'
-                                    : 'Delete unpaid draft website'
-                                }
+                                title="Permanently delete website and all associated business data"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
                               </button>
@@ -3551,6 +3622,7 @@ export const AdminDashboardPage: React.FC = () => {
           if (!isLifecycleSubmitting) {
             setLifecycleModal(null);
             setLifecycleReason('');
+            setLifecycleError(null);
           }
         }}
         title={
@@ -3569,6 +3641,12 @@ export const AdminDashboardPage: React.FC = () => {
       >
         {lifecycleModal && (
           <form onSubmit={(e) => void handleConfirmLifecycleAction(e)} className="space-y-4 text-xs">
+            {lifecycleModal.action === 'suspend' && (
+              <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-200 leading-relaxed">
+                Suspending <strong>{lifecycleModal.site.businessName}</strong> immediately takes{' '}
+                <span className="font-mono font-semibold">{lifecycleModal.site.fullDomainUrl}</span> offline and blocks merchant republishing until an administrator reactivates it. All store, product, customer, order, and payment records stay intact.
+              </div>
+            )}
             <p className="text-slate-600 dark:text-slate-400 leading-relaxed">
               Provide a clear administrative reason for this{' '}
               <strong className="text-slate-900 dark:text-white uppercase">
@@ -3584,7 +3662,10 @@ export const AdminDashboardPage: React.FC = () => {
                 rows={3}
                 required
                 value={lifecycleReason}
-                onChange={(e) => setLifecycleReason(e.target.value)}
+                onChange={(e) => {
+                  setLifecycleReason(e.target.value);
+                  if (lifecycleError) setLifecycleError(null);
+                }}
                 placeholder={
                   lifecycleModal.action === 'suspend'
                     ? 'e.g. Policy compliance review or billing hold...'
@@ -3595,6 +3676,12 @@ export const AdminDashboardPage: React.FC = () => {
                 className="w-full px-3 py-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-white"
               />
             </div>
+            {lifecycleError && (
+              <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{lifecycleError}</span>
+              </div>
+            )}
             <div className="flex justify-end gap-2 pt-2">
               <button
                 type="button"
@@ -3602,6 +3689,7 @@ export const AdminDashboardPage: React.FC = () => {
                 onClick={() => {
                   setLifecycleModal(null);
                   setLifecycleReason('');
+                  setLifecycleError(null);
                 }}
                 className="min-h-[42px] px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-semibold text-xs cursor-pointer"
               >
@@ -3610,32 +3698,229 @@ export const AdminDashboardPage: React.FC = () => {
               <button
                 type="submit"
                 disabled={!lifecycleReason.trim() || isLifecycleSubmitting || !isOnline}
-                className="min-h-[42px] px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold text-xs cursor-pointer inline-flex items-center gap-1.5"
+                className={`min-h-[42px] px-4 py-2 rounded-xl disabled:opacity-50 text-white font-semibold text-xs cursor-pointer inline-flex items-center gap-1.5 ${
+                  lifecycleModal.action === 'suspend'
+                    ? 'bg-amber-600 hover:bg-amber-500'
+                    : 'bg-blue-600 hover:bg-blue-500'
+                }`}
               >
                 {isLifecycleSubmitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                <span>Confirm &amp; Log Action</span>
+                <span>
+                  {lifecycleModal.action === 'suspend'
+                    ? 'Suspend Website'
+                    : lifecycleModal.action === 'reactivate'
+                    ? 'Activate Website'
+                    : 'Confirm & Log Action'}
+                </span>
               </button>
             </div>
           </form>
         )}
       </Modal>
 
-      {/* Confirm Delete Unpaid Website */}
-      <ConfirmDialog
-        isOpen={!!websiteToDelete}
-        onClose={() => setWebsiteToDelete(null)}
-        onConfirm={() => {
-          void handleConfirmDeleteWebsite();
+      {/* Two-Step Strong Confirmation: Permanently Delete Subscribed Website Record */}
+      <Modal
+        isOpen={!!deleteWebsiteModal}
+        onClose={() => {
+          if (!isDeletingWebsite) {
+            setDeleteWebsiteModal(null);
+            setDeleteWebsiteError(null);
+          }
         }}
-        title="Delete Unpaid Website Record"
-        message={
-          websiteToDelete
-            ? `Are you sure you want to permanently delete "${websiteToDelete.businessName}" (${websiteToDelete.fullDomainUrl})? Websites with payment history cannot be deleted.`
-            : ''
+        title={
+          deleteWebsiteModal?.step === 2
+            ? 'Step 2 of 2: Final Deletion Confirmation'
+            : 'Step 1 of 2: Verify Website Deletion'
         }
-        confirmLabel="Delete Website"
-        isDestructive
-      />
+        description={
+          deleteWebsiteModal
+            ? `${deleteWebsiteModal.site.businessName} · ${deleteWebsiteModal.site.fullDomainUrl}`
+            : undefined
+        }
+        maxWidth="md"
+      >
+        {deleteWebsiteModal && (() => {
+          const { site, step, typedSubdomain, acknowledged, hasPaymentHistory } = deleteWebsiteModal;
+          const matchesSubdomain =
+            typedSubdomain.trim().toLowerCase() === site.subdomain.trim().toLowerCase();
+
+          return (
+            <div className="space-y-4 text-xs">
+              <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500 dark:text-slate-400">Website Name</span>
+                  <span className="font-bold text-slate-900 dark:text-white text-right">
+                    {site.businessName}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500 dark:text-slate-400">Subdomain</span>
+                  <span className="font-mono font-bold text-rose-600 dark:text-rose-400 text-right">
+                    {site.fullDomainUrl}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500 dark:text-slate-400">Owner</span>
+                  <span className="text-slate-700 dark:text-slate-300 text-right">
+                    {site.ownerName}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500 dark:text-slate-400">Status</span>
+                  <span className="text-slate-700 dark:text-slate-300 capitalize text-right">
+                    {site.subscriptionStatus} &middot; {site.paymentStatus}
+                  </span>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-200 leading-relaxed space-y-1.5">
+                <div className="font-bold flex items-center gap-1.5">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>Permanent &amp; Irreversible Business Data Deletion</span>
+                </div>
+                <p>
+                  Permanently deleting this website removes the{' '}
+                  <strong>website, its configuration, associated store, products, product images/files, inventory movements, store-exclusive customers, orders, order items, and store team permissions</strong>.
+                </p>
+                <p className="text-[11px] text-rose-700 dark:text-rose-300">
+                  Shared user login accounts remain intact, and {hasPaymentHistory ? 'financial payment history and ' : ''}lifecycle audit records are retained for compliance auditing. To temporarily take a website offline without deleting any data, use <strong>Suspend</strong> instead.
+                </p>
+              </div>
+
+              {step === 1 ? (
+                <>
+                  <div>
+                    <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                      Type the subdomain{' '}
+                      <span className="font-mono px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-white">
+                        {site.subdomain}
+                      </span>{' '}
+                      to confirm identity *
+                    </label>
+                    <input
+                      type="text"
+                      value={typedSubdomain}
+                      onChange={(e) => {
+                        setDeleteWebsiteModal((prev) =>
+                          prev ? { ...prev, typedSubdomain: e.target.value } : null
+                        );
+                        if (deleteWebsiteError) setDeleteWebsiteError(null);
+                      }}
+                      placeholder={site.subdomain}
+                      autoComplete="off"
+                      spellCheck={false}
+                      className="w-full px-3 py-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 font-mono text-slate-900 dark:text-white"
+                    />
+                  </div>
+
+                  <div className="flex justify-end gap-2 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDeleteWebsiteModal(null);
+                        setDeleteWebsiteError(null);
+                      }}
+                      className="min-h-[42px] px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-semibold text-xs cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!matchesSubdomain}
+                      onClick={() => {
+                        setDeleteWebsiteError(null);
+                        setDeleteWebsiteModal((prev) =>
+                          prev ? { ...prev, step: 2, acknowledged: false } : null
+                        );
+                      }}
+                      className="min-h-[42px] px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-white font-semibold text-xs cursor-pointer"
+                    >
+                      Continue to Final Confirmation
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="p-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-200 space-y-2">
+                    <div className="flex items-center gap-2 font-bold">
+                      <AlertTriangle className="w-4 h-4 shrink-0" />
+                      <span>PERMANENTLY DELETE WEBSITE AND ALL ASSOCIATED DATA</span>
+                    </div>
+                    <p className="leading-relaxed">
+                      You are about to permanently delete <strong>{site.businessName}</strong> (
+                      <span className="font-mono font-semibold">{site.fullDomainUrl}</span>) and all exclusively associated store, product, inventory, customer, order, and media files. This cannot be undone.
+                    </p>
+                  </div>
+
+                  <label className="flex items-start gap-2.5 p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={acknowledged}
+                      onChange={(e) => {
+                        setDeleteWebsiteModal((prev) =>
+                          prev ? { ...prev, acknowledged: e.target.checked } : null
+                        );
+                        if (deleteWebsiteError) setDeleteWebsiteError(null);
+                      }}
+                      className="mt-0.5 rounded border-slate-300 text-rose-600 focus:ring-rose-500"
+                    />
+                    <span className="text-slate-700 dark:text-slate-300 leading-relaxed">
+                      <strong>PERMANENTLY DELETE WEBSITE AND ALL ASSOCIATED DATA</strong> for{' '}
+                      <strong>{site.businessName}</strong> (
+                      <span className="font-mono">{site.fullDomainUrl}</span>). I verify all store-exclusive products, inventory, customers, orders, and storage assets should be erased while global user logins and payment/audit logs remain preserved.
+                    </span>
+                  </label>
+
+                  {deleteWebsiteError && (
+                    <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                      <span>{deleteWebsiteError}</span>
+                    </div>
+                  )}
+
+                  <div className="flex justify-between gap-2 pt-2">
+                    <button
+                      type="button"
+                      disabled={isDeletingWebsite}
+                      onClick={() => {
+                        setDeleteWebsiteError(null);
+                        setDeleteWebsiteModal((prev) =>
+                          prev ? { ...prev, step: 1, acknowledged: false } : null
+                        );
+                      }}
+                      className="min-h-[42px] px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-semibold text-xs cursor-pointer disabled:opacity-40"
+                    >
+                      Back
+                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={isDeletingWebsite}
+                        onClick={() => {
+                          setDeleteWebsiteModal(null);
+                          setDeleteWebsiteError(null);
+                        }}
+                        className="min-h-[42px] px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-semibold text-xs cursor-pointer disabled:opacity-40"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!acknowledged || isDeletingWebsite || !isOnline}
+                        onClick={() => void handleConfirmDeleteWebsite()}
+                        className="min-h-[42px] px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-white font-semibold text-xs cursor-pointer inline-flex items-center gap-1.5"
+                      >
+                        {isDeletingWebsite && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                        <span>Permanently Delete Website</span>
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          );
+        })()}
+      </Modal>
 
       {/* Payment Details Modal */}
       {selectedPaymentDetails && (() => {

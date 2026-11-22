@@ -451,6 +451,7 @@ export function mergeStoreProductsWithWebsites(
     let resolvedDiscountPrice = prod.discountPrice;
     let resolvedIsVisible = prod.isVisible;
     let resolvedSortOrder = prod.sortOrder;
+    let resolvedIsFeatured = prod.isFeatured;
 
     for (const site of websites) {
       const metaMap = site.productCatalogMeta || {};
@@ -487,6 +488,13 @@ export function mergeStoreProductsWithWebsites(
         if (resolvedSortOrder === undefined) {
           resolvedSortOrder = metaEntry?.sortOrder ?? publishedMatch?.sortOrder ?? 0;
         }
+        if (resolvedIsFeatured === undefined) {
+          if (metaEntry?.isFeatured !== undefined) {
+            resolvedIsFeatured = metaEntry.isFeatured;
+          } else if (publishedMatch?.isFeatured !== undefined) {
+            resolvedIsFeatured = publishedMatch.isFeatured;
+          }
+        }
         break;
       }
     }
@@ -498,6 +506,7 @@ export function mergeStoreProductsWithWebsites(
       discountPrice: resolvedDiscountPrice,
       isVisible: resolvedIsVisible ?? false,
       sortOrder: resolvedSortOrder,
+      isFeatured: resolvedIsFeatured ?? false,
     };
   });
 }

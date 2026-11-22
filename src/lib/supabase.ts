@@ -4212,42 +4212,191 @@ export async function cancelClientWebsiteSubscriptionInDb(
   }
 }
 
-export async function adminDeleteSubscribedWebsiteInDb(
-  websiteId: string
-): Promise<{ success: boolean; message: string; error: Error | null }> {
-  if (!isSupabaseConfigured || !supabase) {
-    return { success: true, message: 'Website deleted locally.', error: null };
+interface AdminWebsiteActionApiResult {
+  handled: boolean;
+  success: boolean;
+  code?: string;
+  message: string;
+  auditLogId?: string;
+  deletedWebsiteId?: string;
+  deletedStoreId?: string | null;
+  isSharedStore?: boolean;
+  deletedCounts?: {
+    products?: number;
+    inventoryMovements?: number;
+    customers?: number;
+    orders?: number;
+    storeMembers?: number;
+  };
+  deletedStorageObjects?: number;
+  storageCleanupSkipped?: boolean;
+  storageCleanupWarning?: string;
+}
+
+async function callServerAdminWebsiteActionApi(payload: {
+  action: 'suspend' | 'reactivate' | 'renew' | 'delete';
+  websiteId: string;
+  reason?: string;
+  confirmSubdomain?: string;
+  explicitConfirmed?: boolean;
+}): Promise<AdminWebsiteActionApiResult> {
+  if (typeof window === 'undefined' || typeof fetch !== 'function' || !supabase) {
+    return { handled: false, success: false, message: '' };
   }
+
   try {
-    const { data: rpcData, error: rpcError } = await supabase.rpc('admin_delete_subscribed_website', {
-      p_website_id: websiteId,
-    });
-
-    if (!rpcError && rpcData) {
-      const res = rpcData as { success: boolean; message: string };
-      if (!res.success) {
-        return { success: false, message: res.message, error: new Error(res.message) };
-      }
-      return { success: true, message: res.message, error: null };
-    }
-
-    if (rpcError) {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    const accessToken = session?.access_token;
+    if (!accessToken) {
       return {
+        handled: true,
         success: false,
-        message: rpcError.message || 'Admin delete procedure failed',
-        error: new Error(rpcError.message),
+        code: 'UNAUTHORIZED',
+        message: 'Administrator session has expired. Please sign in again.',
       };
     }
 
+    const resp = await fetch('/api/admin-website-action', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const contentType = String(resp.headers.get('content-type') || '').toLowerCase();
+    if (!contentType.includes('application/json')) {
+      return { handled: false, success: false, message: '' };
+    }
+
+    const body = (await resp.json()) as {
+      ok?: boolean;
+      success?: boolean;
+      code?: string;
+      message?: string;
+      error?: string;
+      auditLogId?: string;
+      deletedWebsiteId?: string;
+      deletedStoreId?: string | null;
+      isSharedStore?: boolean;
+      deletedCounts?: AdminWebsiteActionApiResult['deletedCounts'];
+      deletedStorageObjects?: number;
+      storageCleanupSkipped?: boolean;
+      storageCleanupWarning?: string;
+    };
+
+    if (resp.status === 503 && body?.code === 'ADMIN_API_NOT_CONFIGURED') {
+      return { handled: false, success: false, code: body.code, message: body.error || '' };
+    }
+
+    const isOk = resp.ok && (body?.ok === true || body?.success === true);
+    return {
+      handled: true,
+      success: isOk,
+      code: body?.code,
+      message:
+        body?.message ||
+        body?.error ||
+        (isOk ? 'Administrative action completed.' : 'Administrative action failed.'),
+      auditLogId: body?.auditLogId,
+      deletedWebsiteId: body?.deletedWebsiteId,
+      deletedStoreId: body?.deletedStoreId ?? null,
+      isSharedStore: body?.isSharedStore,
+      deletedCounts: body?.deletedCounts,
+      deletedStorageObjects: body?.deletedStorageObjects,
+      storageCleanupSkipped: body?.storageCleanupSkipped,
+      storageCleanupWarning: body?.storageCleanupWarning,
+    };
+  } catch {
+    return { handled: false, success: false, message: '' };
+  }
+}
+
+export async function adminDeleteSubscribedWebsiteInDb(
+  websiteId: string,
+  confirm?: { confirmSubdomain?: string; explicitConfirmed?: boolean; reason?: string }
+): Promise<{
+  success: boolean;
+  code?: string;
+  message: string;
+  auditLogId?: string;
+  deletedWebsiteId?: string;
+  deletedStoreId?: string | null;
+  isSharedStore?: boolean;
+  deletedCounts?: AdminWebsiteActionApiResult['deletedCounts'];
+  deletedStorageObjects?: number;
+  storageCleanupSkipped?: boolean;
+  storageCleanupWarning?: string;
+  error: Error | null;
+}> {
+  const cleanId = (websiteId || '').trim();
+  if (!UUID_REGEX.test(cleanId)) {
+    const err = new Error('Invalid website ID format');
+    return { success: false, message: err.message, error: err };
+  }
+
+  if (!isSupabaseConfigured || !supabase) {
+    return {
+      success: true,
+      deletedWebsiteId: cleanId,
+      message: 'Website and exclusively associated store data deleted locally.',
+      error: null,
+    };
+  }
+
+  try {
+    const cleanSubdomain = (confirm?.confirmSubdomain || '').trim().toLowerCase();
+    const explicitConfirmed = confirm?.explicitConfirmed === true;
+    const cleanReason = (confirm?.reason || '').trim();
+
+    if (!explicitConfirmed || !cleanSubdomain) {
+      const msg =
+        'Permanent deletion requires exact subdomain entry and explicit final confirmation.';
+      return { success: false, code: 'DELETE_CONFIRMATION_REQUIRED', message: msg, error: new Error(msg) };
+    }
+
+    const apiRes = await callServerAdminWebsiteActionApi({
+      action: 'delete',
+      websiteId: cleanId,
+      confirmSubdomain: cleanSubdomain,
+      explicitConfirmed: true,
+      ...(cleanReason ? { reason: cleanReason } : {}),
+    });
+
+    if (apiRes.handled) {
+      return {
+        success: apiRes.success,
+        code: apiRes.code,
+        message: apiRes.message,
+        auditLogId: apiRes.auditLogId,
+        deletedWebsiteId: apiRes.deletedWebsiteId,
+        deletedStoreId: apiRes.deletedStoreId ?? null,
+        isSharedStore: apiRes.isSharedStore,
+        deletedCounts: apiRes.deletedCounts,
+        deletedStorageObjects: apiRes.deletedStorageObjects,
+        storageCleanupSkipped: apiRes.storageCleanupSkipped,
+        storageCleanupWarning: apiRes.storageCleanupWarning,
+        error: apiRes.success ? null : new Error(apiRes.message),
+      };
+    }
+
+    // Fail closed: NEVER silently fall back to incomplete website-only deletion when server atomic endpoint is unavailable.
+    const failClosedMsg =
+      apiRes.message ||
+      'Server-side atomic deletion endpoint (/api/admin-website-action) is unavailable or missing server credentials. Aborted without deleting any records.';
     return {
       success: false,
-      message: 'Unknown response from admin delete procedure',
-      error: new Error('Admin delete procedure returned empty response'),
+      code: apiRes.code || 'ATOMIC_DELETE_UNAVAILABLE',
+      message: failClosedMsg,
+      error: new Error(failClosedMsg),
     };
   } catch (err: unknown) {
     return {
       success: false,
-      message: 'Failed to delete website',
+      message: 'Failed to permanently delete website',
       error: err instanceof Error ? err : new Error('Admin delete operation failed'),
     };
   }
@@ -4271,6 +4420,20 @@ export async function adminUpdateWebsiteLifecycleInDb(
     return { success: false, message: 'Invalid website ID format', error: new Error('Invalid website ID format') };
   }
   try {
+    const apiRes = await callServerAdminWebsiteActionApi({
+      action,
+      websiteId: cleanId,
+      reason: cleanReason,
+    });
+    if (apiRes.handled) {
+      return {
+        success: apiRes.success,
+        message: apiRes.message,
+        auditLogId: apiRes.auditLogId,
+        error: apiRes.success ? null : new Error(apiRes.message),
+      };
+    }
+
     const { data, error } = await supabase.rpc('admin_update_website_lifecycle', {
       p_website_id: cleanId,
       p_action: action,
@@ -5030,7 +5193,7 @@ export interface RawWebsiteLifecycleAuditLogRow {
   id: string;
   website_id: string;
   admin_id: string;
-  action: 'suspend' | 'reactivate' | 'renew';
+  action: 'suspend' | 'reactivate' | 'renew' | 'delete';
   reason: string;
   verified_payment_request_id?: string | null;
   previous_status?: string | null;

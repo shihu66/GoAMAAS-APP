@@ -428,7 +428,16 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
 
   const [storefrontSort, setStorefrontSort] = useState<
     'custom' | 'featured' | 'price-low' | 'price-high' | 'name' | 'newest'
-  >('custom');
+  >(themeSettings.productShowcaseDefaultSort || 'custom');
+
+  useEffect(() => {
+    setStorefrontSort(themeSettings.productShowcaseDefaultSort || 'custom');
+  }, [themeSettings.productShowcaseDefaultSort]);
+
+  const showcaseGridClass =
+    themeSettings.productShowcaseColumns === 2
+      ? 'grid grid-cols-1 sm:grid-cols-2 gap-5'
+      : 'grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-5';
 
   const sortedProducts: WebsiteProductItem[] = useMemo(() => {
     const list = [...visibleProducts];
@@ -1735,7 +1744,7 @@ export const WebsitePreviewRenderer: React.FC<WebsitePreviewRendererProps> = ({
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-5">
+                <div className={showcaseGridClass}>
                   {sortedProducts.length > 0 ? (
                     sortedProducts.map((item, idx) => {
                       const itemKey = (item.productId || item.id || `idx-${idx}`).trim();
