@@ -1431,6 +1431,8 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       apikey: env.serviceRoleKey,
       Authorization: `Bearer ${env.serviceRoleKey}`,
       'Content-Type': 'application/json',
+      'Content-Profile': 'public',
+      'Accept-Profile': 'public',
     };
 
     // 3. Authoritative server-side profile role check
