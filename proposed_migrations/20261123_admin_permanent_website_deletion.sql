@@ -2930,3 +2930,7 @@ BEGIN
     RAISE EXCEPTION 'Security invariant check failed: Client roles hold unauthorized privileges on cleanup/reservation tables.';
   END IF;
 END $$;
+
+-- Refresh PostgREST schema cache so newly installed/updated RPC signatures are immediately visible.
+NOTIFY pgrst, 'reload schema';
+

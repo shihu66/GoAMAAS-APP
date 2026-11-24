@@ -31,6 +31,7 @@ function makeMockReqRes(params: {
   origin?: string;
   authorization?: string;
   body?: unknown;
+  ip?: string;
 }) {
   const req = new EventEmitter() as IncomingMessage & { body?: unknown; url?: string };
   req.method = params.method || 'POST';
@@ -41,7 +42,7 @@ function makeMockReqRes(params: {
     ...(params.authorization ? { authorization: params.authorization } : {}),
   };
   req.body = params.body;
-  req.socket = { remoteAddress: '203.0.113.55' } as IncomingMessage['socket'];
+  req.socket = { remoteAddress: params.ip || '203.0.113.55' } as IncomingMessage['socket'];
 
   const headers: Record<string, string> = {};
   let rawEnd = '';
@@ -348,6 +349,8 @@ async function runTests() {
   const spoofedAdminToken = buildFakeJwt({ sub: SPOOFED_ADMIN_UUID, aal: 'aal2' });
 
   let rpcInstalledInMock = true;
+  let rpcHttpErrorOverride: { status: number; body: Record<string, unknown> } | null = null;
+  let rpcThrowOverride: Error | null = null;
   let customRpcResultOverride: Record<string, unknown> | null = null;
   let forceStorageDeleteFail = false;
   let forceGlobalVerifyFail = false;
@@ -782,6 +785,15 @@ async function runTests() {
       }
 
       if (url.endsWith('/rest/v1/rpc/admin_permanently_delete_website') && method === 'POST') {
+        if (rpcThrowOverride) {
+          throw rpcThrowOverride;
+        }
+        if (rpcHttpErrorOverride) {
+          return new Response(JSON.stringify(rpcHttpErrorOverride.body), {
+            status: rpcHttpErrorOverride.status,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
         if (!rpcInstalledInMock) {
           return new Response(
             JSON.stringify({
@@ -1039,11 +1051,17 @@ async function runTests() {
       assert.equal(out.json?.code, 'DELETED');
       assert.equal(out.json?.deletedStoreId, STORE_UUID);
 
-      // Verify atomic RPC call was used instead of fragmented REST deletes
+      // Verify atomic RPC call & exact parameter payload was used instead of fragmented REST deletes
       const rpcCall = dbCalls.find(
         (c) => c.method === 'POST' && c.url.endsWith('/rest/v1/rpc/admin_permanently_delete_website')
       );
       assert.ok(rpcCall);
+      assert.deepEqual(rpcCall?.body, {
+        p_website_id: WEBSITE_UUID,
+        p_admin_id: ADMIN_UUID,
+        p_confirm_subdomain: 'fortyninee',
+        p_reason: 'Permanent admin deletion of website and exclusively associated store data',
+      });
       assert.ok(!dbCalls.some((c) => c.method === 'DELETE' && c.url.includes('/rest/v1/')));
 
       // Verify exclusive Storage files were deleted while shared /general/ logo asset was protected
@@ -1709,6 +1727,350 @@ async function runTests() {
       assert.ok(prefixes.includes(STILL_PENDING));
       assert.equal(mockCleanupJobState?.deletedObjectsCount, 2);
       mockCleanupJobState = null;
+    });
+
+    await check('2.23 DELETE reports ATOMIC_DELETE_RPC_REQUIRED ONLY on confirmed missing RPC (PG 42883 / PGRST202)', async () => {
+      rpcInstalledInMock = true;
+      storageDeleteRequests = [];
+
+      // Case A: PostgreSQL 42883 explicitly naming admin_permanently_delete_website
+      rpcHttpErrorOverride = {
+        status: 404,
+        body: {
+          code: '42883',
+          message:
+            'function public.admin_permanently_delete_website(uuid, uuid, text, text) does not exist',
+        },
+      };
+      const pgMissing = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        ip: '203.0.113.81',
+        body: {
+          action: 'delete',
+          websiteId: WEBSITE_UUID,
+          confirmSubdomain: 'fortyninee',
+          explicitConfirmed: true,
+        },
+      });
+      await adminWebsiteActionHandler(pgMissing.req, pgMissing.res);
+      assert.equal(pgMissing.getResult().statusCode, 501);
+      assert.equal(pgMissing.getResult().json?.code, 'ATOMIC_DELETE_RPC_REQUIRED');
+      assert.equal(storageDeleteRequests.length, 0);
+
+      // Case B: Ambiguous 404 without PGRST202/42883 must NOT falsely report missing RPC
+      rpcHttpErrorOverride = {
+        status: 404,
+        body: {
+          message: 'Not Found',
+        },
+      };
+      const unknown404 = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        ip: '203.0.113.81',
+        body: {
+          action: 'delete',
+          websiteId: WEBSITE_UUID,
+          confirmSubdomain: 'fortyninee',
+          explicitConfirmed: true,
+        },
+      });
+      await adminWebsiteActionHandler(unknown404.req, unknown404.res);
+      assert.equal(unknown404.getResult().statusCode, 502);
+      assert.equal(unknown404.getResult().json?.code, 'ATOMIC_DELETE_FAILED');
+      assert.equal(storageDeleteRequests.length, 0);
+
+      rpcHttpErrorOverride = null;
+    });
+
+    await check('2.24 DELETE distinguishes Wrong RPC Arguments from missing RPC (PGRST202 hint, PGRST203, 22P02)', async () => {
+      storageDeleteRequests = [];
+
+      // Case A: PostgREST PGRST202 with "Perhaps you meant to call..." -> function exists, argument mismatch
+      rpcHttpErrorOverride = {
+        status: 404,
+        body: {
+          code: 'PGRST202',
+          message:
+            'Could not find the function public.admin_permanently_delete_website(p_wrong) in the schema cache',
+          hint: 'Perhaps you meant to call the function public.admin_permanently_delete_website(p_admin_id, p_confirm_subdomain, p_reason, p_website_id)',
+        },
+      };
+      const wrongHint = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        ip: '203.0.113.82',
+        body: {
+          action: 'delete',
+          websiteId: WEBSITE_UUID,
+          confirmSubdomain: 'fortyninee',
+          explicitConfirmed: true,
+        },
+      });
+      await adminWebsiteActionHandler(wrongHint.req, wrongHint.res);
+      assert.equal(wrongHint.getResult().statusCode, 400);
+      assert.equal(wrongHint.getResult().json?.code, 'INVALID_RPC_ARGUMENTS');
+      assert.equal(storageDeleteRequests.length, 0);
+
+      // Case B: PGRST203 overload ambiguity
+      rpcHttpErrorOverride = {
+        status: 300,
+        body: {
+          code: 'PGRST203',
+          message:
+            'Could not choose the best candidate function between public.admin_permanently_delete_website(...)',
+        },
+      };
+      const overloadErr = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        ip: '203.0.113.82',
+        body: {
+          action: 'delete',
+          websiteId: WEBSITE_UUID,
+          confirmSubdomain: 'fortyninee',
+          explicitConfirmed: true,
+        },
+      });
+      await adminWebsiteActionHandler(overloadErr.req, overloadErr.res);
+      assert.equal(overloadErr.getResult().statusCode, 400);
+      assert.equal(overloadErr.getResult().json?.code, 'INVALID_RPC_ARGUMENTS');
+
+      // Case C: PostgreSQL 22P02 invalid input syntax
+      rpcHttpErrorOverride = {
+        status: 400,
+        body: {
+          code: '22P02',
+          message: 'invalid input syntax for type uuid inside admin_permanently_delete_website',
+        },
+      };
+      const invalidUuidType = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        ip: '203.0.113.82',
+        body: {
+          action: 'delete',
+          websiteId: WEBSITE_UUID,
+          confirmSubdomain: 'fortyninee',
+          explicitConfirmed: true,
+        },
+      });
+      await adminWebsiteActionHandler(invalidUuidType.req, invalidUuidType.res);
+      assert.equal(invalidUuidType.getResult().statusCode, 400);
+      assert.equal(invalidUuidType.getResult().json?.code, 'INVALID_RPC_ARGUMENTS');
+
+      rpcHttpErrorOverride = null;
+    });
+
+    await check('2.25 DELETE classifies Permission Denied (42501) accurately even when message names the RPC', async () => {
+      storageDeleteRequests = [];
+      rpcHttpErrorOverride = {
+        status: 403,
+        body: {
+          code: '42501',
+          message: 'permission denied for function admin_permanently_delete_website',
+        },
+      };
+      const { req, res, getResult } = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        ip: '203.0.113.83',
+        body: {
+          action: 'delete',
+          websiteId: WEBSITE_UUID,
+          confirmSubdomain: 'fortyninee',
+          explicitConfirmed: true,
+        },
+      });
+      await adminWebsiteActionHandler(req, res);
+      const out = getResult();
+      assert.equal(out.statusCode, 403);
+      assert.equal(out.json?.code, 'RPC_PERMISSION_DENIED');
+      assert.ok(!String(out.json?.error || '').includes('not yet installed'));
+      assert.equal(storageDeleteRequests.length, 0);
+      rpcHttpErrorOverride = null;
+    });
+
+    await check('2.26 DELETE classifies DB Admin Authorization failure accurately (P0001 and JSON rejection)', async () => {
+      storageDeleteRequests = [];
+      rpcHttpErrorOverride = {
+        status: 400,
+        body: {
+          code: 'P0001',
+          message:
+            'Only verified primary platform administrators can permanently delete websites (admin_permanently_delete_website)',
+        },
+      };
+      const pgAuthFail = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        ip: '203.0.113.84',
+        body: {
+          action: 'delete',
+          websiteId: WEBSITE_UUID,
+          confirmSubdomain: 'fortyninee',
+          explicitConfirmed: true,
+        },
+      });
+      await adminWebsiteActionHandler(pgAuthFail.req, pgAuthFail.res);
+      assert.equal(pgAuthFail.getResult().statusCode, 403);
+      assert.equal(pgAuthFail.getResult().json?.code, 'FORBIDDEN_ADMIN_REQUIRED');
+      assert.equal(storageDeleteRequests.length, 0);
+
+      rpcHttpErrorOverride = null;
+      customRpcResultOverride = {
+        success: false,
+        code: 'FORBIDDEN_ADMIN_REQUIRED',
+        message: 'Verified primary platform administrator check failed.',
+      };
+      const jsonAuthFail = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        ip: '203.0.113.84',
+        body: {
+          action: 'delete',
+          websiteId: WEBSITE_UUID,
+          confirmSubdomain: 'fortyninee',
+          explicitConfirmed: true,
+        },
+      });
+      await adminWebsiteActionHandler(jsonAuthFail.req, jsonAuthFail.res);
+      assert.equal(jsonAuthFail.getResult().statusCode, 403);
+      assert.equal(jsonAuthFail.getResult().json?.code, 'FORBIDDEN_ADMIN_REQUIRED');
+      assert.equal(storageDeleteRequests.length, 0);
+      customRpcResultOverride = null;
+    });
+
+    await check('2.27 DELETE classifies Schema-Cache Mismatch (PGRST002 / PGRST204 / stale PGRST202) accurately', async () => {
+      storageDeleteRequests = [];
+
+      for (const body of [
+        {
+          code: 'PGRST002',
+          message: 'Could not query the database for the schema cache. Retrying.',
+        },
+        {
+          code: 'PGRST204',
+          message: "Could not find the 'website_id' column of 'products' in the schema cache",
+        },
+        {
+          code: 'PGRST202',
+          message: 'Could not find the function public.admin_permanently_delete_website in the schema cache',
+          hint: "Run NOTIFY pgrst, 'reload schema' to reload schema cache",
+        },
+      ]) {
+        rpcHttpErrorOverride = { status: 503, body };
+        const resPair = makeMockReqRes({
+          origin: 'https://app.amaas.xyz',
+          authorization: `Bearer ${adminToken}`,
+          ip: '203.0.113.85',
+          body: {
+            action: 'delete',
+            websiteId: WEBSITE_UUID,
+            confirmSubdomain: 'fortyninee',
+            explicitConfirmed: true,
+          },
+        });
+        await adminWebsiteActionHandler(resPair.req, resPair.res);
+        assert.equal(resPair.getResult().statusCode, 503);
+        assert.equal(resPair.getResult().json?.code, 'SCHEMA_CACHE_MISMATCH');
+        assert.equal(storageDeleteRequests.length, 0);
+      }
+
+      rpcHttpErrorOverride = null;
+    });
+
+    await check('2.28 DELETE classifies Database Timeout (PG 57014 / HTTP 504 / AbortError) accurately and logs sanitized diagnostics without leaking tokens', async () => {
+      storageDeleteRequests = [];
+      const capturedLogs: string[] = [];
+      const origConsoleError = console.error;
+      console.error = (...args: unknown[]) => {
+        capturedLogs.push(args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '));
+      };
+
+      try {
+        // Case A: PostgreSQL 57014 statement timeout with sensitive-looking string in raw DB message
+        rpcHttpErrorOverride = {
+          status: 500,
+          body: {
+            code: '57014',
+            message:
+              'canceling statement due to statement timeout in admin_permanently_delete_website for Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signatureSecretHere customer@example.com',
+          },
+        };
+        const pgTimeout = makeMockReqRes({
+          origin: 'https://app.amaas.xyz',
+          authorization: `Bearer ${adminToken}`,
+          ip: '203.0.113.86',
+          body: {
+            action: 'delete',
+            websiteId: WEBSITE_UUID,
+            confirmSubdomain: 'fortyninee',
+            explicitConfirmed: true,
+          },
+        });
+        await adminWebsiteActionHandler(pgTimeout.req, pgTimeout.res);
+        assert.equal(pgTimeout.getResult().statusCode, 504);
+        assert.equal(pgTimeout.getResult().json?.code, 'DATABASE_TIMEOUT');
+        assert.equal(storageDeleteRequests.length, 0);
+
+        // Case B: Fetch AbortError timeout
+        rpcHttpErrorOverride = null;
+        const abortErr = new Error('The operation was aborted due to timeout');
+        abortErr.name = 'AbortError';
+        rpcThrowOverride = abortErr;
+        const fetchTimeout = makeMockReqRes({
+          origin: 'https://app.amaas.xyz',
+          authorization: `Bearer ${adminToken}`,
+          ip: '203.0.113.86',
+          body: {
+            action: 'delete',
+            websiteId: WEBSITE_UUID,
+            confirmSubdomain: 'fortyninee',
+            explicitConfirmed: true,
+          },
+        });
+        await adminWebsiteActionHandler(fetchTimeout.req, fetchTimeout.res);
+        assert.equal(fetchTimeout.getResult().statusCode, 504);
+        assert.equal(fetchTimeout.getResult().json?.code, 'DATABASE_TIMEOUT');
+        assert.equal(storageDeleteRequests.length, 0);
+
+        // Verify diagnostic logs captured PG code & sanitized output without leaking secrets or emails
+        const joinedLogs = capturedLogs.join('\n');
+        assert.ok(joinedLogs.includes('57014'));
+        assert.ok(joinedLogs.includes('DATABASE_TIMEOUT'));
+        assert.ok(!joinedLogs.includes('signatureSecretHere'));
+        assert.ok(!joinedLogs.includes('customer@example.com'));
+        assert.ok(!joinedLogs.includes('test-service-role-key-not-real'));
+
+        // Case C: Mismatched Supabase project env vars fail closed with SUPABASE_PROJECT_MISMATCH
+        const prevSrvUrl = process.env.SUPABASE_URL;
+        process.env.SUPABASE_URL = 'https://different-project-ref.supabase.co';
+        try {
+          const mismatchReq = makeMockReqRes({
+            origin: 'https://app.amaas.xyz',
+            authorization: `Bearer ${adminToken}`,
+            ip: '203.0.113.86',
+            body: {
+              action: 'delete',
+              websiteId: WEBSITE_UUID,
+              confirmSubdomain: 'fortyninee',
+              explicitConfirmed: true,
+            },
+          });
+          await adminWebsiteActionHandler(mismatchReq.req, mismatchReq.res);
+          assert.equal(mismatchReq.getResult().statusCode, 503);
+          assert.equal(mismatchReq.getResult().json?.code, 'SUPABASE_PROJECT_MISMATCH');
+        } finally {
+          if (prevSrvUrl === undefined) delete process.env.SUPABASE_URL;
+          else process.env.SUPABASE_URL = prevSrvUrl;
+        }
+      } finally {
+        rpcThrowOverride = null;
+        rpcHttpErrorOverride = null;
+        console.error = origConsoleError;
+      }
     });
   } finally {
     globalThis.fetch = originalFetch;

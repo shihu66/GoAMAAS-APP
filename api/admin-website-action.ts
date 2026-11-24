@@ -188,19 +188,63 @@ function decodeJwtClaims(token: string): Record<string, unknown> | null {
   }
 }
 
-function resolveSupabaseServerEnv(): {
-  supabaseUrl: string;
-  serviceRoleKey: string;
-  anonKey: string;
-} | null {
-  const supabaseUrl = (
-    process.env.VITE_SUPABASE_URL ||
-    process.env.SUPABASE_URL ||
-    process.env.NEXT_PUBLIC_SUPABASE_URL ||
-    ''
-  )
-    .trim()
-    .replace(/\/+$/, '');
+function extractSupabaseProjectRef(url: string): string {
+  try {
+    const parsed = new URL(String(url || '').trim());
+    const match = parsed.hostname.match(/^([a-z0-9-]+)\.supabase\.co$/i);
+    return match ? match[1].toLowerCase() : parsed.hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+type ResolvedSupabaseServerEnv =
+  | {
+      ok: true;
+      supabaseUrl: string;
+      serviceRoleKey: string;
+      anonKey: string;
+      projectRef: string;
+    }
+  | {
+      ok: false;
+      code: 'ADMIN_API_NOT_CONFIGURED' | 'SUPABASE_PROJECT_MISMATCH';
+      error: string;
+      details?: Record<string, string>;
+    };
+
+function resolveSupabaseServerEnv(): ResolvedSupabaseServerEnv {
+  const candidates = [
+    { name: 'SUPABASE_URL', val: String(process.env.SUPABASE_URL || '').trim().replace(/\/+$/, '') },
+    { name: 'VITE_SUPABASE_URL', val: String(process.env.VITE_SUPABASE_URL || '').trim().replace(/\/+$/, '') },
+    { name: 'NEXT_PUBLIC_SUPABASE_URL', val: String(process.env.NEXT_PUBLIC_SUPABASE_URL || '').trim().replace(/\/+$/, '') },
+  ].filter(
+    (entry) =>
+      entry.val.startsWith('https://') && entry.val !== 'https://your-project.supabase.co'
+  );
+
+  const uniqueRefs = new Set(candidates.map((c) => extractSupabaseProjectRef(c.val)).filter(Boolean));
+  if (uniqueRefs.size > 1) {
+    return {
+      ok: false,
+      code: 'SUPABASE_PROJECT_MISMATCH',
+      error:
+        'Server Supabase URL environment variables point to conflicting projects. Align SUPABASE_URL and VITE_SUPABASE_URL to the same project.',
+      details: {
+        configuredProjects: Array.from(uniqueRefs).join(','),
+      },
+    };
+  }
+
+  const supabaseUrl =
+    (
+      process.env.VITE_SUPABASE_URL ||
+      process.env.SUPABASE_URL ||
+      process.env.NEXT_PUBLIC_SUPABASE_URL ||
+      ''
+    )
+      .trim()
+      .replace(/\/+$/, '');
   const serviceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
   const anonKey = (
     process.env.VITE_SUPABASE_ANON_KEY ||
@@ -215,10 +259,272 @@ function resolveSupabaseServerEnv(): {
     !serviceRoleKey ||
     serviceRoleKey.includes('your-')
   ) {
-    return null;
+    return {
+      ok: false,
+      code: 'ADMIN_API_NOT_CONFIGURED',
+      error: 'Server-side administrative service credentials are not configured.',
+    };
   }
 
-  return { supabaseUrl, serviceRoleKey, anonKey };
+  const urlProjectRef = extractSupabaseProjectRef(supabaseUrl);
+  const serviceKeyClaims = decodeJwtClaims(serviceRoleKey);
+  if (serviceKeyClaims) {
+    const keyRole = typeof serviceKeyClaims.role === 'string' ? serviceKeyClaims.role.trim() : '';
+    if (keyRole && keyRole !== 'service_role') {
+      return {
+        ok: false,
+        code: 'ADMIN_API_NOT_CONFIGURED',
+        error: 'Server-side SUPABASE_SERVICE_ROLE_KEY must have the service_role claim.',
+      };
+    }
+    const keyRef =
+      typeof serviceKeyClaims.ref === 'string' ? serviceKeyClaims.ref.trim().toLowerCase() : '';
+    if (keyRef && urlProjectRef && keyRef !== urlProjectRef) {
+      return {
+        ok: false,
+        code: 'SUPABASE_PROJECT_MISMATCH',
+        error:
+          'Server SUPABASE_SERVICE_ROLE_KEY belongs to a different Supabase project than the configured Supabase URL.',
+        details: { urlProjectRef, keyProjectRef: keyRef },
+      };
+    }
+  }
+
+  const anonKeyClaims = anonKey ? decodeJwtClaims(anonKey) : null;
+  if (anonKeyClaims) {
+    const anonRef =
+      typeof anonKeyClaims.ref === 'string' ? anonKeyClaims.ref.trim().toLowerCase() : '';
+    if (anonRef && urlProjectRef && anonRef !== urlProjectRef) {
+      return {
+        ok: false,
+        code: 'SUPABASE_PROJECT_MISMATCH',
+        error:
+          'Configured Supabase anon key belongs to a different Supabase project than the configured Supabase URL.',
+        details: { urlProjectRef, anonProjectRef: anonRef },
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    supabaseUrl,
+    serviceRoleKey,
+    anonKey,
+    projectRef: urlProjectRef,
+  };
+}
+
+function sanitizeDiagnosticText(raw: unknown, maxLen = 280): string {
+  const str = String(raw || '').trim();
+  if (!str) return '';
+  return str
+    .replace(/Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, 'Bearer [REDACTED]')
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\b/g, '[JWT_REDACTED]')
+    .replace(/\bsb_(?:secret|publishable)_[A-Za-z0-9_-]+\b/gi, '[SUPABASE_KEY_REDACTED]')
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[EMAIL_REDACTED]')
+    .replace(/\s+/g, ' ')
+    .slice(0, maxLen);
+}
+
+interface DeleteRpcErrorClassification {
+  httpStatus: number;
+  code: string;
+  error: string;
+}
+
+export function classifyDeleteRpcFailure(params: {
+  httpStatus?: number;
+  code?: string | null;
+  message?: string | null;
+  details?: string | null;
+  hint?: string | null;
+  thrownError?: unknown;
+}): DeleteRpcErrorClassification {
+  const httpStatus = Number(params.httpStatus || 0);
+  const pgCode = String(params.code || '').trim();
+  const pgCodeUpper = pgCode.toUpperCase();
+  const msgLower = String(params.message || '').trim().toLowerCase();
+  const detailsLower = String(params.details || '').trim().toLowerCase();
+  const hintLower = String(params.hint || '').trim().toLowerCase();
+
+  const thrown = params.thrownError as
+    | { name?: string; code?: string; message?: string; cause?: { code?: string; name?: string } }
+    | undefined;
+  const thrownName = String(thrown?.name || thrown?.cause?.name || '').toLowerCase();
+  const thrownCode = String(thrown?.code || thrown?.cause?.code || '').toUpperCase();
+  const thrownMsg = String(thrown?.message || '').toLowerCase();
+
+  // 1. Database / Gateway / Fetch Timeout
+  if (
+    thrownName === 'aborterror' ||
+    thrownName === 'timeouterror' ||
+    ['ETIMEDOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'ECONNABORTED'].includes(
+      thrownCode
+    ) ||
+    thrownMsg.includes('timed out') ||
+    thrownMsg.includes('timeout') ||
+    [408, 504, 522, 524].includes(httpStatus) ||
+    ['57014', '57P01', '57P02', '57P03', '08001', '08006'].includes(pgCodeUpper) ||
+    msgLower.includes('statement timeout') ||
+    msgLower.includes('canceling statement due to statement timeout') ||
+    msgLower.includes('lock timeout') ||
+    msgLower.includes('timed out')
+  ) {
+    return {
+      httpStatus: 504,
+      code: 'DATABASE_TIMEOUT',
+      error:
+        'Permanent website deletion timed out in the database and was safely rolled back. No records were deleted. Please retry.',
+    };
+  }
+
+  // 2. Database Permission Denied (42501 / EXECUTE or role privilege errors)
+  if (
+    pgCodeUpper === '42501' ||
+    msgLower.includes('permission denied') ||
+    msgLower.includes('insufficient privilege') ||
+    msgLower.includes('must be owner of') ||
+    msgLower.includes('cannot execute under client roles') ||
+    msgLower.includes('requires verified service_role execution')
+  ) {
+    return {
+      httpStatus: 403,
+      code: 'RPC_PERMISSION_DENIED',
+      error:
+        'Database permission denied while executing public.admin_permanently_delete_website. Verify service_role EXECUTE privileges and object ownership in Supabase. No records were deleted.',
+    };
+  }
+
+  // 3. Database-Level Admin Authorization Failure
+  if (
+    msgLower.includes('only verified primary platform administrators') ||
+    msgLower.includes('verified platform administrator') ||
+    msgLower.includes('is_verified_platform_admin') ||
+    msgLower.includes('payment_review_authorizations') ||
+    msgLower.includes('not authorized') ||
+    (pgCodeUpper === 'P0001' && msgLower.includes('access denied'))
+  ) {
+    return {
+      httpStatus: 403,
+      code: 'FORBIDDEN_ADMIN_REQUIRED',
+      error:
+        'Database rejected administrator authorization for permanent deletion. Verify admin role and platform admin verification in Supabase. No records were deleted.',
+    };
+  }
+
+  // 4. Schema-Cache Mismatch (PostgREST PGRST002 / PGRST204 / explicit stale-cache diagnostics)
+  if (
+    pgCodeUpper === 'PGRST002' ||
+    pgCodeUpper === 'PGRST204' ||
+    pgCodeUpper === '42703' ||
+    pgCodeUpper === '42P01' ||
+    (pgCodeUpper === 'PGRST202' &&
+      (hintLower.includes('reload schema') ||
+        detailsLower.includes('stale') ||
+        detailsLower.includes('reload') ||
+        msgLower.includes('schema cache mismatch') ||
+        msgLower.includes('schema cache is out of')))
+  ) {
+    return {
+      httpStatus: 503,
+      code: 'SCHEMA_CACHE_MISMATCH',
+      error:
+        "Supabase PostgREST schema cache is out of sync with the database. Run NOTIFY pgrst, 'reload schema'; in Supabase SQL Editor and retry. No records were deleted.",
+    };
+  }
+
+  // 5. Wrong RPC Arguments / Parameter or Signature Mismatch (function exists, signature disagrees)
+  if (
+    pgCodeUpper === 'PGRST203' ||
+    pgCodeUpper === 'PGRST102' ||
+    pgCodeUpper === '22P02' ||
+    pgCodeUpper === '22023' ||
+    pgCodeUpper === '42804' ||
+    (pgCodeUpper === 'PGRST202' && hintLower.includes('perhaps you meant to call')) ||
+    (pgCodeUpper === 'P0001' &&
+      (msgLower.includes('target website id is required') ||
+        msgLower.includes('invalid parameter')))
+  ) {
+    return {
+      httpStatus: 400,
+      code: 'INVALID_RPC_ARGUMENTS',
+      error:
+        "Database rejected the permanent deletion RPC arguments or signature mismatch. Verify deployed function parameters match (p_website_id, p_admin_id, p_confirm_subdomain, p_reason) and reload PostgREST schema cache (NOTIFY pgrst, 'reload schema';). No records were deleted.",
+    };
+  }
+
+  // 6. Explicitly Confirmed Missing Function (PG 42883 for target RPC or PostgREST PGRST202 missing-function)
+  const isConfirmedPgMissingFn =
+    pgCodeUpper === '42883' &&
+    msgLower.includes('admin_permanently_delete_website') &&
+    msgLower.includes('does not exist');
+  const isConfirmedPostgrestMissingFn =
+    pgCodeUpper === 'PGRST202' &&
+    msgLower.includes('could not find the function') &&
+    msgLower.includes('admin_permanently_delete_website');
+
+  if (isConfirmedPgMissingFn || isConfirmedPostgrestMissingFn) {
+    return {
+      httpStatus: 501,
+      code: 'ATOMIC_DELETE_RPC_REQUIRED',
+      error: msgLower.includes('schema cache')
+        ? "Transactional permanent deletion RPC (public.admin_permanently_delete_website) was not found in Supabase PostgREST's schema cache. Ensure the migration is installed on this project and run NOTIFY pgrst, 'reload schema';. No records were deleted."
+        : 'Transactional permanent deletion RPC (public.admin_permanently_delete_website) is not yet installed in Supabase. No records were deleted.',
+    };
+  }
+
+  // 7. Concurrent Lock / Deadlock or Integrity Constraint Errors
+  if (pgCodeUpper === '40P01' || pgCodeUpper === '55P03') {
+    return {
+      httpStatus: 409,
+      code: 'CONCURRENT_MODIFICATION_RETRY',
+      error:
+        'Website deletion conflicted with a concurrent database operation and was safely rolled back. Please retry.',
+    };
+  }
+
+  if (pgCodeUpper === '23503' || pgCodeUpper === '23505' || pgCodeUpper === '23514') {
+    return {
+      httpStatus: 409,
+      code: 'DATABASE_CONSTRAINT_VIOLATION',
+      error:
+        'A database integrity constraint blocked permanent deletion and was safely rolled back. No records were deleted.',
+    };
+  }
+
+  // 8. Generic Database / Upstream Error (never falsely claim missing RPC)
+  return {
+    httpStatus: 502,
+    code: 'ATOMIC_DELETE_FAILED',
+    error: 'Atomic database deletion failed and was completely rolled back. No records were deleted.',
+  };
+}
+
+function logSafeAdminDeleteRpcError(params: {
+  websiteId: string;
+  projectRef: string;
+  httpStatus?: number;
+  pgCode?: string | null;
+  classifiedCode: string;
+  rawMessage?: unknown;
+  rawHint?: unknown;
+  rawDetails?: unknown;
+}) {
+  try {
+    console.error('[GoAMAAS Admin Website Action] Permanent delete RPC error', {
+      action: 'delete',
+      websiteId: params.websiteId,
+      projectRef: params.projectRef || 'unknown',
+      httpStatus: params.httpStatus ?? null,
+      pgCode: params.pgCode ? sanitizeDiagnosticText(params.pgCode, 64) : null,
+      classifiedCode: params.classifiedCode,
+      message: sanitizeDiagnosticText(params.rawMessage),
+      hint: sanitizeDiagnosticText(params.rawHint),
+      details: sanitizeDiagnosticText(params.rawDetails),
+    });
+  } catch {
+    // Ignore logging errors
+  }
 }
 
 interface SupabaseAuthUserPayload {
@@ -969,14 +1275,20 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
     return;
   }
 
-  const env = resolveSupabaseServerEnv();
-  if (!env) {
+  const envRes = resolveSupabaseServerEnv();
+  if (!envRes.ok) {
+    if (envRes.code === 'SUPABASE_PROJECT_MISMATCH') {
+      try {
+        console.error('[GoAMAAS Admin Website Action] Supabase project mismatch', envRes.details || {});
+      } catch {}
+    }
     sendJson(res, 503, {
-      code: 'ADMIN_API_NOT_CONFIGURED',
-      error: 'Server-side administrative service credentials are not configured.',
+      code: envRes.code,
+      error: envRes.error,
     });
     return;
   }
+  const env = envRes;
 
   const authHeader = String(req.headers.authorization || '').trim();
   if (!authHeader.toLowerCase().startsWith('bearer ')) {
@@ -2032,44 +2344,100 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       reason || 'Permanent admin deletion of website and exclusively associated store data';
 
     // Execute SINGLE ATOMIC PostgreSQL transaction via RPC.
-    // Never silently fall back to non-atomic partial deletes if RPC is absent.
-    const rpcResp = await fetch(
-      `${env.supabaseUrl}/rest/v1/rpc/admin_permanently_delete_website`,
-      {
-        method: 'POST',
-        headers: serviceHeaders,
-        body: JSON.stringify({
-          p_website_id: websiteId,
-          p_admin_id: callerId,
-          p_confirm_subdomain: confirmSubdomain,
-          p_reason: deleteReason,
-        }),
-      }
-    );
+    // Never silently fall back to non-atomic partial deletes if RPC fails or is absent.
+    const rpcController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const rpcTimeoutId = rpcController ? setTimeout(() => rpcController.abort(), 25_000) : null;
+    let rpcResp: Response;
+    try {
+      rpcResp = await fetch(
+        `${env.supabaseUrl}/rest/v1/rpc/admin_permanently_delete_website`,
+        {
+          method: 'POST',
+          headers: serviceHeaders,
+          body: JSON.stringify({
+            p_website_id: websiteId,
+            p_admin_id: callerId,
+            p_confirm_subdomain: confirmSubdomain,
+            p_reason: deleteReason,
+          }),
+          ...(rpcController ? { signal: rpcController.signal } : {}),
+        }
+      );
+    } catch (rpcErr: unknown) {
+      const classified = classifyDeleteRpcFailure({
+        thrownError: rpcErr,
+        message: rpcErr instanceof Error ? rpcErr.message : String(rpcErr || ''),
+      });
+      logSafeAdminDeleteRpcError({
+        websiteId,
+        projectRef: env.projectRef,
+        pgCode:
+          rpcErr && typeof rpcErr === 'object' && 'code' in rpcErr
+            ? String((rpcErr as { code?: unknown }).code || '')
+            : null,
+        classifiedCode: classified.code,
+        rawMessage: rpcErr instanceof Error ? rpcErr.message : String(rpcErr || ''),
+      });
+      sendJson(res, classified.httpStatus, {
+        code: classified.code,
+        error: classified.error,
+      });
+      return;
+    } finally {
+      if (rpcTimeoutId) clearTimeout(rpcTimeoutId);
+    }
 
     if (!rpcResp.ok) {
-      const errBody = (await rpcResp.json().catch(() => null)) as
-        | { code?: string; message?: string; hint?: string }
-        | null;
-      const errCode = String(errBody?.code || '');
-      const errMsg = String(errBody?.message || '');
-      if (
-        rpcResp.status === 404 ||
-        errCode === 'PGRST202' ||
-        errMsg.toLowerCase().includes('could not find the function') ||
-        errMsg.toLowerCase().includes('admin_permanently_delete_website')
-      ) {
-        sendJson(res, 501, {
-          code: 'ATOMIC_DELETE_RPC_REQUIRED',
-          error:
-            'Transactional permanent deletion RPC (public.admin_permanently_delete_website) is not yet installed in Supabase. No records were deleted.',
-        });
-        return;
+      const rawErrText = await rpcResp.text().catch(() => '');
+      let errBody: {
+        code?: string;
+        message?: string;
+        details?: string | null;
+        hint?: string | null;
+      } | null = null;
+      if (rawErrText) {
+        try {
+          const parsedErr = JSON.parse(rawErrText);
+          if (parsedErr && typeof parsedErr === 'object' && !Array.isArray(parsedErr)) {
+            errBody = parsedErr as {
+              code?: string;
+              message?: string;
+              details?: string | null;
+              hint?: string | null;
+            };
+          }
+        } catch {
+          errBody = { message: rawErrText };
+        }
       }
 
-      sendJson(res, 502, {
-        code: 'ATOMIC_DELETE_FAILED',
-        error: 'Atomic database deletion failed and was completely rolled back. No records were deleted.',
+      const pgCode = errBody?.code ? String(errBody.code) : '';
+      const rawMessage = errBody?.message ? String(errBody.message) : rawErrText;
+      const rawDetails = errBody?.details ? String(errBody.details) : '';
+      const rawHint = errBody?.hint ? String(errBody.hint) : '';
+
+      const classified = classifyDeleteRpcFailure({
+        httpStatus: rpcResp.status,
+        code: pgCode,
+        message: rawMessage,
+        details: rawDetails,
+        hint: rawHint,
+      });
+
+      logSafeAdminDeleteRpcError({
+        websiteId,
+        projectRef: env.projectRef,
+        httpStatus: rpcResp.status,
+        pgCode: pgCode || null,
+        classifiedCode: classified.code,
+        rawMessage,
+        rawHint,
+        rawDetails,
+      });
+
+      sendJson(res, classified.httpStatus, {
+        code: classified.code,
+        error: classified.error,
       });
       return;
     }
