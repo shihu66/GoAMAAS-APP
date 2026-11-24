@@ -18,6 +18,7 @@ import {
 } from '../../lib/paymentWorkflow';
 import {
   AdminSessionAuditEntry,
+  VerifiedAdminFactor,
   getAdminSessionEvents,
   recordAdminSessionEvent,
   revalidateAdminBeforeAction,
@@ -154,13 +155,18 @@ export const AdminDashboardPage: React.FC = () => {
     });
   }, []);
 
-  // MFA Enrollment State (in Security & Audit view)
+  // MFA Enrollment & Existing/Pending Factor Verification State (in Security & Audit view)
   const [enrollingMfa, setEnrollingMfa] = useState<{
     factorId: string;
     qrCodeSvgDataUri: string;
     secret: string;
   } | null>(null);
+  const [verifyingMfaFactor, setVerifyingMfaFactor] = useState<{
+    factor: VerifiedAdminFactor;
+    mode: 'existing_verified' | 'resume_unverified';
+  } | null>(null);
   const [mfaEnrollCode, setMfaEnrollCode] = useState('');
+  const [verifyFactorCode, setVerifyFactorCode] = useState('');
   const [mfaActionBusy, setMfaActionBusy] = useState(false);
   const [mfaActionFeedback, setMfaActionFeedback] = useState<{
     tone: 'success' | 'warning' | 'error';
@@ -943,26 +949,76 @@ export const AdminDashboardPage: React.FC = () => {
     }
   };
 
-  // MFA Enrollment Handlers
-  const handleStartMfaEnroll = async () => {
+  // MFA Enrollment & Existing/Pending Factor Handlers
+  const handleStartMfaEnroll = async (
+    unverifiedAction: 'prompt' | 'remove_and_enroll' = 'prompt'
+  ) => {
     if (mfaActionBusy) return;
     setMfaActionBusy(true);
     setMfaActionFeedback(null);
     try {
-      const res = await startAdminTotpEnrollment('GoAMAAS Admin Authenticator');
-      if (res.error || !res.factorId || !res.qrCodeSvgDataUri || !res.secret) {
+      const res = await startAdminTotpEnrollment('GoAMAAS Admin Authenticator', {
+        unverifiedAction,
+      });
+
+      if (res.status === 'already_verified' && res.existingFactor) {
+        setEnrollingMfa(null);
+        setVerifyingMfaFactor(null);
+        await refreshVerification();
+        setMfaActionFeedback({
+          tone: 'success',
+          text: `Existing authenticator "${res.existingFactor.friendlyName}" is already verified and active at AAL2.`,
+        });
+        return;
+      }
+
+      if (res.status === 'challenge_required' && res.existingFactor) {
+        setEnrollingMfa(null);
+        setVerifyingMfaFactor({
+          factor: res.existingFactor,
+          mode: 'existing_verified',
+        });
+        setVerifyFactorCode('');
+        await refreshVerification();
+        setMfaActionFeedback({
+          tone: 'warning',
+          text: `Existing verified authenticator "${res.existingFactor.friendlyName}" found. Enter a 6-digit code from your app to elevate this session to AAL2.`,
+        });
+        return;
+      }
+
+      if (res.status === 'pending_unverified' && res.existingFactor) {
+        setEnrollingMfa(null);
+        await refreshVerification();
+        setMfaActionFeedback({
+          tone: 'warning',
+          text: `A pending unverified setup for "${res.existingFactor.friendlyName}" already exists. Resume verification below with your authenticator code, or remove the stale setup to generate a new QR code.`,
+        });
+        return;
+      }
+
+      if (
+        res.status !== 'enrolled' ||
+        res.error ||
+        !res.factorId ||
+        !res.qrCodeSvgDataUri ||
+        !res.secret
+      ) {
         setMfaActionFeedback({
           tone: 'warning',
           text: res.error || 'Unable to start authenticator enrollment.',
         });
         return;
       }
+
+      setVerifyingMfaFactor(null);
       setEnrollingMfa({
         factorId: res.factorId,
         qrCodeSvgDataUri: res.qrCodeSvgDataUri,
         secret: res.secret,
       });
       setMfaEnrollCode('');
+      await refreshVerification();
     } finally {
       setMfaActionBusy(false);
     }
@@ -988,14 +1044,56 @@ export const AdminDashboardPage: React.FC = () => {
         targetType: 'mfa',
         targetId: enrollingMfa.factorId,
         outcome: 'success',
-        summary: 'Enrolled and verified TOTP authenticator factor.',
+        summary: 'Enrolled, verified TOTP authenticator factor, and confirmed AAL2 session.',
       });
       setEnrollingMfa(null);
       setMfaEnrollCode('');
       await refreshVerification();
       setMfaActionFeedback({
         tone: 'success',
-        text: 'Two-factor authentication is now active on your administrator account.',
+        text: 'Two-factor authentication is active and session assurance is confirmed at AAL2.',
+      });
+    } finally {
+      setMfaActionBusy(false);
+    }
+  };
+
+  const handleConfirmExistingOrPendingFactor = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!verifyingMfaFactor || mfaActionBusy) return;
+    setMfaActionBusy(true);
+    setMfaActionFeedback(null);
+    try {
+      const target = verifyingMfaFactor;
+      const res = await verifyAdminTotpChallenge(target.factor.id, verifyFactorCode);
+      if (!res.success) {
+        setMfaActionFeedback({
+          tone: 'error',
+          text: res.error || 'Invalid 6-digit verification code.',
+        });
+        return;
+      }
+      recordAdminSessionEvent({
+        adminId: verifiedAdmin.id,
+        action:
+          target.mode === 'resume_unverified' ? 'mfa_totp_enrolled' : 'mfa_step_up_verified',
+        targetType: 'mfa',
+        targetId: target.factor.id,
+        outcome: 'success',
+        summary:
+          target.mode === 'resume_unverified'
+            ? 'Completed pending TOTP enrollment and confirmed AAL2 session.'
+            : 'Verified existing TOTP authenticator factor and confirmed AAL2 session.',
+      });
+      setVerifyingMfaFactor(null);
+      setVerifyFactorCode('');
+      await refreshVerification();
+      setMfaActionFeedback({
+        tone: 'success',
+        text:
+          target.mode === 'resume_unverified'
+            ? 'Pending authenticator verified and session confirmed at AAL2.'
+            : 'Existing authenticator verified and session confirmed at AAL2.',
       });
     } finally {
       setMfaActionBusy(false);
@@ -1016,6 +1114,10 @@ export const AdminDashboardPage: React.FC = () => {
           text: res.error || 'Could not remove authenticator factor.',
         });
         return;
+      }
+      if (verifyingMfaFactor?.factor.id === targetFactorId) {
+        setVerifyingMfaFactor(null);
+        setVerifyFactorCode('');
       }
       recordAdminSessionEvent({
         adminId: verifiedAdmin.id,
@@ -3096,21 +3198,24 @@ export const AdminDashboardPage: React.FC = () => {
                 </div>
               </div>
 
-              {!mfa.isMfaEnrolled && !enrollingMfa && (
-                <button
-                  type="button"
-                  disabled={mfaActionBusy || !isOnline}
-                  onClick={() => void handleStartMfaEnroll()}
-                  className="min-h-[44px] px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold text-xs inline-flex items-center justify-center gap-2 transition-colors cursor-pointer whitespace-nowrap self-start sm:self-auto"
-                >
-                  {mfaActionBusy ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Lock className="w-4 h-4" />
-                  )}
-                  <span>Set Up Authenticator App</span>
-                </button>
-              )}
+              {!mfa.isMfaEnrolled &&
+                mfa.unverifiedTotpFactors.length === 0 &&
+                !enrollingMfa &&
+                !verifyingMfaFactor && (
+                  <button
+                    type="button"
+                    disabled={mfaActionBusy || !isOnline}
+                    onClick={() => void handleStartMfaEnroll('prompt')}
+                    className="min-h-[44px] px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold text-xs inline-flex items-center justify-center gap-2 transition-colors cursor-pointer whitespace-nowrap self-start sm:self-auto"
+                  >
+                    {mfaActionBusy ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Lock className="w-4 h-4" />
+                    )}
+                    <span>Set Up Authenticator App</span>
+                  </button>
+                )}
             </div>
 
             {mfaActionFeedback && (
@@ -3132,7 +3237,7 @@ export const AdminDashboardPage: React.FC = () => {
                 {mfa.verifiedTotpFactors.map((factor) => (
                   <div
                     key={factor.id}
-                    className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3"
+                    className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
                   >
                     <div>
                       <span className="font-semibold text-slate-900 dark:text-white block">
@@ -3142,17 +3247,147 @@ export const AdminDashboardPage: React.FC = () => {
                         Verified TOTP Factor &middot; Enforced on sign-in and sensitive actions
                       </span>
                     </div>
-                    <button
-                      type="button"
-                      disabled={mfaActionBusy || !isOnline}
-                      onClick={() => setFactorIdToRemove(factor.id)}
-                      className="min-h-[40px] px-3 py-1.5 rounded-lg bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 font-semibold text-xs cursor-pointer"
-                    >
-                      Remove
-                    </button>
+                    <div className="flex items-center gap-2">
+                      {mfa.currentLevel !== 'aal2' && !verifyingMfaFactor && (
+                        <button
+                          type="button"
+                          disabled={mfaActionBusy || !isOnline}
+                          onClick={() => {
+                            setVerifyFactorCode('');
+                            setMfaActionFeedback(null);
+                            setVerifyingMfaFactor({ factor, mode: 'existing_verified' });
+                          }}
+                          className="min-h-[40px] px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold text-xs cursor-pointer whitespace-nowrap"
+                        >
+                          Verify to AAL2
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        disabled={mfaActionBusy || !isOnline}
+                        onClick={() => setFactorIdToRemove(factor.id)}
+                        className="min-h-[40px] px-3 py-1.5 rounded-lg bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 font-semibold text-xs cursor-pointer"
+                      >
+                        Remove
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
+            )}
+
+            {!mfa.isMfaEnrolled &&
+              mfa.unverifiedTotpFactors.length > 0 &&
+              !enrollingMfa &&
+              !verifyingMfaFactor && (
+                <div className="space-y-2.5 pt-2 border-t border-slate-200 dark:border-slate-800">
+                  {mfa.unverifiedTotpFactors.map((factor) => (
+                    <div
+                      key={factor.id}
+                      className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                    >
+                      <div>
+                        <span className="font-semibold text-slate-900 dark:text-white block">
+                          {factor.friendlyName}
+                        </span>
+                        <span className="text-[11px] text-amber-800 dark:text-amber-300">
+                          Unverified / Pending TOTP Factor &middot; Complete verification with a 6-digit code or remove this stale setup before creating a new one.
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={mfaActionBusy || !isOnline}
+                          onClick={() => {
+                            setVerifyFactorCode('');
+                            setMfaActionFeedback(null);
+                            setVerifyingMfaFactor({ factor, mode: 'resume_unverified' });
+                          }}
+                          className="min-h-[40px] px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold text-xs cursor-pointer whitespace-nowrap"
+                        >
+                          Resume Verification
+                        </button>
+                        <button
+                          type="button"
+                          disabled={mfaActionBusy || !isOnline}
+                          onClick={() => void handleStartMfaEnroll('remove_and_enroll')}
+                          className="min-h-[40px] px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold text-xs cursor-pointer whitespace-nowrap"
+                        >
+                          Remove Stale &amp; Start Fresh
+                        </button>
+                        <button
+                          type="button"
+                          disabled={mfaActionBusy || !isOnline}
+                          onClick={() => setFactorIdToRemove(factor.id)}
+                          className="min-h-[40px] px-3 py-1.5 rounded-lg bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 font-semibold text-xs cursor-pointer"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+            {verifyingMfaFactor && (
+              <form
+                onSubmit={(e) => void handleConfirmExistingOrPendingFactor(e)}
+                className="p-4 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-4"
+              >
+                <p className="text-slate-700 dark:text-slate-300 leading-relaxed">
+                  {verifyingMfaFactor.mode === 'resume_unverified'
+                    ? `Enter the 6-digit verification code from "${verifyingMfaFactor.factor.friendlyName}" to complete your pending authenticator setup and elevate this session to AAL2.`
+                    : `Enter the 6-digit verification code from your existing authenticator "${verifyingMfaFactor.factor.friendlyName}" to confirm AAL2 session assurance.`}
+                </p>
+                <div>
+                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    6-Digit Verification Code
+                  </label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={6}
+                    required
+                    value={verifyFactorCode}
+                    onChange={(e) =>
+                      setVerifyFactorCode(e.target.value.replace(/\D/g, '').slice(0, 6))
+                    }
+                    placeholder="000000"
+                    className="w-full sm:w-48 min-h-[44px] px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 font-mono text-base tracking-widest tabular-nums text-slate-900 dark:text-white"
+                  />
+                </div>
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <button
+                    type="submit"
+                    disabled={mfaActionBusy || verifyFactorCode.length !== 6}
+                    className="min-h-[44px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    {mfaActionBusy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                    <span>Verify &amp; Confirm AAL2</span>
+                  </button>
+                  {verifyingMfaFactor.mode === 'resume_unverified' && (
+                    <button
+                      type="button"
+                      disabled={mfaActionBusy || !isOnline}
+                      onClick={() => void handleStartMfaEnroll('remove_and_enroll')}
+                      className="min-h-[44px] px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-semibold text-xs cursor-pointer"
+                    >
+                      Remove Stale &amp; Start Fresh
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    disabled={mfaActionBusy}
+                    onClick={() => {
+                      setVerifyingMfaFactor(null);
+                      setVerifyFactorCode('');
+                    }}
+                    className="min-h-[44px] px-4 py-2 rounded-xl bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-semibold text-xs cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
             )}
 
             {enrollingMfa && (
@@ -3208,7 +3443,11 @@ export const AdminDashboardPage: React.FC = () => {
                   </button>
                   <button
                     type="button"
-                    onClick={() => setEnrollingMfa(null)}
+                    onClick={() => {
+                      setEnrollingMfa(null);
+                      setMfaEnrollCode('');
+                      void refreshVerification();
+                    }}
                     className="min-h-[44px] px-4 py-2 rounded-xl bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-semibold text-xs cursor-pointer"
                   >
                     Cancel

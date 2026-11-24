@@ -28,8 +28,87 @@ export interface AdminMfaState {
   nextLevel: 'aal1' | 'aal2' | null;
   verifiedTotpFactors: VerifiedAdminFactor[];
   unverifiedTotpFactors: VerifiedAdminFactor[];
+  allFactors?: VerifiedAdminFactor[];
   isMfaEnrolled: boolean;
   isMfaVerifiedForSession: boolean;
+  inspectionError?: string | null;
+}
+
+export interface AdminMfaClientAdapter {
+  isConfigured?: boolean;
+  getAuthenticatorAssuranceLevel: () => Promise<{
+    data: { currentLevel?: string | null; nextLevel?: string | null } | null;
+    error: { message?: string } | null;
+  }>;
+  listFactors: () => Promise<{
+    data: {
+      all?: Array<{
+        id: string;
+        friendly_name?: string | null;
+        factor_type: string;
+        status: string;
+        created_at?: string;
+      }>;
+      totp?: Array<{
+        id: string;
+        friendly_name?: string | null;
+        factor_type: string;
+        status: string;
+        created_at?: string;
+      }>;
+      phone?: Array<{
+        id: string;
+        friendly_name?: string | null;
+        factor_type: string;
+        status: string;
+        created_at?: string;
+      }>;
+      webauthn?: Array<{
+        id: string;
+        friendly_name?: string | null;
+        factor_type: string;
+        status: string;
+        created_at?: string;
+      }>;
+    } | null;
+    error: { message?: string } | null;
+  }>;
+  enroll: (params: { factorType: 'totp'; friendlyName: string }) => Promise<{
+    data: {
+      id: string;
+      type: string;
+      totp?: { qr_code: string; secret: string };
+    } | null;
+    error: { message?: string; code?: string } | null;
+  }>;
+  challengeAndVerify: (params: { factorId: string; code: string }) => Promise<{
+    data: unknown;
+    error: { message?: string } | null;
+  }>;
+  unenroll: (params: { factorId: string }) => Promise<{
+    error: { message?: string } | null;
+  }>;
+  refreshSession: () => Promise<{
+    data: { session: unknown } | null;
+    error: { message?: string } | null;
+  }>;
+}
+
+export type AdminTotpEnrollmentStatus =
+  | 'enrolled'
+  | 'already_verified'
+  | 'challenge_required'
+  | 'pending_unverified'
+  | 'error';
+
+export interface StartAdminTotpEnrollmentResult {
+  status: AdminTotpEnrollmentStatus;
+  factorId: string | null;
+  qrCodeSvgDataUri: string | null;
+  secret: string | null;
+  existingFactor?: VerifiedAdminFactor | null;
+  unverifiedFactors?: VerifiedAdminFactor[];
+  error: string | null;
 }
 
 export interface VerifiedAdminIdentity {
@@ -142,8 +221,10 @@ export const DEFAULT_MFA_STATE: AdminMfaState = {
   nextLevel: null,
   verifiedTotpFactors: [],
   unverifiedTotpFactors: [],
+  allFactors: [],
   isMfaEnrolled: false,
   isMfaVerifiedForSession: false,
+  inspectionError: null,
 };
 
 // In-memory session-scoped audit buffer (never persisted to localStorage, zero PII)
@@ -347,16 +428,43 @@ function isLikelyNetworkFailure(err: unknown): boolean {
   );
 }
 
-export async function inspectAdminMfaState(): Promise<AdminMfaState> {
-  if (!isSupabaseConfigured || !supabase) {
+function getDefaultAdminMfaClientAdapter(): AdminMfaClientAdapter | null {
+  if (!isSupabaseConfigured || !supabase) return null;
+  const client = supabase;
+  return {
+    isConfigured: true,
+    getAuthenticatorAssuranceLevel: () => client.auth.mfa.getAuthenticatorAssuranceLevel(),
+    listFactors: () => client.auth.mfa.listFactors(),
+    enroll: (params) => client.auth.mfa.enroll(params),
+    challengeAndVerify: (params) => client.auth.mfa.challengeAndVerify(params),
+    unenroll: (params) => client.auth.mfa.unenroll(params),
+    refreshSession: () => client.auth.refreshSession(),
+  };
+}
+
+export async function inspectAdminMfaState(
+  adapterOverride?: AdminMfaClientAdapter
+): Promise<AdminMfaState> {
+  const adapter = adapterOverride ?? getDefaultAdminMfaClientAdapter();
+  if (!adapter || adapter.isConfigured === false) {
     return DEFAULT_MFA_STATE;
   }
 
   try {
     const [aalRes, factorsRes] = await Promise.all([
-      supabase.auth.mfa.getAuthenticatorAssuranceLevel(),
-      supabase.auth.mfa.listFactors(),
+      adapter.getAuthenticatorAssuranceLevel(),
+      adapter.listFactors(),
     ]);
+
+    if (aalRes.error || factorsRes.error) {
+      return {
+        ...DEFAULT_MFA_STATE,
+        inspectionError:
+          factorsRes.error?.message ||
+          aalRes.error?.message ||
+          'Failed to inspect MFA factors from Supabase Auth.',
+      };
+    }
 
     const currentLevel: 'aal1' | 'aal2' | null =
       aalRes.data?.currentLevel === 'aal2'
@@ -371,26 +479,36 @@ export async function inspectAdminMfaState(): Promise<AdminMfaState> {
           ? 'aal1'
           : null;
 
-    const allTotp = factorsRes.data?.totp || [];
-    const verifiedTotpFactors: VerifiedAdminFactor[] = allTotp
-      .filter((f) => f.status === 'verified')
-      .map((f) => ({
-        id: f.id,
-        friendlyName: f.friendly_name || 'Authenticator App',
-        factorType: f.factor_type,
-        status: f.status,
-        createdAt: f.created_at,
-      }));
+    // @supabase/auth-js populates `data.all` with ALL factors (verified + unverified),
+    // while `data.totp` contains ONLY verified TOTP factors. Merge both defensively.
+    const factorMap = new Map<string, VerifiedAdminFactor>();
+    const rawSources = [
+      ...(factorsRes.data?.all || []),
+      ...(factorsRes.data?.totp || []),
+      ...(factorsRes.data?.phone || []),
+      ...(factorsRes.data?.webauthn || []),
+    ];
 
-    const unverifiedTotpFactors: VerifiedAdminFactor[] = allTotp
-      .filter((f) => f.status !== 'verified')
-      .map((f) => ({
+    for (const f of rawSources) {
+      if (!f || !f.id || factorMap.has(f.id)) continue;
+      factorMap.set(f.id, {
         id: f.id,
-        friendlyName: f.friendly_name || 'Pending Authenticator',
-        factorType: f.factor_type,
-        status: f.status,
+        friendlyName:
+          (f.friendly_name || '').trim() ||
+          (f.status === 'verified' ? 'Authenticator App' : 'Pending Authenticator'),
+        factorType: f.factor_type || 'totp',
+        status: f.status || 'unverified',
         createdAt: f.created_at,
-      }));
+      });
+    }
+
+    const allFactors = Array.from(factorMap.values());
+    const verifiedTotpFactors = allFactors.filter(
+      (f) => f.factorType === 'totp' && f.status === 'verified'
+    );
+    const unverifiedTotpFactors = allFactors.filter(
+      (f) => f.factorType === 'totp' && f.status !== 'verified'
+    );
 
     const isMfaEnrolled = verifiedTotpFactors.length > 0;
     const isMfaVerifiedForSession = isMfaEnrolled && currentLevel === 'aal2';
@@ -400,11 +518,17 @@ export async function inspectAdminMfaState(): Promise<AdminMfaState> {
       nextLevel,
       verifiedTotpFactors,
       unverifiedTotpFactors,
+      allFactors,
       isMfaEnrolled,
       isMfaVerifiedForSession,
+      inspectionError: null,
     };
-  } catch {
-    return DEFAULT_MFA_STATE;
+  } catch (err: unknown) {
+    return {
+      ...DEFAULT_MFA_STATE,
+      inspectionError:
+        err instanceof Error ? err.message : 'Unable to inspect Supabase MFA state.',
+    };
   }
 }
 
@@ -653,39 +777,81 @@ export async function revalidateAdminBeforeAction(params: {
 
 export async function verifyAdminTotpChallenge(
   factorId: string,
-  code: string
-): Promise<{ success: boolean; error: string | null }> {
-  if (!isSupabaseConfigured || !supabase) {
-    return { success: false, error: 'Supabase authentication is not configured.' };
+  code: string,
+  adapterOverride?: AdminMfaClientAdapter
+): Promise<{ success: boolean; currentLevel?: 'aal1' | 'aal2' | null; error: string | null }> {
+  const adapter = adapterOverride ?? getDefaultAdminMfaClientAdapter();
+  if (!adapter || adapter.isConfigured === false) {
+    return {
+      success: false,
+      currentLevel: null,
+      error: 'Supabase authentication is not configured.',
+    };
+  }
+  const cleanFactorId = (factorId || '').trim();
+  if (!cleanFactorId) {
+    return { success: false, currentLevel: null, error: 'Missing authenticator factor ID.' };
   }
   const cleanCode = code.replace(/\s+/g, '').trim();
   if (!/^\d{6}$/.test(cleanCode)) {
-    return { success: false, error: 'Enter a valid 6-digit verification code.' };
+    return {
+      success: false,
+      currentLevel: null,
+      error: 'Enter a valid 6-digit verification code.',
+    };
   }
 
-  const { error } = await supabase.auth.mfa.challengeAndVerify({
-    factorId,
+  const { error } = await adapter.challengeAndVerify({
+    factorId: cleanFactorId,
     code: cleanCode,
   });
 
   if (error) {
     return {
       success: false,
+      currentLevel: null,
       error: 'Invalid or expired verification code. Please try again.',
     };
   }
 
-  return { success: true, error: null };
+  const refreshRes = await adapter.refreshSession();
+  const aalRes = await adapter.getAuthenticatorAssuranceLevel();
+  const confirmedLevel: 'aal1' | 'aal2' | null =
+    aalRes.data?.currentLevel === 'aal2'
+      ? 'aal2'
+      : aalRes.data?.currentLevel === 'aal1'
+        ? 'aal1'
+        : null;
+
+  if (refreshRes.error || aalRes.error || confirmedLevel !== 'aal2') {
+    return {
+      success: false,
+      currentLevel: confirmedLevel,
+      error:
+        refreshRes.error?.message ||
+        aalRes.error?.message ||
+        'Authenticator code verified, but AAL2 session assurance could not be confirmed after refreshing the session. Please try again.',
+    };
+  }
+
+  return { success: true, currentLevel: 'aal2', error: null };
 }
 
-export async function startAdminTotpEnrollment(friendlyName = 'GoAMAAS Admin Mobile'): Promise<{
-  factorId: string | null;
-  qrCodeSvgDataUri: string | null;
-  secret: string | null;
-  error: string | null;
-}> {
-  if (!isSupabaseConfigured || !supabase) {
+function normalizeFactorFriendlyName(name: string | null | undefined): string {
+  return (name || '').trim().toLowerCase();
+}
+
+export async function startAdminTotpEnrollment(
+  friendlyName = 'GoAMAAS Admin Authenticator',
+  options?: {
+    unverifiedAction?: 'remove_and_enroll' | 'prompt';
+    adapter?: AdminMfaClientAdapter;
+  }
+): Promise<StartAdminTotpEnrollmentResult> {
+  const adapter = options?.adapter ?? getDefaultAdminMfaClientAdapter();
+  if (!adapter || adapter.isConfigured === false) {
     return {
+      status: 'error',
       factorId: null,
       qrCodeSvgDataUri: null,
       secret: null,
@@ -693,24 +859,187 @@ export async function startAdminTotpEnrollment(friendlyName = 'GoAMAAS Admin Mob
     };
   }
 
-  // Clean up any stale unverified factor with the same friendly name first
-  const existing = await inspectAdminMfaState();
-  for (const stale of existing.unverifiedTotpFactors) {
-    await supabase.auth.mfa.unenroll({ factorId: stale.id });
+  const cleanFriendlyName = (friendlyName || '').trim() || 'GoAMAAS Admin Authenticator';
+  const normalizedTargetName = normalizeFactorFriendlyName(cleanFriendlyName);
+  const unverifiedAction = options?.unverifiedAction ?? 'remove_and_enroll';
+
+  // Step 1: Always inspect live MFA factors & AAL via Supabase Auth before enrolling
+  const existing = await inspectAdminMfaState(adapter);
+  if (existing.inspectionError) {
+    return {
+      status: 'error',
+      factorId: null,
+      qrCodeSvgDataUri: null,
+      secret: null,
+      error: existing.inspectionError,
+    };
   }
 
-  const { data, error } = await supabase.auth.mfa.enroll({
+  const allFactors =
+    existing.allFactors || [
+      ...existing.verifiedTotpFactors,
+      ...existing.unverifiedTotpFactors,
+    ];
+
+  // Step 2: If a verified TOTP factor already exists, NEVER enroll a duplicate factor.
+  // Use it directly for AAL2 challenge/verification (or report already_verified if already at AAL2).
+  const verifiedMatch =
+    existing.verifiedTotpFactors.find(
+      (f) => normalizeFactorFriendlyName(f.friendlyName) === normalizedTargetName
+    ) || existing.verifiedTotpFactors[0];
+
+  if (verifiedMatch) {
+    return {
+      status: existing.currentLevel === 'aal2' ? 'already_verified' : 'challenge_required',
+      factorId: verifiedMatch.id,
+      qrCodeSvgDataUri: null,
+      secret: null,
+      existingFactor: verifiedMatch,
+      error: null,
+    };
+  }
+
+  // Prevent friendly name collision with any existing verified non-TOTP factor
+  const verifiedFriendlyCollision = allFactors.find(
+    (f) =>
+      f.status === 'verified' &&
+      normalizeFactorFriendlyName(f.friendlyName) === normalizedTargetName
+  );
+  if (verifiedFriendlyCollision) {
+    return {
+      status: 'error',
+      factorId: verifiedFriendlyCollision.id,
+      qrCodeSvgDataUri: null,
+      secret: null,
+      existingFactor: verifiedFriendlyCollision,
+      error: `A verified authenticator factor named "${cleanFriendlyName}" already exists on this account.`,
+    };
+  }
+
+  // Step 3: Detect any unverified/pending TOTP factor or friendly-name collision
+  const pendingFactors = Array.from(
+    new Map(
+      allFactors
+        .filter(
+          (f) =>
+            f.status !== 'verified' &&
+            (f.factorType === 'totp' ||
+              normalizeFactorFriendlyName(f.friendlyName) === normalizedTargetName)
+        )
+        .map((f) => [f.id, f])
+    ).values()
+  );
+
+  if (pendingFactors.length > 0) {
+    if (unverifiedAction === 'prompt') {
+      return {
+        status: 'pending_unverified',
+        factorId: pendingFactors[0].id,
+        qrCodeSvgDataUri: null,
+        secret: null,
+        existingFactor: pendingFactors[0],
+        unverifiedFactors: pendingFactors,
+        error: null,
+      };
+    }
+
+    for (const stale of pendingFactors) {
+      const { error: unenrollError } = await adapter.unenroll({ factorId: stale.id });
+      if (unenrollError) {
+        return {
+          status: 'error',
+          factorId: null,
+          qrCodeSvgDataUri: null,
+          secret: null,
+          existingFactor: stale,
+          unverifiedFactors: pendingFactors,
+          error:
+            unenrollError.message ||
+            'Could not remove the pending unverified authenticator factor before starting a new setup.',
+        };
+      }
+    }
+
+    // Re-inspect after cleanup to confirm no duplicate friendly name remains
+    const postCleanup = await inspectAdminMfaState(adapter);
+    if (postCleanup.inspectionError) {
+      return {
+        status: 'error',
+        factorId: null,
+        qrCodeSvgDataUri: null,
+        secret: null,
+        error: postCleanup.inspectionError,
+      };
+    }
+
+    const postAll =
+      postCleanup.allFactors || [
+        ...postCleanup.verifiedTotpFactors,
+        ...postCleanup.unverifiedTotpFactors,
+      ];
+    const remainingMatch = postAll.find(
+      (f) => normalizeFactorFriendlyName(f.friendlyName) === normalizedTargetName
+    );
+    if (remainingMatch) {
+      return {
+        status: remainingMatch.status === 'verified'
+          ? postCleanup.currentLevel === 'aal2'
+            ? 'already_verified'
+            : 'challenge_required'
+          : 'error',
+        factorId: remainingMatch.id,
+        qrCodeSvgDataUri: null,
+        secret: null,
+        existingFactor: remainingMatch,
+        error:
+          remainingMatch.status === 'verified'
+            ? null
+            : `Factor "${cleanFriendlyName}" still exists after cleanup. Please remove it manually and retry.`,
+      };
+    }
+  }
+
+  // Step 4: Enroll cleanly when no duplicate or verified TOTP factor exists
+  const { data, error } = await adapter.enroll({
     factorType: 'totp',
-    friendlyName,
+    friendlyName: cleanFriendlyName,
   });
 
-  if (error || !data || data.type !== 'totp') {
+  if (error || !data || data.type !== 'totp' || !data.totp) {
     const rawMsg = error?.message || '';
+    if (rawMsg.toLowerCase().includes('already exists')) {
+      const recheck = await inspectAdminMfaState(adapter);
+      const existingVerified = recheck.verifiedTotpFactors[0];
+      if (existingVerified) {
+        return {
+          status: recheck.currentLevel === 'aal2' ? 'already_verified' : 'challenge_required',
+          factorId: existingVerified.id,
+          qrCodeSvgDataUri: null,
+          secret: null,
+          existingFactor: existingVerified,
+          error: null,
+        };
+      }
+      const existingPending = recheck.unverifiedTotpFactors[0];
+      if (existingPending) {
+        return {
+          status: 'pending_unverified',
+          factorId: existingPending.id,
+          qrCodeSvgDataUri: null,
+          secret: null,
+          existingFactor: existingPending,
+          unverifiedFactors: recheck.unverifiedTotpFactors,
+          error: null,
+        };
+      }
+    }
+
     const mfaDisabledHint =
       rawMsg.toLowerCase().includes('mfa') && rawMsg.toLowerCase().includes('disabled')
         ? 'TOTP Multi-Factor Authentication is currently disabled in Supabase Auth project settings. Enable TOTP in the Supabase Dashboard (Authentication -> Multi-Factor) to enroll a hardware/app authenticator.'
         : rawMsg || 'Could not start TOTP enrollment.';
     return {
+      status: 'error',
       factorId: null,
       qrCodeSvgDataUri: null,
       secret: null,
@@ -719,6 +1048,7 @@ export async function startAdminTotpEnrollment(friendlyName = 'GoAMAAS Admin Mob
   }
 
   return {
+    status: 'enrolled',
     factorId: data.id,
     qrCodeSvgDataUri: data.totp.qr_code,
     secret: data.totp.secret,
@@ -727,13 +1057,15 @@ export async function startAdminTotpEnrollment(friendlyName = 'GoAMAAS Admin Mob
 }
 
 export async function unenrollAdminTotpFactor(
-  factorId: string
+  factorId: string,
+  adapterOverride?: AdminMfaClientAdapter
 ): Promise<{ success: boolean; error: string | null }> {
-  if (!isSupabaseConfigured || !supabase) {
+  const adapter = adapterOverride ?? getDefaultAdminMfaClientAdapter();
+  if (!adapter || adapter.isConfigured === false) {
     return { success: false, error: 'Supabase authentication is not configured.' };
   }
 
-  const { error } = await supabase.auth.mfa.unenroll({ factorId });
+  const { error } = await adapter.unenroll({ factorId });
   if (error) {
     return { success: false, error: error.message || 'Failed to remove authenticator factor.' };
   }

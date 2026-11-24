@@ -2,11 +2,15 @@ import * as fs from 'fs';
 import {
   ADMIN_DB_ROLE_MISSING_ERROR,
   AUTHORIZED_ADMIN_EMAIL,
+  AdminMfaClientAdapter,
   DEFAULT_MFA_STATE,
   UNIFORM_ADMIN_AUTH_ERROR,
+  inspectAdminMfaState,
   isAuthUserEmailVerified,
   isAuthorizedAdminEmail,
   normalizeAdminEmail,
+  startAdminTotpEnrollment,
+  verifyAdminTotpChallenge,
   verifyServerAdminSession,
 } from '../src/lib/adminSecurity';
 import {
@@ -669,7 +673,310 @@ async function run() {
     'Customer-facing LoginPage preserves both email/password and Google authentication'
   );
 
-  console.log('\n✅ ALL 12/12 ADMIN GOOGLE AUTH, SINGLE-EMAIL RESTRICTION & PWA INSTALL PROMPT SUITES PASSED!');
+  // ---------------------------------------------------------------------------
+  // 13. Admin TOTP Enrollment & Existing Verified / Unverified Factor Handling
+  // ---------------------------------------------------------------------------
+  console.log('\n[13] Testing Admin TOTP enrollment with verified, unverified, and duplicate-prevention flows...');
+
+  function createStatefulMockMfaAdapter(initial: {
+    currentLevel?: 'aal1' | 'aal2';
+    factors?: Array<{
+      id: string;
+      friendly_name: string;
+      factor_type: string;
+      status: 'verified' | 'unverified';
+    }>;
+    failUnenroll?: boolean;
+    failAal2AfterRefresh?: boolean;
+  }): {
+    adapter: AdminMfaClientAdapter;
+    calls: string[];
+    getFactors: () => Array<{
+      id: string;
+      friendly_name: string;
+      factor_type: string;
+      status: string;
+    }>;
+  } {
+    let currentLevel: 'aal1' | 'aal2' = initial.currentLevel ?? 'aal1';
+    let factors = [...(initial.factors ?? [])];
+    const calls: string[] = [];
+
+    const adapter: AdminMfaClientAdapter = {
+      isConfigured: true,
+      getAuthenticatorAssuranceLevel: async () => {
+        calls.push('getAuthenticatorAssuranceLevel');
+        const hasVerified = factors.some((f) => f.status === 'verified');
+        return {
+          data: {
+            currentLevel,
+            nextLevel: hasVerified ? 'aal2' : 'aal1',
+          },
+          error: null,
+        };
+      },
+      listFactors: async () => {
+        calls.push('listFactors');
+        // Mirror @supabase/auth-js exact behavior:
+        // `all` includes verified + unverified, while `totp` includes ONLY verified!
+        return {
+          data: {
+            all: factors.map((f) => ({ ...f })),
+            totp: factors
+              .filter((f) => f.factor_type === 'totp' && f.status === 'verified')
+              .map((f) => ({ ...f })),
+          },
+          error: null,
+        };
+      },
+      enroll: async (params) => {
+        calls.push(`enroll:${params.friendlyName}`);
+        const duplicate = factors.find(
+          (f) => f.friendly_name.trim().toLowerCase() === params.friendlyName.trim().toLowerCase()
+        );
+        if (duplicate) {
+          return {
+            data: null,
+            error: {
+              message: `A factor with the friendly name '${params.friendlyName}' for this user already exists.`,
+            },
+          };
+        }
+        const id = `factor-new-${factors.length + 1}`;
+        factors.push({
+          id,
+          friendly_name: params.friendlyName,
+          factor_type: 'totp',
+          status: 'unverified',
+        });
+        return {
+          data: {
+            id,
+            type: 'totp',
+            totp: {
+              qr_code: 'data:image/svg+xml;utf-8,<svg/>',
+              secret: 'JBSWY3DPEHPK3PXP',
+            },
+          },
+          error: null,
+        };
+      },
+      challengeAndVerify: async (params) => {
+        calls.push(`challengeAndVerify:${params.factorId}`);
+        const target = factors.find((f) => f.id === params.factorId);
+        if (!target) {
+          return { data: null, error: { message: 'Factor not found' } };
+        }
+        target.status = 'verified';
+        if (!initial.failAal2AfterRefresh) {
+          currentLevel = 'aal2';
+        }
+        return { data: { access_token: 'mock-aal2-jwt' }, error: null };
+      },
+      unenroll: async (params) => {
+        calls.push(`unenroll:${params.factorId}`);
+        if (initial.failUnenroll) {
+          return { error: { message: 'Simulated unenroll failure' } };
+        }
+        factors = factors.filter((f) => f.id !== params.factorId);
+        return { error: null };
+      },
+      refreshSession: async () => {
+        calls.push('refreshSession');
+        return { data: { session: { access_token: 'mock-refreshed' } }, error: null };
+      },
+    };
+
+    return {
+      adapter,
+      calls,
+      getFactors: () => factors.map((f) => ({ ...f })),
+    };
+  }
+
+  // Scenario A: Existing VERIFIED factor at AAL1 -> reuse for challenge/verification, NEVER call enroll()
+  {
+    const mock = createStatefulMockMfaAdapter({
+      currentLevel: 'aal1',
+      factors: [
+        {
+          id: 'verified-factor-1',
+          friendly_name: 'GoAMAAS Admin Authenticator',
+          factor_type: 'totp',
+          status: 'verified',
+        },
+      ],
+    });
+    const res = await startAdminTotpEnrollment('GoAMAAS Admin Authenticator', {
+      adapter: mock.adapter,
+    });
+    assert(
+      res.status === 'challenge_required' &&
+        res.factorId === 'verified-factor-1' &&
+        !mock.calls.some((c) => c.startsWith('enroll:')),
+      'Existing verified TOTP factor at AAL1 returns challenge_required and never calls enroll()'
+    );
+
+    const verifyRes = await verifyAdminTotpChallenge('verified-factor-1', '123456', mock.adapter);
+    assert(
+      verifyRes.success === true &&
+        verifyRes.currentLevel === 'aal2' &&
+        mock.calls.includes('refreshSession') &&
+        mock.calls.indexOf('refreshSession') <
+          mock.calls.lastIndexOf('getAuthenticatorAssuranceLevel'),
+      'Existing verified TOTP challenge refreshes session and confirms AAL2'
+    );
+    assert(
+      mock.getFactors().length === 1,
+      'Zero duplicate factors created when verifying an existing verified factor'
+    );
+  }
+
+  // Scenario B: Existing VERIFIED factor already at AAL2 -> returns already_verified, never calls enroll()
+  {
+    const mock = createStatefulMockMfaAdapter({
+      currentLevel: 'aal2',
+      factors: [
+        {
+          id: 'verified-factor-2',
+          friendly_name: 'GoAMAAS Admin Authenticator',
+          factor_type: 'totp',
+          status: 'verified',
+        },
+      ],
+    });
+    const res = await startAdminTotpEnrollment('GoAMAAS Admin Authenticator', {
+      adapter: mock.adapter,
+    });
+    assert(
+      res.status === 'already_verified' &&
+        res.factorId === 'verified-factor-2' &&
+        !mock.calls.some((c) => c.startsWith('enroll:')),
+      'Existing verified TOTP factor already at AAL2 returns already_verified and never creates duplicates'
+    );
+  }
+
+  // Scenario C: Unverified/pending factor exists (visible ONLY in `data.all`, NOT `data.totp`!)
+  // C1: inspectAdminMfaState surfaces it cleanly AND prompt mode allows resuming it
+  {
+    const mock = createStatefulMockMfaAdapter({
+      currentLevel: 'aal1',
+      factors: [
+        {
+          id: 'pending-factor-1',
+          friendly_name: 'GoAMAAS Admin Authenticator',
+          factor_type: 'totp',
+          status: 'unverified',
+        },
+      ],
+    });
+
+    const inspected = await inspectAdminMfaState(mock.adapter);
+    assert(
+      inspected.unverifiedTotpFactors.length === 1 &&
+        inspected.unverifiedTotpFactors[0].id === 'pending-factor-1' &&
+        inspected.verifiedTotpFactors.length === 0,
+      'inspectAdminMfaState detects unverified TOTP factor from Supabase Auth data.all'
+    );
+
+    const promptRes = await startAdminTotpEnrollment('GoAMAAS Admin Authenticator', {
+      unverifiedAction: 'prompt',
+      adapter: mock.adapter,
+    });
+    assert(
+      promptRes.status === 'pending_unverified' &&
+        promptRes.factorId === 'pending-factor-1' &&
+        !mock.calls.some((c) => c.startsWith('enroll:')),
+      'Pending unverified factor in prompt mode avoids duplicate enroll and offers resume/reset'
+    );
+
+    // Resume verification on the pending factor -> promotes to verified, refreshes session & confirms AAL2
+    const resumeVerify = await verifyAdminTotpChallenge('pending-factor-1', '654321', mock.adapter);
+    assert(
+      resumeVerify.success === true &&
+        resumeVerify.currentLevel === 'aal2' &&
+        mock.getFactors().length === 1 &&
+        mock.getFactors()[0].status === 'verified',
+      'Resuming pending unverified factor completes verification, refreshes session, and confirms AAL2'
+    );
+  }
+
+  // C2: Stale unverified factor removal before fresh enrollment (prevents friendly name collision)
+  {
+    const mock = createStatefulMockMfaAdapter({
+      currentLevel: 'aal1',
+      factors: [
+        {
+          id: 'stale-unverified-factor',
+          friendly_name: 'GoAMAAS Admin Authenticator',
+          factor_type: 'totp',
+          status: 'unverified',
+        },
+      ],
+    });
+    const freshRes = await startAdminTotpEnrollment('GoAMAAS Admin Authenticator', {
+      unverifiedAction: 'remove_and_enroll',
+      adapter: mock.adapter,
+    });
+    assert(
+      freshRes.status === 'enrolled' &&
+        Boolean(freshRes.factorId) &&
+        Boolean(freshRes.qrCodeSvgDataUri) &&
+        Boolean(freshRes.secret) &&
+        mock.calls.includes('unenroll:stale-unverified-factor') &&
+        mock.getFactors().length === 1 &&
+        mock.getFactors()[0].id === freshRes.factorId,
+      'Stale unverified factor is cleanly unenrolled before enrolling fresh GoAMAAS Admin Authenticator without friendly-name collision'
+    );
+  }
+
+  // Scenario D: Fail safely if unenroll fails OR if AAL2 is not confirmed after refreshSession
+  {
+    const mockFailUnenroll = createStatefulMockMfaAdapter({
+      currentLevel: 'aal1',
+      factors: [
+        {
+          id: 'stuck-pending-factor',
+          friendly_name: 'GoAMAAS Admin Authenticator',
+          factor_type: 'totp',
+          status: 'unverified',
+        },
+      ],
+      failUnenroll: true,
+    });
+    const failRes = await startAdminTotpEnrollment('GoAMAAS Admin Authenticator', {
+      unverifiedAction: 'remove_and_enroll',
+      adapter: mockFailUnenroll.adapter,
+    });
+    assert(
+      failRes.status === 'error' && !mockFailUnenroll.calls.some((c) => c.startsWith('enroll:')),
+      'Aborts safely without duplicate enroll() if stale factor removal fails'
+    );
+
+    const mockAalNotElevated = createStatefulMockMfaAdapter({
+      currentLevel: 'aal1',
+      factors: [
+        {
+          id: 'verified-factor-no-aal2',
+          friendly_name: 'GoAMAAS Admin Authenticator',
+          factor_type: 'totp',
+          status: 'verified',
+        },
+      ],
+      failAal2AfterRefresh: true,
+    });
+    const aalFailVerify = await verifyAdminTotpChallenge(
+      'verified-factor-no-aal2',
+      '123456',
+      mockAalNotElevated.adapter
+    );
+    assert(
+      aalFailVerify.success === false && aalFailVerify.currentLevel !== 'aal2',
+      'Fails closed if post-refresh session assurance cannot be confirmed at AAL2'
+    );
+  }
+
+  console.log('\n✅ ALL 13/13 ADMIN GOOGLE AUTH, SINGLE-EMAIL RESTRICTION, TOTP ENROLLMENT & PWA SUITES PASSED!');
 }
 
 run().catch((err) => {

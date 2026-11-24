@@ -220,7 +220,11 @@ export const AdminProtectedRoute: React.FC<AdminProtectedRouteProps> = ({ childr
               isMfaVerifiedForSession: false,
             },
           });
-        } else if (event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
+        } else if (
+          event === 'TOKEN_REFRESHED' ||
+          event === 'USER_UPDATED' ||
+          event === 'MFA_CHALLENGE_VERIFIED'
+        ) {
           void runVerification({ silent: true });
         }
       });
