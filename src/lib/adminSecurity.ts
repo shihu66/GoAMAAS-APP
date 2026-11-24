@@ -442,6 +442,39 @@ function getDefaultAdminMfaClientAdapter(): AdminMfaClientAdapter | null {
   };
 }
 
+/**
+ * Supabase GoTrue returns raw <svg ... fill="#fff" ...> prefixed with "data:image/svg+xml;utf-8,".
+ * Unescaped "#" hex characters in SVG attributes truncate data URIs in modern browsers;
+ * percent-encode raw SVG payloads so the QR image always renders cleanly.
+ */
+export function normalizeTotpQrCodeDataUri(qrCode: string | null | undefined): string {
+  const raw = (qrCode || '').trim();
+  if (!raw) return '';
+  const utf8Prefix = 'data:image/svg+xml;utf-8,';
+  const charsetUtf8Prefix = 'data:image/svg+xml;charset=utf-8,';
+  if (raw.startsWith('data:image/svg+xml;base64,')) {
+    return raw;
+  }
+  if (raw.startsWith(utf8Prefix)) {
+    const body = raw.slice(utf8Prefix.length);
+    if (body.trimStart().startsWith('<')) {
+      return `${charsetUtf8Prefix}${encodeURIComponent(body)}`;
+    }
+    return raw;
+  }
+  if (raw.startsWith(charsetUtf8Prefix)) {
+    const body = raw.slice(charsetUtf8Prefix.length);
+    if (body.trimStart().startsWith('<')) {
+      return `${charsetUtf8Prefix}${encodeURIComponent(body)}`;
+    }
+    return raw;
+  }
+  if (raw.startsWith('<')) {
+    return `${charsetUtf8Prefix}${encodeURIComponent(raw)}`;
+  }
+  return raw;
+}
+
 export async function inspectAdminMfaState(
   adapterOverride?: AdminMfaClientAdapter
 ): Promise<AdminMfaState> {
@@ -530,6 +563,21 @@ export async function inspectAdminMfaState(
         err instanceof Error ? err.message : 'Unable to inspect Supabase MFA state.',
     };
   }
+}
+
+export async function refreshAndInspectAdminMfaState(
+  adapterOverride?: AdminMfaClientAdapter
+): Promise<AdminMfaState> {
+  const adapter = adapterOverride ?? getDefaultAdminMfaClientAdapter();
+  if (!adapter || adapter.isConfigured === false) {
+    return DEFAULT_MFA_STATE;
+  }
+  try {
+    await adapter.refreshSession();
+  } catch {
+    // Proceed to live listFactors()/getUser() inspection even if refresh fails
+  }
+  return inspectAdminMfaState(adapter);
 }
 
 /**
@@ -718,10 +766,12 @@ export async function revalidateAdminBeforeAction(params: {
   action: string;
   targetType: AdminSessionAuditEntry['targetType'];
   targetId: string;
+  requireAal2?: boolean;
 }): Promise<{
   allowed: boolean;
   verification: AdminVerificationResult;
   errorMessage?: string;
+  mfaRequirement?: 'mfa_setup_required' | 'mfa_aal2_required';
 }> {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     return {
@@ -746,7 +796,7 @@ export async function revalidateAdminBeforeAction(params: {
   ) {
     const errorMessage =
       verification.status === 'mfa_required'
-        ? 'Multi-factor step-up verification is required before executing this action.'
+        ? 'Multi-factor step-up verification (AAL2) is required before executing this action.'
         : verification.status === 'forbidden'
         ? UNIFORM_ADMIN_AUTH_ERROR
         : verification.status === 'network_error'
@@ -766,7 +816,49 @@ export async function revalidateAdminBeforeAction(params: {
       allowed: false,
       verification,
       errorMessage,
+      ...(verification.status === 'mfa_required'
+        ? { mfaRequirement: 'mfa_aal2_required' as const }
+        : {}),
     };
+  }
+
+  if (params.requireAal2) {
+    if (!verification.mfa.isMfaEnrolled) {
+      const errorMessage =
+        'Authenticator setup (TOTP AAL2) is required before executing this action.';
+      recordAdminSessionEvent({
+        adminId: verification.admin.id,
+        action: params.action,
+        targetType: params.targetType,
+        targetId: params.targetId,
+        outcome: 'blocked',
+        summary: 'Blocked privileged action because TOTP authenticator is not yet enrolled.',
+      });
+      return {
+        allowed: false,
+        verification,
+        errorMessage,
+        mfaRequirement: 'mfa_setup_required',
+      };
+    }
+    if (verification.mfa.currentLevel !== 'aal2') {
+      const errorMessage =
+        'Verified 6-digit authenticator verification (AAL2) is required before executing this action.';
+      recordAdminSessionEvent({
+        adminId: verification.admin.id,
+        action: params.action,
+        targetType: params.targetType,
+        targetId: params.targetId,
+        outcome: 'blocked',
+        summary: 'Blocked privileged action because session assurance level is below AAL2.',
+      });
+      return {
+        allowed: false,
+        verification,
+        errorMessage,
+        mfaRequirement: 'mfa_aal2_required',
+      };
+    }
   }
 
   return {
@@ -815,22 +907,35 @@ export async function verifyAdminTotpChallenge(
   }
 
   const refreshRes = await adapter.refreshSession();
-  const aalRes = await adapter.getAuthenticatorAssuranceLevel();
+  const [aalRes, refreshedMfa] = await Promise.all([
+    adapter.getAuthenticatorAssuranceLevel(),
+    inspectAdminMfaState(adapter),
+  ]);
   const confirmedLevel: 'aal1' | 'aal2' | null =
     aalRes.data?.currentLevel === 'aal2'
       ? 'aal2'
       : aalRes.data?.currentLevel === 'aal1'
         ? 'aal1'
         : null;
+  const factorConfirmedVerified = refreshedMfa.verifiedTotpFactors.some(
+    (f) => f.id === cleanFactorId && f.status === 'verified'
+  );
 
-  if (refreshRes.error || aalRes.error || confirmedLevel !== 'aal2') {
+  if (
+    refreshRes.error ||
+    aalRes.error ||
+    refreshedMfa.inspectionError ||
+    confirmedLevel !== 'aal2' ||
+    !factorConfirmedVerified
+  ) {
     return {
       success: false,
       currentLevel: confirmedLevel,
       error:
         refreshRes.error?.message ||
         aalRes.error?.message ||
-        'Authenticator code verified, but AAL2 session assurance could not be confirmed after refreshing the session. Please try again.',
+        refreshedMfa.inspectionError ||
+        'Authenticator code verified, but verified TOTP status and AAL2 session assurance could not be confirmed after refreshing the session. Please try again.',
     };
   }
 
@@ -1050,7 +1155,7 @@ export async function startAdminTotpEnrollment(
   return {
     status: 'enrolled',
     factorId: data.id,
-    qrCodeSvgDataUri: data.totp.qr_code,
+    qrCodeSvgDataUri: normalizeTotpQrCodeDataUri(data.totp.qr_code),
     secret: data.totp.secret,
     error: null,
   };
@@ -1070,4 +1175,63 @@ export async function unenrollAdminTotpFactor(
     return { success: false, error: error.message || 'Failed to remove authenticator factor.' };
   }
   return { success: true, error: null };
+}
+
+/**
+ * Safely replaces an existing verified TOTP factor ONLY when the current session
+ * is already verified at AAL2. Never weakens or bypasses MFA from AAL1.
+ */
+export async function replaceVerifiedAdminTotpFactor(
+  oldFactorId: string,
+  friendlyName = 'GoAMAAS Admin Authenticator',
+  options?: { adapter?: AdminMfaClientAdapter }
+): Promise<StartAdminTotpEnrollmentResult> {
+  const adapter = options?.adapter ?? getDefaultAdminMfaClientAdapter();
+  if (!adapter || adapter.isConfigured === false) {
+    return {
+      status: 'error',
+      factorId: null,
+      qrCodeSvgDataUri: null,
+      secret: null,
+      error: 'Supabase authentication is not configured.',
+    };
+  }
+
+  const currentMfa = await inspectAdminMfaState(adapter);
+  if (currentMfa.inspectionError) {
+    return {
+      status: 'error',
+      factorId: null,
+      qrCodeSvgDataUri: null,
+      secret: null,
+      error: currentMfa.inspectionError,
+    };
+  }
+
+  if (currentMfa.currentLevel !== 'aal2') {
+    return {
+      status: 'error',
+      factorId: null,
+      qrCodeSvgDataUri: null,
+      secret: null,
+      error:
+        'A verified AAL2 session is required to replace an enrolled authenticator factor. If you lost access to your Authenticator app, remove the lost factor from Supabase Dashboard → Authentication → Users and recheck your session.',
+    };
+  }
+
+  const { error: unenrollError } = await adapter.unenroll({ factorId: oldFactorId });
+  if (unenrollError) {
+    return {
+      status: 'error',
+      factorId: null,
+      qrCodeSvgDataUri: null,
+      secret: null,
+      error: unenrollError.message || 'Unable to remove existing verified authenticator factor.',
+    };
+  }
+
+  return startAdminTotpEnrollment(friendlyName, {
+    unverifiedAction: 'remove_and_enroll',
+    adapter,
+  });
 }

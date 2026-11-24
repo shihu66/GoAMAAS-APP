@@ -19,9 +19,11 @@ import {
   isAuthorizedAdminEmail,
   recordAdminLoginFailure,
   recordAdminSessionEvent,
+  refreshAndInspectAdminMfaState,
   verifyAdminTotpChallenge,
   verifyServerAdminSession,
 } from '../../lib/adminSecurity';
+import { AdminMfaRecoveryGuide } from '../admin/AdminTotpSetupFlow';
 import { notifyAdminServiceWorkerSignOut, useAdminPWA } from '../../hooks/useAdminPWA';
 import { useApp } from '../../context/AppContext';
 
@@ -453,6 +455,24 @@ export const AdminProtectedRoute: React.FC<AdminProtectedRouteProps> = ({ childr
           >
             Cancel &amp; Sign Out
           </button>
+
+          {primaryFactor && (
+            <AdminMfaRecoveryGuide
+              factor={primaryFactor}
+              isOnline={isOnline}
+              onRecheckMfaStatus={async () => {
+                await refreshAndInspectAdminMfaState();
+                const refreshed = await runVerification({ silent: true });
+                if (
+                  refreshed.status === 'authorized' &&
+                  !refreshed.mfa.isMfaEnrolled
+                ) {
+                  return { removed: true };
+                }
+                return { removed: false };
+              }}
+            />
+          )}
         </div>
       </div>
     );

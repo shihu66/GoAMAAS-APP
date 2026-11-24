@@ -9,6 +9,9 @@ import {
   isAuthUserEmailVerified,
   isAuthorizedAdminEmail,
   normalizeAdminEmail,
+  normalizeTotpQrCodeDataUri,
+  refreshAndInspectAdminMfaState,
+  replaceVerifiedAdminTotpFactor,
   startAdminTotpEnrollment,
   verifyAdminTotpChallenge,
   verifyServerAdminSession,
@@ -295,12 +298,14 @@ async function run() {
     'src/components/layout/PublicLayout.tsx',
     'src/components/layout/AdminLayout.tsx',
     'src/components/admin/AdminPWAInstallBanner.tsx',
+    'src/components/admin/AdminTotpSetupFlow.tsx',
     'src/pages/public/HomePage.tsx',
     'src/pages/public/AboutPage.tsx',
     'src/pages/public/ContactPage.tsx',
     'src/pages/public/PricingPage.tsx',
     'src/pages/admin/AdminLoginPage.tsx',
     'src/pages/admin/AdminDashboardPage.tsx',
+    'src/components/auth/AdminProtectedRoute.tsx',
   ];
   for (const file of filesZeroEmailAllowed) {
     const content = fs.readFileSync(file, 'utf8');
@@ -688,6 +693,8 @@ async function run() {
     }>;
     failUnenroll?: boolean;
     failAal2AfterRefresh?: boolean;
+    validOtpCode?: string;
+    rawQrSvg?: string;
   }): {
     adapter: AdminMfaClientAdapter;
     calls: string[];
@@ -697,10 +704,15 @@ async function run() {
       factor_type: string;
       status: string;
     }>;
+    removeFactorExternally: (factorId: string) => void;
   } {
     let currentLevel: 'aal1' | 'aal2' = initial.currentLevel ?? 'aal1';
     let factors = [...(initial.factors ?? [])];
     const calls: string[] = [];
+    const expectedCode = initial.validOtpCode;
+    const rawQrSvg =
+      initial.rawQrSvg ??
+      'data:image/svg+xml;utf-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path fill="#ffffff" d="M0 0h10v10H0z"/></svg>';
 
     const adapter: AdminMfaClientAdapter = {
       isConfigured: true,
@@ -754,7 +766,7 @@ async function run() {
             id,
             type: 'totp',
             totp: {
-              qr_code: 'data:image/svg+xml;utf-8,<svg/>',
+              qr_code: rawQrSvg,
               secret: 'JBSWY3DPEHPK3PXP',
             },
           },
@@ -766,6 +778,9 @@ async function run() {
         const target = factors.find((f) => f.id === params.factorId);
         if (!target) {
           return { data: null, error: { message: 'Factor not found' } };
+        }
+        if (expectedCode && params.code !== expectedCode) {
+          return { data: null, error: { message: 'Invalid TOTP code provided' } };
         }
         target.status = 'verified';
         if (!initial.failAal2AfterRefresh) {
@@ -791,6 +806,12 @@ async function run() {
       adapter,
       calls,
       getFactors: () => factors.map((f) => ({ ...f })),
+      removeFactorExternally: (factorId: string) => {
+        factors = factors.filter((f) => f.id !== factorId);
+        if (!factors.some((f) => f.status === 'verified')) {
+          currentLevel = 'aal1';
+        }
+      },
     };
   }
 
@@ -973,6 +994,172 @@ async function run() {
     assert(
       aalFailVerify.success === false && aalFailVerify.currentLevel !== 'aal2',
       'Fails closed if post-refresh session assurance cannot be confirmed at AAL2'
+    );
+  }
+
+  // Scenario E: Fresh admin WITHOUT any factor -> QR normalization + invalid OTP rejection + AAL2 enrollment
+  {
+    const mock = createStatefulMockMfaAdapter({
+      currentLevel: 'aal1',
+      factors: [],
+      validOtpCode: '847291',
+    });
+
+    const enrollRes = await startAdminTotpEnrollment('GoAMAAS Admin Authenticator', {
+      adapter: mock.adapter,
+    });
+    assert(
+      enrollRes.status === 'enrolled' &&
+        Boolean(enrollRes.factorId) &&
+        enrollRes.secret === 'JBSWY3DPEHPK3PXP' &&
+        Boolean(enrollRes.qrCodeSvgDataUri) &&
+        enrollRes.qrCodeSvgDataUri!.startsWith('data:image/svg+xml;charset=utf-8,') &&
+        !enrollRes.qrCodeSvgDataUri!.slice('data:image/svg+xml;charset=utf-8,'.length).includes('#'),
+      'Admin without enrolled factor gets QR code (percent-encoded SVG without unescaped #) and manual setup key'
+    );
+
+    const malformedOtpRes = await verifyAdminTotpChallenge(enrollRes.factorId!, '12ab', mock.adapter);
+    assert(
+      malformedOtpRes.success === false && mock.getFactors()[0].status === 'unverified',
+      'Malformed non-6-digit OTP code is rejected before reaching Supabase Auth'
+    );
+
+    const wrongOtpRes = await verifyAdminTotpChallenge(enrollRes.factorId!, '000000', mock.adapter);
+    assert(
+      wrongOtpRes.success === false && mock.getFactors()[0].status === 'unverified',
+      'Incorrect 6-digit OTP code is rejected and leaves factor unverified at AAL1'
+    );
+
+    const goodOtpRes = await verifyAdminTotpChallenge(enrollRes.factorId!, '847291', mock.adapter);
+    const postState = await inspectAdminMfaState(mock.adapter);
+    assert(
+      goodOtpRes.success === true &&
+        goodOtpRes.currentLevel === 'aal2' &&
+        postState.isMfaEnrolled === true &&
+        postState.isMfaVerifiedForSession === true &&
+        postState.verifiedTotpFactors.length === 1 &&
+        postState.verifiedTotpFactors[0].status === 'verified',
+      'Valid 6-digit OTP completes enrollment, refreshes session, verifies factor status, and confirms AAL2'
+    );
+
+    // Calling enroll again must NOT create a duplicate factor
+    const dupAttempt = await startAdminTotpEnrollment('GoAMAAS Admin Authenticator', {
+      adapter: mock.adapter,
+    });
+    assert(
+      dupAttempt.status === 'already_verified' && mock.getFactors().length === 1,
+      'Subsequent enrollment attempt reuses verified factor and never creates duplicates'
+    );
+  }
+
+  // Scenario F: Recovery & Re-enrollment safeguards (never bypass at AAL1; safe replace at AAL2; external removal recovery)
+  {
+    const rawSample = normalizeTotpQrCodeDataUri(
+      'data:image/svg+xml;utf-8,<svg xmlns="http://www.w3.org/2000/svg"><rect fill="#000000"/></svg>'
+    );
+    assert(
+      rawSample.startsWith('data:image/svg+xml;charset=utf-8,%3Csvg') &&
+        rawSample.includes('%23000000') &&
+        !rawSample.includes('#'),
+      'normalizeTotpQrCodeDataUri percent-encodes raw GoTrue SVG # hex colors cleanly'
+    );
+
+    // AAL1 cannot auto-disable or replace an existing verified factor
+    const aal1Mock = createStatefulMockMfaAdapter({
+      currentLevel: 'aal1',
+      factors: [
+        {
+          id: 'lost-verified-factor',
+          friendly_name: 'GoAMAAS Admin Authenticator',
+          factor_type: 'totp',
+          status: 'verified',
+        },
+      ],
+    });
+    const blockedReplace = await replaceVerifiedAdminTotpFactor(
+      'lost-verified-factor',
+      'GoAMAAS Admin Authenticator',
+      { adapter: aal1Mock.adapter }
+    );
+    assert(
+      blockedReplace.status === 'error' &&
+        aal1Mock.getFactors().length === 1 &&
+        !aal1Mock.calls.some((c) => c.startsWith('unenroll:')),
+      'Verified TOTP factor cannot be unenrolled or replaced from AAL1 without verification'
+    );
+
+    // After authorized admin removes lost factor externally (e.g. Supabase Dashboard), refreshAndInspect unlocks fresh setup
+    aal1Mock.removeFactorExternally('lost-verified-factor');
+    const recoveredState = await refreshAndInspectAdminMfaState(aal1Mock.adapter);
+    assert(
+      !recoveredState.isMfaEnrolled && recoveredState.verifiedTotpFactors.length === 0,
+      'refreshAndInspectAdminMfaState detects external factor removal during recovery'
+    );
+    const reEnrollAfterRecovery = await startAdminTotpEnrollment('GoAMAAS Admin Authenticator', {
+      adapter: aal1Mock.adapter,
+    });
+    assert(
+      reEnrollAfterRecovery.status === 'enrolled' &&
+        Boolean(reEnrollAfterRecovery.qrCodeSvgDataUri) &&
+        Boolean(reEnrollAfterRecovery.secret),
+      'After lost factor removal, admin can immediately generate a fresh QR code and manual setup key'
+    );
+
+    // At AAL2, replaceVerifiedAdminTotpFactor cleanly replaces existing verified factor with a fresh QR + secret
+    const aal2Mock = createStatefulMockMfaAdapter({
+      currentLevel: 'aal2',
+      factors: [
+        {
+          id: 'active-verified-factor',
+          friendly_name: 'GoAMAAS Admin Authenticator',
+          factor_type: 'totp',
+          status: 'verified',
+        },
+      ],
+    });
+    const aal2Replace = await replaceVerifiedAdminTotpFactor(
+      'active-verified-factor',
+      'GoAMAAS Admin Authenticator',
+      { adapter: aal2Mock.adapter }
+    );
+    assert(
+      aal2Replace.status === 'enrolled' &&
+        Boolean(aal2Replace.factorId) &&
+        aal2Replace.factorId !== 'active-verified-factor' &&
+        Boolean(aal2Replace.qrCodeSvgDataUri) &&
+        Boolean(aal2Replace.secret) &&
+        aal2Mock.calls.includes('unenroll:active-verified-factor'),
+      'At AAL2, replaceVerifiedAdminTotpFactor cleanly replaces existing factor and generates new QR + secret'
+    );
+  }
+
+  // Scenario G: UI & Permanent Deletion AAL2 gate wiring assertions
+  {
+    const totpFlowSrc = fs.readFileSync('src/components/admin/AdminTotpSetupFlow.tsx', 'utf8');
+    const adminDashSrc = fs.readFileSync('src/pages/admin/AdminDashboardPage.tsx', 'utf8');
+    const adminGuardSrc = fs.readFileSync('src/components/auth/AdminProtectedRoute.tsx', 'utf8');
+
+    assert(
+      totpFlowSrc.includes('Set Up Authenticator') &&
+        totpFlowSrc.includes('Google Authenticator') &&
+        totpFlowSrc.includes('Microsoft Authenticator') &&
+        totpFlowSrc.includes('Manual Setup Key (Secret)') &&
+        totpFlowSrc.includes('Recheck Authenticator Status') &&
+        totpFlowSrc.includes('existing TOTP secrets and QR codes can never be viewed or recovered after setup'),
+      'AdminTotpSetupFlow provides QR setup, Google/Microsoft instructions, manual key, and non-bypassing recovery guidance'
+    );
+    assert(
+      adminLoginSrc.includes('AdminMfaRecoveryGuide') &&
+        adminLoginSrc.includes('AdminTotpSetupAndVerifyPanel') &&
+        adminGuardSrc.includes('AdminMfaRecoveryGuide'),
+      'Both AdminLoginPage and AdminProtectedRoute include Authenticator recovery and post-recovery enrollment wiring'
+    );
+    assert(
+      adminDashSrc.includes('requireAal2: true') &&
+        adminDashSrc.includes('isWebsitesMfaModalOpen') &&
+        adminDashSrc.includes('showInlineDeleteMfa') &&
+        adminDashSrc.includes('Set Up Authenticator'),
+      'AdminDashboardPage enforces requireAal2: true for permanent deletion/storage retry and exposes Set Up Authenticator inside Websites & Delete modal'
     );
   }
 

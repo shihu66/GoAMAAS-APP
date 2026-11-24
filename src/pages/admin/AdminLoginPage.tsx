@@ -21,6 +21,7 @@ import {
 import {
   ADMIN_DB_ROLE_MISSING_ERROR,
   AUTHORIZED_ADMIN_EMAIL,
+  AdminMfaState,
   UNIFORM_ADMIN_AUTH_ERROR,
   VerifiedAdminFactor,
   checkAdminLoginRateLimit,
@@ -30,9 +31,14 @@ import {
   isAuthorizedAdminEmail,
   recordAdminLoginFailure,
   recordAdminSessionEvent,
+  refreshAndInspectAdminMfaState,
   verifyAdminTotpChallenge,
   verifyServerAdminSession,
 } from '../../lib/adminSecurity';
+import {
+  AdminMfaRecoveryGuide,
+  AdminTotpSetupAndVerifyPanel,
+} from '../../components/admin/AdminTotpSetupFlow';
 import { notifyAdminServiceWorkerSignOut, useAdminPWA } from '../../hooks/useAdminPWA';
 import { AdminPWAInstallPrompt } from '../../components/admin/AdminPWAInstallBanner';
 import { useApp } from '../../context/AppContext';
@@ -114,6 +120,11 @@ export const AdminLoginPage: React.FC = () => {
   // MFA step-up challenge when enrolled on the verified admin account
   const [mfaChallengeFactor, setMfaChallengeFactor] = useState<VerifiedAdminFactor | null>(null);
   const [totpCode, setTotpCode] = useState('');
+  const [recoveredSetupSession, setRecoveredSetupSession] = useState<{
+    adminId: string;
+    adminName: string;
+    mfa: AdminMfaState;
+  } | null>(null);
 
   // Sync query-string error banners when redirected back to /admin/login
   useEffect(() => {
@@ -380,7 +391,7 @@ export const AdminLoginPage: React.FC = () => {
       </header>
 
       {/* Main Dedicated Sign-In Card */}
-      <main className="w-full max-w-sm mx-auto my-8 space-y-4">
+      <main className={`w-full ${recoveredSetupSession ? 'max-w-lg' : 'max-w-sm'} mx-auto my-8 space-y-4`}>
         {!isOnline && (
           <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-200 text-xs flex items-center gap-2.5">
             <WifiOff className="w-4 h-4 shrink-0" />
@@ -397,17 +408,23 @@ export const AdminLoginPage: React.FC = () => {
         <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 sm:p-8 shadow-sm space-y-6">
           <div className="space-y-1.5 text-center">
             <div className="w-11 h-11 rounded-2xl bg-blue-600 text-white flex items-center justify-center mx-auto mb-3">
-              {mfaChallengeFactor ? (
+              {mfaChallengeFactor || recoveredSetupSession ? (
                 <KeyRound className="w-5 h-5" />
               ) : (
                 <ShieldCheck className="w-5 h-5" />
               )}
             </div>
             <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-white">
-              {mfaChallengeFactor ? 'Two-Factor Verification' : 'Admin Sign In'}
+              {recoveredSetupSession
+                ? 'Set Up Authenticator'
+                : mfaChallengeFactor
+                ? 'Two-Factor Verification'
+                : 'Admin Sign In'}
             </h1>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              {mfaChallengeFactor
+              {recoveredSetupSession
+                ? 'Scan the QR code in Google Authenticator or Microsoft Authenticator to restore AAL2 protection.'
+                : mfaChallengeFactor
                 ? `Enter the 6-digit code from ${mfaChallengeFactor.friendlyName}.`
                 : 'Authorized administrators only.'}
             </p>
@@ -423,57 +440,132 @@ export const AdminLoginPage: React.FC = () => {
             </div>
           )}
 
-          {mfaChallengeFactor ? (
-            <form onSubmit={(e) => void handleTotpSubmit(e)} className="space-y-4">
-              <div>
-                <label
-                  htmlFor="login-totp-input"
-                  className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5"
-                >
-                  Authenticator Code
-                </label>
-                <input
-                  id="login-totp-input"
-                  type="text"
-                  inputMode="numeric"
-                  autoComplete="one-time-code"
-                  maxLength={6}
-                  required
-                  value={totpCode}
-                  onChange={(e) => {
-                    setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6));
-                    if (errorBanner) setErrorBanner(null);
-                  }}
-                  placeholder="000000"
-                  className="w-full min-h-[48px] px-4 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-white font-mono text-lg tracking-widest text-center tabular-nums focus:outline-hidden focus:border-blue-600"
-                />
-              </div>
-
-              <button
-                type="submit"
-                disabled={isSubmittingMfa || totpCode.length !== 6}
-                className="w-full min-h-[48px] rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold text-xs inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
-              >
-                {isSubmittingMfa && <Loader2 className="w-4 h-4 animate-spin" />}
-                <span>Verify &amp; Continue</span>
-              </button>
-
+          {recoveredSetupSession ? (
+            <div className="space-y-4">
+              <AdminTotpSetupAndVerifyPanel
+                mfa={recoveredSetupSession.mfa}
+                adminId={recoveredSetupSession.adminId}
+                adminName={recoveredSetupSession.adminName}
+                isOnline={isOnline}
+                autoStartEnroll
+                compact
+                onRefreshVerification={async () => {
+                  const res = await verifyServerAdminSession();
+                  if (res.admin) {
+                    setRecoveredSetupSession((prev) =>
+                      prev ? { ...prev, mfa: res.mfa } : null
+                    );
+                  }
+                  return res;
+                }}
+                onAal2Confirmed={async () => {
+                  const finalCheck = await verifyServerAdminSession();
+                  if (
+                    finalCheck.status === 'authorized' &&
+                    finalCheck.admin &&
+                    isAuthorizedAdminEmail(finalCheck.admin.email)
+                  ) {
+                    clearAdminLoginFailures();
+                    setAuthenticatedUser({
+                      id: finalCheck.admin.id,
+                      name: finalCheck.admin.name,
+                      email: AUTHORIZED_ADMIN_EMAIL,
+                      role: 'admin',
+                      storeId: '',
+                    });
+                    navigate(intendedDestination, { replace: true });
+                  }
+                }}
+              />
               <button
                 type="button"
-                onClick={async () => {
-                  clearAdminSessionEvents();
-                  notifyAdminServiceWorkerSignOut();
-                  await signOutFromSupabase();
-                  await logout({ silent: true });
-                  setMfaChallengeFactor(null);
-                  setTotpCode('');
-                  setErrorBanner(null);
-                }}
-                className="w-full min-h-[44px] rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-semibold text-xs cursor-pointer"
+                onClick={() => navigate(intendedDestination, { replace: true })}
+                className="w-full min-h-[42px] rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-semibold text-xs cursor-pointer"
               >
-                Cancel &amp; Sign Out
+                Continue to Admin Dashboard (Set Up Later)
               </button>
-            </form>
+            </div>
+          ) : mfaChallengeFactor ? (
+            <div className="space-y-4">
+              <form onSubmit={(e) => void handleTotpSubmit(e)} className="space-y-4">
+                <div>
+                  <label
+                    htmlFor="login-totp-input"
+                    className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5"
+                  >
+                    Authenticator Code
+                  </label>
+                  <input
+                    id="login-totp-input"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    required
+                    value={totpCode}
+                    onChange={(e) => {
+                      setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6));
+                      if (errorBanner) setErrorBanner(null);
+                    }}
+                    placeholder="000000"
+                    className="w-full min-h-[48px] px-4 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-white font-mono text-lg tracking-widest text-center tabular-nums focus:outline-hidden focus:border-blue-600"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isSubmittingMfa || totpCode.length !== 6}
+                  className="w-full min-h-[48px] rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold text-xs inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                >
+                  {isSubmittingMfa && <Loader2 className="w-4 h-4 animate-spin" />}
+                  <span>Verify &amp; Continue</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={async () => {
+                    clearAdminSessionEvents();
+                    notifyAdminServiceWorkerSignOut();
+                    await signOutFromSupabase();
+                    await logout({ silent: true });
+                    setMfaChallengeFactor(null);
+                    setTotpCode('');
+                    setErrorBanner(null);
+                  }}
+                  className="w-full min-h-[44px] rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-semibold text-xs cursor-pointer"
+                >
+                  Cancel &amp; Sign Out
+                </button>
+              </form>
+
+              <AdminMfaRecoveryGuide
+                factor={mfaChallengeFactor}
+                isOnline={isOnline}
+                onRecheckMfaStatus={async () => {
+                  await refreshAndInspectAdminMfaState();
+                  const recheck = await verifyServerAdminSession();
+                  if (
+                    recheck.status === 'authorized' &&
+                    recheck.admin &&
+                    isAuthorizedAdminEmail(recheck.admin.email) &&
+                    !recheck.mfa.isMfaEnrolled
+                  ) {
+                    setErrorBanner(null);
+                    setMfaChallengeFactor(null);
+                    setRecoveredSetupSession({
+                      adminId: recheck.admin.id,
+                      adminName: recheck.admin.name,
+                      mfa: recheck.mfa,
+                    });
+                    return { removed: true };
+                  }
+                  if (recheck.mfa.verifiedTotpFactors[0]) {
+                    setMfaChallengeFactor(recheck.mfa.verifiedTotpFactors[0]);
+                  }
+                  return { removed: false };
+                }}
+              />
+            </div>
           ) : (
             <div className="space-y-3">
               <button
