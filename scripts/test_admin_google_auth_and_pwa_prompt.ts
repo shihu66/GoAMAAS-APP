@@ -115,8 +115,8 @@ async function run() {
     'isAuthorizedAdminEmail rejects aliases, other amaas.xyz addresses, and arbitrary Gmail accounts'
   );
 
-  // Authorized Google account WITH legitimate database admin authorization -> authorized
-  const authorizedRes = await verifyServerAdminSession({
+  // Authorized Google account WITHOUT verified factor -> mfa_setup_required
+  const missingFactorRes = await verifyServerAdminSession({
     isConfigured: true,
     getAuthUser: async () => ({
       user: {
@@ -141,10 +141,49 @@ async function run() {
     fetchMfaState: async () => DEFAULT_MFA_STATE,
   });
   assert(
+    missingFactorRes.status === 'mfa_setup_required',
+    'Authorized Google account without enrolled TOTP factor returns mfa_setup_required'
+  );
+
+  // Authorized Google account WITH AAL2 verified factor -> authorized
+  const authorizedRes = await verifyServerAdminSession({
+    isConfigured: true,
+    getAuthUser: async () => ({
+      user: {
+        id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        email: '  Official.AMAAS.Dev@Gmail.com ',
+        email_confirmed_at: '2026-10-01T00:00:00Z',
+        user_metadata: { email_verified: true, full_name: 'AMAAS Official Admin' },
+      },
+      error: null,
+    }),
+    checkIsAdminRpc: async () => ({ data: true, error: null }),
+    fetchProfile: async () => ({
+      profile: {
+        id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        email: 'official.amaas.dev@gmail.com',
+        full_name: 'AMAAS Official Admin',
+        role: 'admin',
+        onboarding_completed: true,
+      },
+      error: null,
+    }),
+    fetchMfaState: async () => ({
+      currentLevel: 'aal2',
+      nextLevel: 'aal2',
+      verifiedTotpFactors: [
+        { id: 'factor-1', friendlyName: 'Admin Authenticator', factorType: 'totp', status: 'verified' },
+      ],
+      unverifiedTotpFactors: [],
+      isMfaEnrolled: true,
+      isMfaVerifiedForSession: true,
+    }),
+  });
+  assert(
     authorizedRes.status === 'authorized' &&
       authorizedRes.admin?.email === 'official.amaas.dev@gmail.com' &&
       authorizedRes.admin?.role === 'admin',
-    'Authorized Google account completes login when verified email AND DB is_admin() + profile.role === admin succeed'
+    'Authorized Google account completes login when verified email, DB is_admin() + profile.role === admin, and AAL2 verified factor succeed'
   );
 
   // Authorized email WITHOUT database admin role -> MUST BE DENIED (never auto-promoted!)

@@ -5,6 +5,7 @@ export const AUTHORIZED_ADMIN_EMAIL = 'official.amaas.dev@gmail.com';
 export type AdminAuthStatus =
   | 'authorized'
   | 'mfa_required'
+  | 'mfa_setup_required'
   | 'unauthenticated'
   | 'forbidden'
   | 'unconfigured'
@@ -722,12 +723,40 @@ export async function verifyServerAdminSession(
       role: 'admin',
     };
 
-    // 4. Enforce mandatory TOTP step-up whenever the admin has an enrolled verified TOTP factor
-    if (
-      mfaState.isMfaEnrolled &&
-      mfaState.nextLevel === 'aal2' &&
-      mfaState.currentLevel !== 'aal2'
-    ) {
+    // 4. Enforce mandatory TOTP MFA enrollment and AAL2 verification (zero AAL1 admin access)
+    if (mfaState.inspectionError) {
+      if (isLikelyNetworkFailure(mfaState.inspectionError)) {
+        logSanitizedAdminDiagnostic('network_error:mfa_inspection');
+        return {
+          status: 'network_error',
+          admin: null,
+          mfa: mfaState,
+          message:
+            'Unable to verify multi-factor authentication state due to a network interruption.',
+        };
+      }
+      logSanitizedAdminDiagnostic('mfa_setup_required:inspection_error');
+      return {
+        status: 'mfa_setup_required',
+        admin: verifiedAdmin,
+        mfa: mfaState,
+        message:
+          mfaState.inspectionError ||
+          'Authenticator verification is required before accessing GoAMAAS Admin.',
+      };
+    }
+
+    if (!mfaState.isMfaEnrolled || mfaState.verifiedTotpFactors.length === 0) {
+      return {
+        status: 'mfa_setup_required',
+        admin: verifiedAdmin,
+        mfa: mfaState,
+        message:
+          'Set up your authenticator app (TOTP AAL2) to unlock GoAMAAS Admin.',
+      };
+    }
+
+    if (mfaState.currentLevel !== 'aal2' || !mfaState.isMfaVerifiedForSession) {
       return {
         status: 'mfa_required',
         admin: verifiedAdmin,
@@ -794,14 +823,23 @@ export async function revalidateAdminBeforeAction(params: {
     !verification.admin ||
     !isAuthorizedAdminEmail(verification.admin.email)
   ) {
+    const mfaRequirement: 'mfa_setup_required' | 'mfa_aal2_required' | undefined =
+      verification.status === 'mfa_setup_required'
+        ? 'mfa_setup_required'
+        : verification.status === 'mfa_required'
+          ? 'mfa_aal2_required'
+          : undefined;
+
     const errorMessage =
-      verification.status === 'mfa_required'
-        ? 'Multi-factor step-up verification (AAL2) is required before executing this action.'
-        : verification.status === 'forbidden'
-        ? UNIFORM_ADMIN_AUTH_ERROR
-        : verification.status === 'network_error'
-        ? 'Unable to verify your administrator session due to a network error. Please retry.'
-        : 'Your administrator session has expired. Please sign in again.';
+      verification.status === 'mfa_setup_required'
+        ? 'Authenticator setup (TOTP AAL2) is required before executing this action.'
+        : verification.status === 'mfa_required'
+          ? 'Multi-factor step-up verification (AAL2) is required before executing this action.'
+          : verification.status === 'forbidden'
+            ? UNIFORM_ADMIN_AUTH_ERROR
+            : verification.status === 'network_error'
+              ? 'Unable to verify your administrator session due to a network error. Please retry.'
+              : 'Your administrator session has expired. Please sign in again.';
 
     recordAdminSessionEvent({
       adminId: verification.admin?.id || 'unverified',
@@ -816,14 +854,13 @@ export async function revalidateAdminBeforeAction(params: {
       allowed: false,
       verification,
       errorMessage,
-      ...(verification.status === 'mfa_required'
-        ? { mfaRequirement: 'mfa_aal2_required' as const }
-        : {}),
+      ...(mfaRequirement ? { mfaRequirement } : {}),
     };
   }
 
-  if (params.requireAal2) {
-    if (!verification.mfa.isMfaEnrolled) {
+  const requireAal2 = params.requireAal2 !== false;
+  if (requireAal2) {
+    if (!verification.mfa.isMfaEnrolled || verification.mfa.verifiedTotpFactors.length === 0) {
       const errorMessage =
         'Authenticator setup (TOTP AAL2) is required before executing this action.';
       recordAdminSessionEvent({
@@ -841,7 +878,10 @@ export async function revalidateAdminBeforeAction(params: {
         mfaRequirement: 'mfa_setup_required',
       };
     }
-    if (verification.mfa.currentLevel !== 'aal2') {
+    if (
+      verification.mfa.currentLevel !== 'aal2' ||
+      !verification.mfa.isMfaVerifiedForSession
+    ) {
       const errorMessage =
         'Verified 6-digit authenticator verification (AAL2) is required before executing this action.';
       recordAdminSessionEvent({
@@ -1170,7 +1210,31 @@ export async function unenrollAdminTotpFactor(
     return { success: false, error: 'Supabase authentication is not configured.' };
   }
 
-  const { error } = await adapter.unenroll({ factorId });
+  const cleanFactorId = (factorId || '').trim();
+  if (!cleanFactorId) {
+    return { success: false, error: 'Missing authenticator factor ID.' };
+  }
+
+  const mfaState = await inspectAdminMfaState(adapter);
+  if (mfaState.inspectionError) {
+    return { success: false, error: mfaState.inspectionError };
+  }
+
+  const targetFactor = (mfaState.allFactors || []).find((f) => f.id === cleanFactorId);
+  const isKnownUnverifiedPending = mfaState.unverifiedTotpFactors.some(
+    (f) => f.id === cleanFactorId
+  );
+
+  // Never permit deleting a verified (or unrecognized) factor without an active AAL2 session
+  if ((!isKnownUnverifiedPending || targetFactor?.status === 'verified') && mfaState.currentLevel !== 'aal2') {
+    return {
+      success: false,
+      error:
+        'A verified AAL2 authenticator session is required before removing an active authenticator factor.',
+    };
+  }
+
+  const { error } = await adapter.unenroll({ factorId: cleanFactorId });
   if (error) {
     return { success: false, error: error.message || 'Failed to remove authenticator factor.' };
   }
