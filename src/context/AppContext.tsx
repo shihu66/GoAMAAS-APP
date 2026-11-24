@@ -31,6 +31,9 @@ import {
   ServicePricingCatalogEntry,
   WebsiteLifecycleAuditLog,
   ApproveAndPublishResult,
+  AdminWebsiteDeleteResult,
+  AdminStorageCleanupRetryResult,
+  WebsiteStorageCleanupJob,
 } from '../types';
 import {
   INITIAL_STORES,
@@ -112,6 +115,8 @@ import {
   cancelClientWebsiteSubscriptionInDb,
   adminUpdateWebsiteLifecycleInDb,
   adminDeleteSubscribedWebsiteInDb,
+  adminRetryWebsiteStorageCleanupInDb,
+  fetchPendingWebsiteStorageCleanupsFromDb,
   fetchUserStoresFromDb,
   createStoreInDb,
   updateStoreInDb,
@@ -347,7 +352,10 @@ interface AppContextType {
   adminDeleteSubscribedWebsite: (
     id: string,
     confirm?: { confirmSubdomain?: string; explicitConfirmed?: boolean; reason?: string }
-  ) => Promise<{ success: boolean; message: string }>;
+  ) => Promise<AdminWebsiteDeleteResult>;
+  pendingStorageCleanups: WebsiteStorageCleanupJob[];
+  refreshPendingStorageCleanups: () => Promise<void>;
+  retryWebsiteStorageCleanup: (websiteId: string) => Promise<AdminStorageCleanupRetryResult>;
   websiteLifecycleAuditLogs: WebsiteLifecycleAuditLog[];
   refreshWebsiteLifecycleAuditLogs: () => Promise<void>;
   servicePricingCatalog: ServicePricingCatalogEntry[];
@@ -733,6 +741,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setPaymentRequests([]);
       setServiceTrials([]);
       setWebsiteLifecycleAuditLogs([]);
+      setPendingStorageCleanups([]);
       setServicePricingCatalog([]);
       setIsPricingCatalogLoaded(false);
       setIsPricingCatalogLoading(false);
@@ -3729,6 +3738,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [isPricingCatalogLoaded, setIsPricingCatalogLoaded] = useState<boolean>(() => !isSupabaseConfigured);
   const [pricingCatalogError, setPricingCatalogError] = useState<string | null>(null);
   const [websiteLifecycleAuditLogs, setWebsiteLifecycleAuditLogs] = useState<WebsiteLifecycleAuditLog[]>([]);
+  const [pendingStorageCleanups, setPendingStorageCleanups] = useState<WebsiteStorageCleanupJob[]>([]);
+  const inFlightWebsiteDeletionIdsRef = useRef<Set<string>>(new Set());
 
   const refreshServicePricingCatalog = useCallback(async (): Promise<ServicePricingCatalogEntry[] | null> => {
     if (!isSupabaseConfigured || !supabase) {
@@ -3779,13 +3790,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [user?.id, user?.role, role]);
 
+  const refreshPendingStorageCleanups = useCallback(async () => {
+    if (!isSupabaseConfigured || !supabase || !user?.id || role !== 'admin' || user.role !== 'admin') {
+      setPendingStorageCleanups([]);
+      return;
+    }
+    const { data, error } = await fetchPendingWebsiteStorageCleanupsFromDb();
+    if (!error && Array.isArray(data)) {
+      setPendingStorageCleanups(data);
+    }
+  }, [user?.id, user?.role, role]);
+
   useEffect(() => {
     if (isSupabaseConfigured && user?.id && role === 'admin' && user.role === 'admin') {
       void refreshWebsiteLifecycleAuditLogs();
+      void refreshPendingStorageCleanups();
     } else if (isSupabaseConfigured) {
       setWebsiteLifecycleAuditLogs([]);
+      setPendingStorageCleanups([]);
     }
-  }, [user?.id, user?.role, role, refreshWebsiteLifecycleAuditLogs]);
+  }, [user?.id, user?.role, role, refreshWebsiteLifecycleAuditLogs, refreshPendingStorageCleanups]);
 
   const renewSubscribedWebsite = async (
     id: string,
@@ -3973,13 +3997,59 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { success: true, message: msg };
   };
 
+  const retryWebsiteStorageCleanup = async (
+    websiteId: string
+  ): Promise<AdminStorageCleanupRetryResult> => {
+    if (role !== 'admin' || (isSupabaseConfigured && user?.role !== 'admin')) {
+      const msg = 'Unauthorized: Only verified administrators can retry storage cleanup.';
+      showToast(msg, 'error');
+      return { success: false, message: msg };
+    }
+    if (!isSupabaseConfigured) {
+      const msg = 'No remote storage cleanup queue exists in offline demo mode.';
+      showToast(msg, 'info');
+      return {
+        success: true,
+        message: msg,
+        websiteId,
+        cleanupStatus: 'not_applicable',
+        deletedStorageObjects: 0,
+      };
+    }
+
+    const res = await adminRetryWebsiteStorageCleanupInDb(websiteId);
+    await Promise.all([refreshPendingStorageCleanups(), refreshWebsiteLifecycleAuditLogs()]);
+
+    if (!res.success) {
+      const msg = res.message || res.error?.message || 'Storage cleanup retry failed.';
+      showToast(msg, 'error');
+      return {
+        ...res,
+        success: false,
+        message: msg,
+      };
+    }
+
+    if (res.cleanupStatus === 'partial_failed' || res.cleanupStatus === 'skipped') {
+      showToast(res.storageCleanupWarning || res.message, 'warning');
+    } else {
+      showToast(res.message || 'Storage asset cleanup completed.', 'success');
+    }
+    return res;
+  };
+
   const adminDeleteSubscribedWebsite = async (
     id: string,
     confirm?: { confirmSubdomain?: string; explicitConfirmed?: boolean; reason?: string }
-  ): Promise<{ success: boolean; message: string }> => {
+  ): Promise<AdminWebsiteDeleteResult> => {
     if (role !== 'admin' || (isSupabaseConfigured && user?.role !== 'admin')) {
       const msg = 'Unauthorized: Only verified administrators can delete websites.';
       showToast(msg, 'error');
+      return { success: false, message: msg };
+    }
+
+    if (inFlightWebsiteDeletionIdsRef.current.has(id)) {
+      const msg = 'Permanent deletion for this website is already in progress.';
       return { success: false, message: msg };
     }
 
@@ -3990,148 +4060,190 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ...(confirm?.reason ? { reason: confirm.reason } : {}),
     };
 
-    if (isSupabaseConfigured) {
-      const res = await adminDeleteSubscribedWebsiteInDb(id, effectiveConfirm);
-      if (!res.success) {
-        const msg = res.message || res.error?.message || 'Failed to permanently delete website';
-        showToast(msg, 'error');
-        return { success: false, message: msg };
-      }
+    inFlightWebsiteDeletionIdsRef.current.add(id);
+    try {
+      if (isSupabaseConfigured) {
+        const res = await adminDeleteSubscribedWebsiteInDb(id, effectiveConfirm);
+        if (!res.success) {
+          const msg = res.message || res.error?.message || 'Failed to permanently delete website';
+          showToast(msg, 'error');
+          return {
+            ...res,
+            success: false,
+            message: msg,
+          };
+        }
 
-      const deletedStoreId = res.deletedStoreId || null;
-      const isSharedStore = res.isSharedStore === true;
-      setSubscribedWebsites((prev) => prev.filter((w) => w.id !== id));
-
-      if (isSharedStore) {
-        setProducts((prev) =>
-          prev.map((p) => (p.websiteId === id ? { ...p, websiteId: undefined } : p))
+        const deletedStoreId = res.deletedStoreId || null;
+        const hasServerDeletedProdList = Array.isArray(res.deletedProductIds);
+        const deletedProdIdSet = new Set(
+          hasServerDeletedProdList
+            ? res.deletedProductIds!
+            : products
+                .filter(
+                  (p) =>
+                    (deletedStoreId !== null && p.storeId === deletedStoreId) ||
+                    (p.websiteId === id && res.isSharedStore !== true && res.storePreserved !== true)
+                )
+                .map((p) => p.id)
         );
-      } else {
-        const deletedProdIds = new Set(
-          products
-            .filter(
-              (p) =>
-                p.websiteId === id ||
-                (deletedStoreId !== null && p.storeId === deletedStoreId)
-            )
-            .map((p) => p.id)
+        const preservedSharedSet = new Set(
+          Array.isArray(res.preservedSharedProductIds) ? res.preservedSharedProductIds : []
         );
-        setProducts((prev) => prev.filter((p) => !deletedProdIds.has(p.id)));
 
-        if (deletedStoreId) {
+        setSubscribedWebsites((prev) => prev.filter((w) => w.id !== id));
+
+        if (deletedStoreId !== null) {
+          setProducts((prev) =>
+            prev.filter((p) => p.storeId !== deletedStoreId && !deletedProdIdSet.has(p.id))
+          );
           setStores((prev) => prev.filter((s) => s.id !== deletedStoreId));
           setOrders((prev) => prev.filter((o) => o.storeId !== deletedStoreId));
           setCustomers((prev) => prev.filter((c) => c.storeId !== deletedStoreId));
           setInventoryLogs((prev) =>
-            prev.filter((l) => l.storeId !== deletedStoreId && !deletedProdIds.has(l.productId))
+            prev.filter((l) => l.storeId !== deletedStoreId && !deletedProdIdSet.has(l.productId))
           );
           if (activeStoreId === deletedStoreId) {
             setTeamMembers([]);
             setActiveStoreIdState('');
           }
-        } else if (deletedProdIds.size > 0) {
-          setInventoryLogs((prev) => prev.filter((l) => !deletedProdIds.has(l.productId)));
+        } else {
+          setProducts((prev) =>
+            prev
+              .filter((p) => !deletedProdIdSet.has(p.id))
+              .map((p) =>
+                p.websiteId === id || preservedSharedSet.has(p.id)
+                  ? { ...p, websiteId: undefined }
+                  : p
+              )
+          );
+          if (deletedProdIdSet.size > 0) {
+            setInventoryLogs((prev) => prev.filter((l) => !deletedProdIdSet.has(l.productId)));
+          }
         }
+
+        await Promise.all([
+          refreshSubscribedWebsites(),
+          refreshWebsiteLifecycleAuditLogs(),
+          refreshPendingStorageCleanups(),
+        ]);
+        const baseOkMsg =
+          res.message ||
+          'Website and all exclusively associated store data were permanently deleted.';
+        const okMsg = res.storageCleanupWarning
+          ? `${baseOkMsg} Warning: ${res.storageCleanupWarning}`
+          : baseOkMsg;
+        showToast(okMsg, res.storageCleanupWarning ? 'warning' : 'info');
+        return {
+          ...res,
+          success: true,
+          message: okMsg,
+        };
       }
 
-      await Promise.all([refreshSubscribedWebsites(), refreshWebsiteLifecycleAuditLogs()]);
-      const baseOkMsg =
-        res.message ||
-        'Website and all exclusively associated store data were permanently deleted.';
-      const okMsg = res.storageCleanupWarning
-        ? `${baseOkMsg} Warning: ${res.storageCleanupWarning}`
-        : baseOkMsg;
-      showToast(okMsg, res.storageCleanupWarning ? 'error' : 'info');
-      return { success: true, message: okMsg };
-    }
-
-    if (!targetSite) {
-      const msg = 'Website record not found or already deleted.';
-      showToast(msg, 'error');
-      return { success: false, message: msg };
-    }
-
-    if (
-      !effectiveConfirm.explicitConfirmed ||
-      !effectiveConfirm.confirmSubdomain.trim() ||
-      (effectiveConfirm.confirmSubdomain.trim().toLowerCase() !== targetSite.subdomain.toLowerCase() &&
-        effectiveConfirm.confirmSubdomain.trim().toLowerCase() !== targetSite.fullDomainUrl.toLowerCase())
-    ) {
-      const msg = 'Subdomain confirmation mismatch or missing explicit confirmation.';
-      showToast(msg, 'error');
-      return { success: false, message: msg };
-    }
-
-    const otherSites = subscribedWebsites.filter((w) => w.id !== id);
-    let exclusiveStoreId: string | null = null;
-    if (targetSite.storeId) {
-      const sharedBySibling = otherSites.some((w) => w.storeId === targetSite.storeId);
-      if (!sharedBySibling) {
-        exclusiveStoreId = targetSite.storeId;
+      if (!targetSite) {
+        const msg = 'Website record not found or already deleted.';
+        showToast(msg, 'error');
+        return { success: false, message: msg };
       }
-    } else if (
-      otherSites.filter((w) => w.userId === targetSite.userId).length === 0 &&
-      stores.length === 1
-    ) {
-      exclusiveStoreId = stores[0].id;
-    }
 
-    const deletedProdIds = new Set(
-      products
-        .filter(
-          (p) =>
-            p.websiteId === id ||
-            (exclusiveStoreId !== null && p.storeId === exclusiveStoreId)
-        )
-        .map((p) => p.id)
-    );
+      if (
+        !effectiveConfirm.explicitConfirmed ||
+        !effectiveConfirm.confirmSubdomain.trim() ||
+        (effectiveConfirm.confirmSubdomain.trim().toLowerCase() !== targetSite.subdomain.toLowerCase() &&
+          effectiveConfirm.confirmSubdomain.trim().toLowerCase() !== targetSite.fullDomainUrl.toLowerCase())
+      ) {
+        const msg = 'Subdomain confirmation mismatch or missing explicit confirmation.';
+        showToast(msg, 'error');
+        return { success: false, message: msg };
+      }
 
-    setSubscribedWebsites((prev) => prev.filter((w) => w.id !== id));
-    setProducts((prev) => prev.filter((p) => !deletedProdIds.has(p.id)));
-    if (exclusiveStoreId) {
-      setStores((prev) => prev.filter((s) => s.id !== exclusiveStoreId));
-      setOrders((prev) => prev.filter((o) => o.storeId !== exclusiveStoreId));
-      setCustomers((prev) => prev.filter((c) => c.storeId !== exclusiveStoreId));
-      setInventoryLogs((prev) =>
-        prev.filter((l) => l.storeId !== exclusiveStoreId && !deletedProdIds.has(l.productId))
+      const otherSites = subscribedWebsites.filter((w) => w.id !== id);
+      let exclusiveStoreId: string | null = null;
+      let isSharedStore = false;
+      if (targetSite.storeId) {
+        const sharedBySibling = otherSites.some((w) => w.storeId === targetSite.storeId);
+        if (!sharedBySibling) {
+          exclusiveStoreId = targetSite.storeId;
+        } else {
+          isSharedStore = true;
+        }
+      } else if (
+        otherSites.filter((w) => w.userId === targetSite.userId).length === 0 &&
+        stores.length === 1
+      ) {
+        exclusiveStoreId = stores[0].id;
+      }
+
+      const deletedProdIds = new Set(
+        products
+          .filter(
+            (p) =>
+              p.websiteId === id ||
+              (exclusiveStoreId !== null && p.storeId === exclusiveStoreId)
+          )
+          .map((p) => p.id)
       );
-      if (activeStoreId === exclusiveStoreId) {
-        setTeamMembers([]);
-        setActiveStoreIdState('');
+
+      setSubscribedWebsites((prev) => prev.filter((w) => w.id !== id));
+      setProducts((prev) => prev.filter((p) => !deletedProdIds.has(p.id)));
+      if (exclusiveStoreId) {
+        setStores((prev) => prev.filter((s) => s.id !== exclusiveStoreId));
+        setOrders((prev) => prev.filter((o) => o.storeId !== exclusiveStoreId));
+        setCustomers((prev) => prev.filter((c) => c.storeId !== exclusiveStoreId));
+        setInventoryLogs((prev) =>
+          prev.filter((l) => l.storeId !== exclusiveStoreId && !deletedProdIds.has(l.productId))
+        );
+        if (activeStoreId === exclusiveStoreId) {
+          setTeamMembers([]);
+          setActiveStoreIdState('');
+        }
+      } else if (deletedProdIds.size > 0) {
+        setInventoryLogs((prev) => prev.filter((l) => !deletedProdIds.has(l.productId)));
       }
-    } else if (deletedProdIds.size > 0) {
-      setInventoryLogs((prev) => prev.filter((l) => !deletedProdIds.has(l.productId)));
+
+      setWebsiteLifecycleAuditLogs((prev) => [
+        {
+          id: `audit-${Date.now()}`,
+          websiteId: id,
+          adminId: user?.id || 'admin',
+          action: 'delete',
+          reason:
+            effectiveConfirm.reason ||
+            'Permanent admin deletion of website and exclusively associated store data',
+          previousStatus: targetSite.subscriptionStatus,
+          newStatus: 'deleted',
+          previousDeploymentStatus: targetSite.deploymentStatus,
+          newDeploymentStatus: 'deleted',
+          paymentStatusSnapshot: targetSite.paymentStatus,
+          previousPeriodEnd: targetSite.currentPeriodEnd || null,
+          newPeriodEnd: null,
+          createdAt: new Date().toISOString(),
+        },
+        ...prev,
+      ]);
+
+      showToast(
+        'Website and all exclusively associated store, product, inventory, customer, and order data deleted permanently.',
+        'info'
+      );
+      return {
+        success: true,
+        message: 'Website and exclusively associated store data permanently deleted.',
+        deletedStoreId: exclusiveStoreId,
+        preservedStoreId: isSharedStore ? targetSite.storeId || null : null,
+        isSharedStore,
+        storePreserved: isSharedStore,
+        deletedStorageObjects: 0,
+        storageCleanupStatus: 'not_applicable',
+        deletedProductIds: Array.from(deletedProdIds),
+        deletedCounts: {
+          products: deletedProdIds.size,
+        },
+      };
+    } finally {
+      inFlightWebsiteDeletionIdsRef.current.delete(id);
     }
-
-    setWebsiteLifecycleAuditLogs((prev) => [
-      {
-        id: `audit-${Date.now()}`,
-        websiteId: id,
-        adminId: user?.id || 'admin',
-        action: 'delete',
-        reason:
-          effectiveConfirm.reason ||
-          'Permanent admin deletion of website and exclusively associated store data',
-        previousStatus: targetSite.subscriptionStatus,
-        newStatus: 'deleted',
-        previousDeploymentStatus: targetSite.deploymentStatus,
-        newDeploymentStatus: 'deleted',
-        paymentStatusSnapshot: targetSite.paymentStatus,
-        previousPeriodEnd: targetSite.currentPeriodEnd || null,
-        newPeriodEnd: null,
-        createdAt: new Date().toISOString(),
-      },
-      ...prev,
-    ]);
-
-    showToast(
-      'Website and all exclusively associated store, product, inventory, customer, and order data deleted permanently.',
-      'info'
-    );
-    return {
-      success: true,
-      message: 'Website and exclusively associated store data permanently deleted.',
-    };
   };
 
   const requestWebsiteContentUpdate = (websiteId: string, details: string) => {
@@ -6590,6 +6702,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         suspendSubscribedWebsite,
         reactivateSubscribedWebsite,
         adminDeleteSubscribedWebsite,
+        pendingStorageCleanups,
+        refreshPendingStorageCleanups,
+        retryWebsiteStorageCleanup,
         websiteLifecycleAuditLogs,
         refreshWebsiteLifecycleAuditLogs,
         servicePricingCatalog,

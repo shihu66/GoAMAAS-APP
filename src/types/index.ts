@@ -754,6 +754,74 @@ export interface AdminPaymentApprovalRpcResult {
   error: Error | null;
 }
 
+export interface AdminWebsiteDeleteResult {
+  success: boolean;
+  message: string;
+  code?: string;
+  deletedWebsiteId?: string;
+  deletedStoreId?: string | null;
+  preservedStoreId?: string | null;
+  isSharedStore?: boolean;
+  storePreserved?: boolean;
+  storePreservationReasons?: string[];
+  deletedProductIds?: string[];
+  preservedSharedProductIds?: string[];
+  deletedCounts?: {
+    products?: number;
+    inventoryMovements?: number;
+    customers?: number;
+    orders?: number;
+    storeMembers?: number;
+  };
+  deletedStorageObjects?: number;
+  storageCleanupStatus?: string;
+  manualReviewRequired?: boolean;
+  manualReviewAssetPaths?: string[];
+  preservedReferencedAssetPaths?: string[];
+  failedStoragePaths?: string[];
+  concurrentReferenceConflicts?: string[];
+  storageCleanupSkipped?: boolean;
+  storageCleanupWarning?: string;
+  auditLogId?: string;
+}
+
+export interface AdminStorageCleanupRetryResult {
+  success: boolean;
+  message: string;
+  code?: string;
+  idempotent?: boolean;
+  websiteId?: string;
+  cleanupStatus?: string;
+  deletedStorageObjects?: number;
+  failedStoragePaths?: string[];
+  manualReviewRequired?: boolean;
+  manualReviewAssetPaths?: string[];
+  preservedReferencedAssetPaths?: string[];
+  concurrentReferenceConflicts?: string[];
+  storageCleanupWarning?: string;
+}
+
+export interface WebsiteStorageCleanupJob {
+  id: string;
+  websiteId: string;
+  ownerUserId: string;
+  deletedStoreId?: string | null;
+  preservedStoreId?: string | null;
+  isSharedStore: boolean;
+  storePreserved: boolean;
+  subdomain: string;
+  businessName?: string | null;
+  cleanupStatus: 'pending' | 'partial_failed' | 'manual_review_required' | 'completed' | 'skipped';
+  deletedObjectsCount: number;
+  attemptCount: number;
+  failedObjectPaths: string[];
+  manualReviewPaths: string[];
+  manualReviewRequired: boolean;
+  lastError?: string | null;
+  lastAttemptAt?: string | null;
+  createdAt: string;
+}
+
 export interface ApproveAndPublishResult {
   success: boolean;
   paymentApproved: boolean;

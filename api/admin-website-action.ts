@@ -5,7 +5,7 @@ interface RequestWithBody extends IncomingMessage {
   url?: string;
 }
 
-type AdminWebsiteAction = 'suspend' | 'reactivate' | 'renew' | 'delete';
+type AdminWebsiteAction = 'suspend' | 'reactivate' | 'renew' | 'delete' | 'retry_storage_cleanup';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const AUTHORIZED_ADMIN_EMAIL = 'official.amaas.dev@gmail.com';
@@ -250,7 +250,26 @@ const WEBSITE_ASSETS_BUCKET = 'website-assets';
 function extractWebsiteAssetPath(rawUrl: unknown): string | null {
   if (typeof rawUrl !== 'string') return null;
   const trimmed = rawUrl.trim();
-  if (!trimmed || trimmed.startsWith('data:') || trimmed.startsWith('blob:')) return null;
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith('data:') || lower.startsWith('blob:')) return null;
+
+  const normalizeRel = (relRaw: string): string | null => {
+    let decoded = relRaw;
+    try {
+      decoded = decodeURIComponent(relRaw);
+    } catch {
+      decoded = relRaw.replace(/%20/g, ' ').replace(/%2[fF]/g, '/');
+    }
+    const clean = decoded.replace(/^\/+/, '').trim();
+    if (!clean || clean.includes('..') || clean.includes('\\') || clean.includes('\0')) return null;
+    return clean;
+  };
+
+  if (lower.startsWith(`${WEBSITE_ASSETS_BUCKET}/`)) {
+    return normalizeRel(trimmed.slice(WEBSITE_ASSETS_BUCKET.length + 1).replace(/[?#].*$/, ''));
+  }
+
   try {
     const parsed = new URL(trimmed);
     const markers = [
@@ -260,52 +279,106 @@ function extractWebsiteAssetPath(rawUrl: unknown): string | null {
       `/storage/v1/object/${WEBSITE_ASSETS_BUCKET}/`,
     ];
     for (const marker of markers) {
-      const idx = parsed.pathname.indexOf(marker);
+      const idx = parsed.pathname.toLowerCase().indexOf(marker);
       if (idx !== -1) {
-        const relRaw = parsed.pathname.slice(idx + marker.length);
-        const decoded = decodeURIComponent(relRaw).replace(/^\/+/, '');
-        if (!decoded || decoded.includes('..') || decoded.includes('\0')) return null;
-        return decoded;
+        return normalizeRel(parsed.pathname.slice(idx + marker.length));
       }
     }
     return null;
   } catch {
+    const match = trimmed.match(
+      /\/storage\/v1\/object\/(?:public\/|sign\/|authenticated\/)?website-assets\/([^?#]+)/i
+    );
+    if (match?.[1]) {
+      return normalizeRel(match[1]);
+    }
     return null;
   }
 }
 
-function collectConfigAssetPaths(config: unknown, targetSet: Set<string>) {
-  if (!config || typeof config !== 'object') return;
-  const cfg = config as Record<string, unknown>;
-  const directKeys = ['logoUrl', 'heroImageUrl', 'bannerImageUrl'];
-  for (const key of directKeys) {
-    const p = extractWebsiteAssetPath(cfg[key]);
-    if (p) targetSet.add(p);
-  }
-  const sections = Array.isArray(cfg.sections) ? cfg.sections : [];
-  for (const sec of sections) {
-    if (sec && typeof sec === 'object') {
-      const p = extractWebsiteAssetPath((sec as Record<string, unknown>).imageUrl);
-      if (p) targetSet.add(p);
+function isSupabaseStorageUrlOrPath(rawUrl: unknown): boolean {
+  if (typeof rawUrl !== 'string') return false;
+  const lower = rawUrl.trim().toLowerCase();
+  if (!lower || lower.startsWith('data:') || lower.startsWith('blob:')) return false;
+  return lower.includes('/storage/v1/object/') || lower.startsWith(`${WEBSITE_ASSETS_BUCKET}/`);
+}
+
+function collectJsonbAssetPaths(
+  node: unknown,
+  targetSet: Set<string>,
+  uncertainSet?: Set<string>,
+  depth = 0,
+  budget = { visited: 0 }
+) {
+  if (node === null || node === undefined || depth > 12 || budget.visited > 10000) return;
+  budget.visited += 1;
+
+  if (typeof node === 'string') {
+    const p = extractWebsiteAssetPath(node);
+    if (p) {
+      targetSet.add(p);
+    } else if (uncertainSet && isSupabaseStorageUrlOrPath(node)) {
+      uncertainSet.add(node.trim());
     }
+    return;
   }
-  const items = Array.isArray(cfg.servicesOrProducts) ? cfg.servicesOrProducts : [];
-  for (const it of items) {
-    if (it && typeof it === 'object') {
-      const p = extractWebsiteAssetPath((it as Record<string, unknown>).imageUrl);
-      if (p) targetSet.add(p);
+
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      collectJsonbAssetPaths(item, targetSet, uncertainSet, depth + 1, budget);
+      if (budget.visited > 10000) break;
     }
+    return;
   }
-  if (cfg.draft && typeof cfg.draft === 'object') {
-    collectConfigAssetPaths(cfg.draft, targetSet);
+
+  if (typeof node === 'object') {
+    for (const val of Object.values(node as Record<string, unknown>)) {
+      collectJsonbAssetPaths(val, targetSet, uncertainSet, depth + 1, budget);
+      if (budget.visited > 10000) break;
+    }
   }
 }
 
 function isSafeOwnedScopePath(candidate: string, ownerUserId: string, scopeId: string): boolean {
   if (!candidate || !UUID_REGEX.test(ownerUserId) || !UUID_REGEX.test(scopeId)) return false;
-  if (candidate.includes('..') || candidate.includes('\0') || candidate.startsWith('/')) return false;
+  if (
+    candidate.includes('..') ||
+    candidate.includes('\\') ||
+    candidate.includes('\0') ||
+    candidate.startsWith('/')
+  ) {
+    return false;
+  }
   const expectedPrefix = `${ownerUserId.toLowerCase()}/${scopeId.toLowerCase()}/`;
   return candidate.toLowerCase().startsWith(expectedPrefix);
+}
+
+async function fetchJsonAllowingMissingColumn(
+  url: string,
+  headers: Record<string, string>
+): Promise<{ ok: boolean; missingColumn: boolean; rows: Array<Record<string, unknown>> }> {
+  try {
+    const resp = await fetch(url, { method: 'GET', headers });
+    if (resp.ok) {
+      const data = await resp.json().catch(() => null);
+      return {
+        ok: true,
+        missingColumn: false,
+        rows: Array.isArray(data) ? (data as Array<Record<string, unknown>>) : [],
+      };
+    }
+    const errBody = (await resp.json().catch(() => null)) as
+      | { code?: string; message?: string }
+      | null;
+    const errCode = String(errBody?.code || '');
+    const errMsg = String(errBody?.message || '').toLowerCase();
+    if (resp.status === 400 && (errCode === '42703' || errMsg.includes('does not exist'))) {
+      return { ok: true, missingColumn: true, rows: [] };
+    }
+    return { ok: false, missingColumn: false, rows: [] };
+  } catch {
+    return { ok: false, missingColumn: false, rows: [] };
+  }
 }
 
 async function listStorageObjectsRecursively(
@@ -322,38 +395,44 @@ async function listStorageObjectsRecursively(
   }
 
   let hadError = false;
+  let offset = 0;
+  const pageLimit = 1000;
   try {
-    const resp = await fetch(`${supabaseUrl}/storage/v1/object/list/${WEBSITE_ASSETS_BUCKET}`, {
-      method: 'POST',
-      headers: serviceHeaders,
-      body: JSON.stringify({
-        prefix: cleanPrefix,
-        limit: 1000,
-        offset: 0,
-        sortBy: { column: 'name', order: 'asc' },
-      }),
-    });
-    if (!resp.ok) return { hadError: true };
-    const entries = (await resp.json()) as Array<{ id?: string | null; name?: string | null }>;
-    if (!Array.isArray(entries)) return { hadError: false };
-    for (const entry of entries) {
-      const name = String(entry?.name || '').trim();
-      if (!name || name === '.' || name === '..' || name.includes('..') || name.includes('\0')) {
-        continue;
+    while (outPaths.size < 5000) {
+      const resp = await fetch(`${supabaseUrl}/storage/v1/object/list/${WEBSITE_ASSETS_BUCKET}`, {
+        method: 'POST',
+        headers: serviceHeaders,
+        body: JSON.stringify({
+          prefix: cleanPrefix,
+          limit: pageLimit,
+          offset,
+          sortBy: { column: 'name', order: 'asc' },
+        }),
+      });
+      if (!resp.ok) return { hadError: true };
+      const entries = (await resp.json()) as Array<{ id?: string | null; name?: string | null }>;
+      if (!Array.isArray(entries) || entries.length === 0) break;
+      for (const entry of entries) {
+        const name = String(entry?.name || '').trim();
+        if (!name || name === '.' || name === '..' || name.includes('..') || name.includes('\0')) {
+          continue;
+        }
+        const fullPath = `${cleanPrefix}/${name}`;
+        if (entry.id === null || entry.id === undefined) {
+          const subRes = await listStorageObjectsRecursively(
+            supabaseUrl,
+            serviceHeaders,
+            fullPath,
+            outPaths,
+            depth + 1
+          );
+          if (subRes.hadError) hadError = true;
+        } else {
+          outPaths.add(fullPath);
+        }
       }
-      const fullPath = `${cleanPrefix}/${name}`;
-      if (entry.id === null || entry.id === undefined) {
-        const subRes = await listStorageObjectsRecursively(
-          supabaseUrl,
-          serviceHeaders,
-          fullPath,
-          outPaths,
-          depth + 1
-        );
-        if (subRes.hadError) hadError = true;
-      } else {
-        outPaths.add(fullPath);
-      }
+      if (entries.length < pageLimit) break;
+      offset += entries.length;
     }
   } catch {
     hadError = true;
@@ -361,32 +440,491 @@ async function listStorageObjectsRecursively(
   return { hadError };
 }
 
+async function verifyStoragePathsGloballyViaRpc(
+  supabaseUrl: string,
+  serviceHeaders: Record<string, string>,
+  params: {
+    adminId: string;
+    candidatePaths: string[];
+    excludeWebsiteId: string;
+    verificationToken?: string | null;
+  }
+): Promise<{
+  verified: boolean;
+  verificationToken: string | null;
+  safeToDeletePaths: string[];
+  referencedPaths: string[];
+  abortedPaths: string[];
+}> {
+  const fallbackToken =
+    typeof params.verificationToken === 'string' && UUID_REGEX.test(params.verificationToken.trim())
+      ? params.verificationToken.trim()
+      : null;
+
+  if (params.candidatePaths.length === 0) {
+    return {
+      verified: true,
+      verificationToken: fallbackToken,
+      safeToDeletePaths: [],
+      referencedPaths: [],
+      abortedPaths: [],
+    };
+  }
+  try {
+    const resp = await fetch(
+      `${supabaseUrl}/rest/v1/rpc/admin_verify_storage_paths_for_deletion`,
+      {
+        method: 'POST',
+        headers: serviceHeaders,
+        body: JSON.stringify({
+          p_admin_id: params.adminId,
+          p_candidate_paths: params.candidatePaths,
+          p_exclude_website_id: params.excludeWebsiteId,
+          ...(fallbackToken ? { p_verification_token: fallbackToken } : {}),
+        }),
+      }
+    );
+    if (!resp.ok) {
+      return {
+        verified: false,
+        verificationToken: fallbackToken,
+        safeToDeletePaths: [],
+        referencedPaths: [],
+        abortedPaths: [],
+      };
+    }
+    const payload = (await resp.json().catch(() => null)) as {
+      success?: boolean;
+      verificationToken?: unknown;
+      safeToDeletePaths?: unknown;
+      referencedPaths?: unknown;
+      abortedPaths?: unknown;
+    } | null;
+    if (!payload || payload.success !== true) {
+      return {
+        verified: false,
+        verificationToken: fallbackToken,
+        safeToDeletePaths: [],
+        referencedPaths: [],
+        abortedPaths: [],
+      };
+    }
+    const nextToken =
+      typeof payload.verificationToken === 'string' &&
+      UUID_REGEX.test(payload.verificationToken.trim())
+        ? payload.verificationToken.trim()
+        : fallbackToken;
+    const referenced = Array.isArray(payload.referencedPaths)
+      ? payload.referencedPaths.filter((p): p is string => typeof p === 'string' && p.length > 0)
+      : [];
+    const aborted = Array.isArray(payload.abortedPaths)
+      ? payload.abortedPaths.filter((p): p is string => typeof p === 'string' && p.length > 0)
+      : [];
+    const blockedLower = new Set<string>();
+    for (const p of referenced) blockedLower.add(p.trim().toLowerCase());
+    for (const p of aborted) blockedLower.add(p.trim().toLowerCase());
+
+    const safeList = Array.isArray(payload.safeToDeletePaths)
+      ? payload.safeToDeletePaths.filter(
+          (p): p is string =>
+            typeof p === 'string' && p.length > 0 && !blockedLower.has(p.trim().toLowerCase())
+        )
+      : [];
+    return {
+      verified: true,
+      verificationToken: nextToken,
+      safeToDeletePaths: safeList,
+      referencedPaths: referenced,
+      abortedPaths: aborted,
+    };
+  } catch {
+    return {
+      verified: false,
+      verificationToken: fallbackToken,
+      safeToDeletePaths: [],
+      referencedPaths: [],
+      abortedPaths: [],
+    };
+  }
+}
+
 async function removeStorageObjectsBatch(
   supabaseUrl: string,
   serviceHeaders: Record<string, string>,
-  paths: string[]
-): Promise<{ deletedCount: number; warning?: string }> {
-  if (paths.length === 0) return { deletedCount: 0 };
+  paths: string[],
+  opts?: {
+    excludePathsLower?: Set<string>;
+    preDeleteVerify?: (batchPaths: string[]) => Promise<{
+      verified: boolean;
+      safeToDeletePaths: string[];
+      referencedPaths: string[];
+      abortedPaths: string[];
+    }>;
+  }
+): Promise<{
+  deletedCount: number;
+  deletedPaths: string[];
+  failedPaths: string[];
+  abortedPaths: string[];
+  unverifiedPaths: string[];
+  skippedAlreadyDeletedCount: number;
+  warning?: string;
+}> {
+  const dedupedPaths: string[] = [];
+  const seenCandidateLower = new Set<string>();
+  let skippedAlreadyDeletedCount = 0;
+
+  for (const rawPath of paths) {
+    const clean = String(rawPath || '').trim();
+    if (!clean) continue;
+    const lower = clean.toLowerCase();
+    if (opts?.excludePathsLower?.has(lower)) {
+      skippedAlreadyDeletedCount += 1;
+      continue;
+    }
+    if (seenCandidateLower.has(lower)) continue;
+    seenCandidateLower.add(lower);
+    dedupedPaths.push(clean);
+  }
+
+  if (dedupedPaths.length === 0) {
+    return {
+      deletedCount: 0,
+      deletedPaths: [],
+      failedPaths: [],
+      abortedPaths: [],
+      unverifiedPaths: [],
+      skippedAlreadyDeletedCount,
+    };
+  }
+
   let deletedCount = 0;
+  const deletedPaths: string[] = [];
+  const seenDeletedLower = new Set<string>();
+  const failedPaths: string[] = [];
+  const abortedPaths: string[] = [];
+  const abortedLower = new Set<string>();
+  const unverifiedPaths: string[] = [];
   let warning: string | undefined;
-  for (let i = 0; i < paths.length; i += 100) {
-    const chunk = paths.slice(i, i + 100);
+
+  const recordAborted = (p: string) => {
+    const clean = p.trim();
+    const lower = clean.toLowerCase();
+    if (!clean || abortedLower.has(lower)) return;
+    abortedLower.add(lower);
+    abortedPaths.push(clean);
+  };
+
+  for (let i = 0; i < dedupedPaths.length; i += 100) {
+    const chunk = dedupedPaths.slice(i, i + 100);
+    let safeChunk = chunk;
+
+    if (opts?.preDeleteVerify) {
+      const confirmRes = await opts.preDeleteVerify(chunk);
+      if (!confirmRes.verified) {
+        unverifiedPaths.push(...chunk);
+        warning =
+          'Pre-deletion global Storage reference confirmation failed; unverified objects were preserved for manual review.';
+        continue;
+      }
+      for (const rp of confirmRes.referencedPaths) recordAborted(rp);
+      for (const ap of confirmRes.abortedPaths) recordAborted(ap);
+
+      const safeLowerSet = new Set(
+        confirmRes.safeToDeletePaths.map((p) => p.trim().toLowerCase())
+      );
+      safeChunk = chunk.filter((p) => {
+        const lower = p.trim().toLowerCase();
+        return safeLowerSet.has(lower) && !abortedLower.has(lower) && !seenDeletedLower.has(lower);
+      });
+    }
+
+    if (safeChunk.length === 0) continue;
+
     try {
       const resp = await fetch(`${supabaseUrl}/storage/v1/object/${WEBSITE_ASSETS_BUCKET}`, {
         method: 'DELETE',
         headers: serviceHeaders,
-        body: JSON.stringify({ prefixes: chunk }),
+        body: JSON.stringify({ prefixes: safeChunk }),
       });
       if (resp.ok) {
-        deletedCount += chunk.length;
+        const respJson = await resp.json().catch(() => null);
+        let batchDeleted: string[] = [];
+        if (Array.isArray(respJson)) {
+          const safeMap = new Map<string, string>();
+          for (const sp of safeChunk) safeMap.set(sp.trim().toLowerCase(), sp);
+          for (const item of respJson) {
+            const rawName =
+              item && typeof item === 'object' && typeof (item as { name?: unknown }).name === 'string'
+                ? String((item as { name: string }).name).trim()
+                : typeof item === 'string'
+                ? item.trim()
+                : '';
+            if (!rawName) continue;
+            const matched = safeMap.get(rawName.toLowerCase());
+            if (matched) batchDeleted.push(matched);
+          }
+        } else {
+          batchDeleted = safeChunk;
+        }
+
+        for (const dp of batchDeleted) {
+          const lower = dp.trim().toLowerCase();
+          if (seenDeletedLower.has(lower)) continue;
+          seenDeletedLower.add(lower);
+          deletedPaths.push(dp);
+          deletedCount += 1;
+        }
       } else {
+        failedPaths.push(...safeChunk);
         warning = 'Some storage files could not be removed automatically after database deletion.';
       }
     } catch {
+      failedPaths.push(...safeChunk);
       warning = 'Storage service cleanup encountered a network error after database deletion.';
     }
   }
-  return { deletedCount, ...(warning ? { warning } : {}) };
+
+  return {
+    deletedCount,
+    deletedPaths,
+    failedPaths,
+    abortedPaths,
+    unverifiedPaths,
+    skippedAlreadyDeletedCount,
+    ...(warning ? { warning } : {}),
+  };
+}
+
+async function collectProtectedAssetPathsForOwner(
+  supabaseUrl: string,
+  serviceHeaders: Record<string, string>,
+  ownerUserId: string,
+  excludeWebsiteId: string,
+  excludedProductIds: Set<string>,
+  excludeStoreId: string,
+  preservedStoreId = ''
+): Promise<{ protectedPaths: Set<string>; hadError: boolean }> {
+  const protectedPaths = new Set<string>();
+  let hadError = false;
+  if (!UUID_REGEX.test(ownerUserId)) {
+    return { protectedPaths, hadError: true };
+  }
+
+  try {
+    const ownerSiblingsResp = await fetch(
+      `${supabaseUrl}/rest/v1/subscribed_websites?user_id=eq.${encodeURIComponent(
+        ownerUserId
+      )}&select=id,user_id,store_id,config`,
+      { method: 'GET', headers: serviceHeaders }
+    );
+    if (!ownerSiblingsResp.ok) {
+      return { protectedPaths, hadError: true };
+    }
+    const rows = (await ownerSiblingsResp.json()) as Array<{
+      id: string;
+      user_id?: string | null;
+      store_id?: string | null;
+      config?: unknown;
+    }>;
+    const siblingMap = new Map<
+      string,
+      { id: string; user_id?: string | null; store_id?: string | null; config?: unknown }
+    >();
+    for (const r of Array.isArray(rows) ? rows : []) {
+      if (r?.id && r.id.toLowerCase() !== excludeWebsiteId.toLowerCase()) {
+        siblingMap.set(r.id.toLowerCase(), r);
+      }
+    }
+
+    if (UUID_REGEX.test(preservedStoreId)) {
+      const storeSiblingsResp = await fetch(
+        `${supabaseUrl}/rest/v1/subscribed_websites?store_id=eq.${encodeURIComponent(
+          preservedStoreId
+        )}&select=id,user_id,store_id,config`,
+        { method: 'GET', headers: serviceHeaders }
+      );
+      if (!storeSiblingsResp.ok) {
+        hadError = true;
+      } else {
+        const sRows = (await storeSiblingsResp.json()) as Array<{
+          id: string;
+          user_id?: string | null;
+          store_id?: string | null;
+          config?: unknown;
+        }>;
+        for (const r of Array.isArray(sRows) ? sRows : []) {
+          if (r?.id && r.id.toLowerCase() !== excludeWebsiteId.toLowerCase()) {
+            siblingMap.set(r.id.toLowerCase(), r);
+          }
+        }
+      }
+    }
+
+    const otherSites = Array.from(siblingMap.values());
+    for (const other of otherSites) {
+      collectJsonbAssetPaths(other.config, protectedPaths);
+    }
+
+    const survivingStoreIds = new Set<string>();
+    for (const s of otherSites) {
+      const sid = String(s.store_id || '').trim();
+      if (
+        UUID_REGEX.test(sid) &&
+        (!excludeStoreId || sid.toLowerCase() !== excludeStoreId.toLowerCase())
+      ) {
+        survivingStoreIds.add(sid);
+      }
+    }
+    if (
+      UUID_REGEX.test(preservedStoreId) &&
+      (!excludeStoreId || preservedStoreId.toLowerCase() !== excludeStoreId.toLowerCase())
+    ) {
+      survivingStoreIds.add(preservedStoreId);
+    }
+
+    const storeIdList = Array.from(survivingStoreIds);
+    if (storeIdList.length > 0) {
+      const inClause = storeIdList.join(',');
+      const [otherProdsResp, otherOrdersResp, storesLogoRes] = await Promise.all([
+        fetch(
+          `${supabaseUrl}/rest/v1/products?store_id=in.(${inClause})&select=id,image_url`,
+          { method: 'GET', headers: serviceHeaders }
+        ),
+        fetch(
+          `${supabaseUrl}/rest/v1/orders?store_id=in.(${inClause})&select=id,items`,
+          { method: 'GET', headers: serviceHeaders }
+        ),
+        fetchJsonAllowingMissingColumn(
+          `${supabaseUrl}/rest/v1/stores?id=in.(${inClause})&select=id,logo_url`,
+          serviceHeaders
+        ),
+      ]);
+
+      if (!otherProdsResp.ok) {
+        hadError = true;
+      } else {
+        const otherProds = (await otherProdsResp.json()) as Array<{
+          id: string;
+          image_url?: string | null;
+        }>;
+        for (const op of Array.isArray(otherProds) ? otherProds : []) {
+          if (!excludedProductIds.has(op.id.toLowerCase())) {
+            const p = extractWebsiteAssetPath(op.image_url);
+            if (p) protectedPaths.add(p);
+          }
+        }
+      }
+
+      if (!otherOrdersResp.ok) {
+        hadError = true;
+      } else {
+        const otherOrders = (await otherOrdersResp.json()) as Array<{
+          id?: string;
+          items?: unknown;
+        }>;
+        for (const ord of Array.isArray(otherOrders) ? otherOrders : []) {
+          collectJsonbAssetPaths(ord?.items, protectedPaths);
+        }
+      }
+
+      if (!storesLogoRes.ok) {
+        hadError = true;
+      } else {
+        for (const st of storesLogoRes.rows) {
+          const p = extractWebsiteAssetPath(st?.logo_url);
+          if (p) protectedPaths.add(p);
+        }
+      }
+    }
+
+    const ownerProfileRes = await fetchJsonAllowingMissingColumn(
+      `${supabaseUrl}/rest/v1/profiles?id=eq.${encodeURIComponent(
+        ownerUserId
+      )}&select=id,avatar_url&limit=1`,
+      serviceHeaders
+    );
+    if (!ownerProfileRes.ok) {
+      hadError = true;
+    } else if (ownerProfileRes.rows[0]) {
+      const p = extractWebsiteAssetPath(ownerProfileRes.rows[0].avatar_url);
+      if (p) protectedPaths.add(p);
+    }
+  } catch {
+    hadError = true;
+  }
+
+  return { protectedPaths, hadError };
+}
+
+async function recordStorageCleanupResultBestEffort(
+  supabaseUrl: string,
+  serviceHeaders: Record<string, string>,
+  params: {
+    websiteId: string;
+    adminId: string;
+    status: 'pending' | 'partial_failed' | 'manual_review_required' | 'completed' | 'skipped';
+    deletedCount: number;
+    deletedPaths?: string[];
+    verificationToken?: string | null;
+    failedPaths: string[];
+    manualReviewPaths?: string[];
+    error?: string | null;
+  }
+): Promise<{
+  recorded: boolean;
+  lateConcurrentReferencePaths: string[];
+  deletedObjectsCount?: number;
+}> {
+  try {
+    const resp = await fetch(`${supabaseUrl}/rest/v1/rpc/admin_record_website_storage_cleanup_result`, {
+      method: 'POST',
+      headers: serviceHeaders,
+      body: JSON.stringify({
+        p_website_id: params.websiteId,
+        p_admin_id: params.adminId,
+        p_status: params.status,
+        p_deleted_count: params.deletedCount,
+        p_failed_paths: params.failedPaths.slice(0, 500),
+        p_error: params.error || null,
+        p_manual_review_paths: params.manualReviewPaths
+          ? params.manualReviewPaths.slice(0, 500)
+          : null,
+        p_deleted_paths: Array.isArray(params.deletedPaths)
+          ? params.deletedPaths.slice(0, 1000)
+          : [],
+        p_verification_token:
+          typeof params.verificationToken === 'string' &&
+          UUID_REGEX.test(params.verificationToken.trim())
+            ? params.verificationToken.trim()
+            : null,
+      }),
+    });
+    if (!resp.ok) {
+      return { recorded: false, lateConcurrentReferencePaths: [] };
+    }
+    const payload = (await resp.json().catch(() => null)) as {
+      lateConcurrentReferencePaths?: unknown;
+      deletedObjectsCount?: unknown;
+    } | null;
+    const lateConcurrentReferencePaths = Array.isArray(payload?.lateConcurrentReferencePaths)
+      ? payload.lateConcurrentReferencePaths.filter(
+          (p): p is string => typeof p === 'string' && p.length > 0
+        )
+      : [];
+    const deletedObjectsCount =
+      typeof payload?.deletedObjectsCount === 'number'
+        ? payload.deletedObjectsCount
+        : undefined;
+    return {
+      recorded: true,
+      lateConcurrentReferencePaths,
+      ...(deletedObjectsCount !== undefined ? { deletedObjectsCount } : {}),
+    };
+  } catch {
+    // Non-fatal if outbox helper RPC is not yet installed or unreachable
+    return { recorded: false, lateConcurrentReferencePaths: [] };
+  }
 }
 
 export default async function handler(req: RequestWithBody, res: ServerResponse) {
@@ -478,10 +1016,10 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
   const confirmSubdomain = String(rawBody.confirmSubdomain || '').trim().toLowerCase();
   const explicitConfirmed = rawBody.explicitConfirmed === true;
 
-  if (!['suspend', 'reactivate', 'renew', 'delete'].includes(action)) {
+  if (!['suspend', 'reactivate', 'renew', 'delete', 'retry_storage_cleanup'].includes(action)) {
     sendJson(res, 400, {
       code: 'INVALID_ACTION',
-      error: 'Unsupported action. Expected suspend, reactivate, renew, or delete.',
+      error: 'Unsupported action. Expected suspend, reactivate, renew, delete, or retry_storage_cleanup.',
     });
     return;
   }
@@ -553,19 +1091,28 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       return;
     }
 
-    // 2. Enforce AAL2 MFA when verified TOTP factor is enrolled
+    // 2. Enforce AAL2 TOTP MFA: unconditionally required for permanent deletion / storage cleanup;
+    //    required for suspend/reactivate/renew whenever verified TOTP factor is enrolled.
     const hasVerifiedTotp = Array.isArray(authUser?.factors)
       ? authUser.factors.some((f) => f?.factor_type === 'totp' && f?.status === 'verified')
       : false;
-    if (hasVerifiedTotp) {
-      const jwtClaims = decodeJwtClaims(accessToken);
-      if (jwtClaims?.aal !== 'aal2') {
+    const jwtClaims = decodeJwtClaims(accessToken);
+    const isAal2 = jwtClaims?.aal === 'aal2';
+    if (action === 'delete' || action === 'retry_storage_cleanup') {
+      if (!hasVerifiedTotp || !isAal2) {
         sendJson(res, 403, {
           code: 'MFA_REQUIRED',
-          error: 'Multi-factor authenticator verification (AAL2) is required.',
+          error:
+            'Verified TOTP multi-factor authenticator verification (AAL2) is required for permanent deletion and storage cleanup actions.',
         });
         return;
       }
+    } else if (hasVerifiedTotp && !isAal2) {
+      sendJson(res, 403, {
+        code: 'MFA_REQUIRED',
+        error: 'Multi-factor authenticator verification (AAL2) is required.',
+      });
+      return;
     }
 
     const serviceHeaders = {
@@ -601,6 +1148,428 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       sendJson(res, 403, {
         code: 'FORBIDDEN_ADMIN_REQUIRED',
         error: 'Access denied. Administrator role is required.',
+      });
+      return;
+    }
+
+    if (action === 'retry_storage_cleanup') {
+      interface StorageCleanupJobRow {
+        websiteId?: string;
+        ownerUserId?: string;
+        deletedStoreId?: string | null;
+        preservedStoreId?: string | null;
+        isSharedStore?: boolean;
+        storePreserved?: boolean;
+        cleanupStatus?: string;
+        cleanupObjectPaths?: string[];
+        preservedReferencePaths?: string[];
+        manualReviewPaths?: string[];
+        manualReviewRequired?: boolean;
+        deletedProductIds?: string[];
+        deletedObjectPaths?: string[];
+        failedObjectPaths?: string[];
+      }
+
+      let targetJob: StorageCleanupJobRow | undefined;
+      let jobLookupOk = false;
+
+      const singleJobResp = await fetch(
+        `${env.supabaseUrl}/rest/v1/rpc/admin_get_website_storage_cleanup_job`,
+        {
+          method: 'POST',
+          headers: serviceHeaders,
+          body: JSON.stringify({ p_admin_id: callerId, p_website_id: websiteId }),
+        }
+      );
+
+      if (singleJobResp.ok) {
+        const singlePayload = (await singleJobResp.json().catch(() => null)) as {
+          success?: boolean;
+          code?: string;
+          job?: StorageCleanupJobRow;
+        } | null;
+        if (singlePayload?.success === true && singlePayload.job) {
+          targetJob = singlePayload.job;
+          jobLookupOk = true;
+        } else if (singlePayload?.code === 'CLEANUP_JOB_NOT_FOUND') {
+          jobLookupOk = true;
+        }
+      }
+
+      if (!jobLookupOk) {
+        const pendingResp = await fetch(
+          `${env.supabaseUrl}/rest/v1/rpc/admin_get_pending_website_storage_cleanups`,
+          {
+            method: 'POST',
+            headers: serviceHeaders,
+            body: JSON.stringify({ p_admin_id: callerId, p_limit: 50 }),
+          }
+        );
+        if (!pendingResp.ok) {
+          sendJson(res, 502, {
+            code: 'STORAGE_CLEANUP_RETRY_LOOKUP_FAILED',
+            error: 'Unable to look up storage cleanup job status.',
+          });
+          return;
+        }
+        const pendingPayload = (await pendingResp.json().catch(() => null)) as {
+          success?: boolean;
+          jobs?: StorageCleanupJobRow[];
+        } | null;
+        targetJob = Array.isArray(pendingPayload?.jobs)
+          ? pendingPayload.jobs.find(
+              (j) => String(j?.websiteId || '').trim().toLowerCase() === websiteId.toLowerCase()
+            )
+          : undefined;
+      }
+
+      if (!targetJob) {
+        sendJson(res, 404, {
+          code: 'CLEANUP_JOB_NOT_FOUND',
+          error: 'No storage cleanup job was found for this website ID.',
+        });
+        return;
+      }
+
+      const existingManualPaths = Array.isArray(targetJob.manualReviewPaths)
+        ? targetJob.manualReviewPaths.filter((p): p is string => typeof p === 'string' && p.length > 0)
+        : [];
+      const existingPreservedRefPaths = Array.isArray(targetJob.preservedReferencePaths)
+        ? targetJob.preservedReferencePaths.filter(
+            (p): p is string => typeof p === 'string' && p.length > 0
+          )
+        : [];
+
+      // Idempotent duplicate cleanup guard: once cleanly completed with zero unresolved manual-review paths,
+      // repeated retry calls perform zero Storage DELETEs and keep counts unchanged.
+      if (
+        targetJob.cleanupStatus === 'completed' &&
+        targetJob.manualReviewRequired !== true &&
+        existingManualPaths.length === 0
+      ) {
+        sendJson(res, 200, {
+          ok: true,
+          success: true,
+          idempotent: true,
+          code: 'STORAGE_CLEANUP_ALREADY_COMPLETED',
+          message: 'Storage cleanup was already completed; no duplicate deletions performed.',
+          websiteId,
+          cleanupStatus: 'completed',
+          deletedStorageObjects: 0,
+          failedStoragePaths: [],
+          manualReviewRequired: false,
+          manualReviewAssetPaths: [],
+          preservedReferencedAssetPaths: existingPreservedRefPaths,
+        });
+        return;
+      }
+
+      const jobOwnerId = String(targetJob.ownerUserId || '').trim();
+      const jobDeletedStoreId =
+        typeof targetJob.deletedStoreId === 'string' &&
+        UUID_REGEX.test(targetJob.deletedStoreId.trim())
+          ? targetJob.deletedStoreId.trim()
+          : null;
+      const jobPreservedStoreId =
+        typeof targetJob.preservedStoreId === 'string' &&
+        UUID_REGEX.test(targetJob.preservedStoreId.trim())
+          ? targetJob.preservedStoreId.trim()
+          : '';
+      const jobIsSharedStore = targetJob.isSharedStore === true;
+      const jobStorePreserved = targetJob.storePreserved === true || jobDeletedStoreId === null;
+
+      if (
+        !UUID_REGEX.test(jobOwnerId) ||
+        (jobIsSharedStore && jobDeletedStoreId !== null) ||
+        (targetJob.storePreserved === true && jobDeletedStoreId !== null)
+      ) {
+        sendJson(res, 409, {
+          code: 'AMBIGUOUS_CLEANUP_SCOPE',
+          error: 'Storage cleanup job metadata is invalid or ambiguous; refusing to delete objects.',
+        });
+        return;
+      }
+
+      const jobDeletedProdSet = new Set<string>(
+        Array.isArray(targetJob.deletedProductIds)
+          ? targetJob.deletedProductIds
+              .filter((id): id is string => typeof id === 'string' && UUID_REGEX.test(id.trim()))
+              .map((id) => id.trim().toLowerCase())
+          : []
+      );
+
+      const protectionRes = await collectProtectedAssetPathsForOwner(
+        env.supabaseUrl,
+        serviceHeaders,
+        jobOwnerId,
+        websiteId,
+        jobDeletedProdSet,
+        jobDeletedStoreId || '',
+        jobPreservedStoreId
+      );
+
+      const preservedRefSet = new Set<string>(existingPreservedRefPaths);
+      for (const p of protectionRes.protectedPaths) {
+        preservedRefSet.add(p);
+      }
+      const protectedLowerSet = new Set<string>(
+        Array.from(preservedRefSet).map((p) => p.trim().toLowerCase())
+      );
+
+      const manualReviewSet = new Set<string>(existingManualPaths);
+      const manualLowerSet = new Set<string>(
+        existingManualPaths.map((p) => p.trim().toLowerCase())
+      );
+      const alreadyDeletedLower = new Set<string>(
+        (Array.isArray(targetJob.deletedObjectPaths) ? targetJob.deletedObjectPaths : [])
+          .filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
+          .map((p) => p.trim().toLowerCase())
+      );
+      const retryPaths = new Set<string>();
+      const candidateProductStorePaths = new Set<string>();
+
+      const addCandidateOrManual = (p: string, allowPreservedStoreProdPrefix: boolean) => {
+        const clean = p.trim();
+        if (!clean) return;
+        const lower = clean.toLowerCase();
+        if (
+          alreadyDeletedLower.has(lower) ||
+          protectedLowerSet.has(lower) ||
+          manualLowerSet.has(lower)
+        ) {
+          return;
+        }
+        const inSite = isSafeOwnedScopePath(clean, jobOwnerId, websiteId);
+        const inDeletedStore =
+          !jobIsSharedStore &&
+          !jobStorePreserved &&
+          jobDeletedStoreId !== null &&
+          isSafeOwnedScopePath(clean, jobOwnerId, jobDeletedStoreId);
+        const inPreservedStoreProducts =
+          allowPreservedStoreProdPrefix &&
+          jobPreservedStoreId !== '' &&
+          isSafeOwnedScopePath(clean, jobOwnerId, jobPreservedStoreId) &&
+          clean.toLowerCase().startsWith(`${jobOwnerId.toLowerCase()}/${jobPreservedStoreId.toLowerCase()}/products/`);
+        if (inSite || inDeletedStore || inPreservedStoreProducts) {
+          retryPaths.add(clean);
+          if (inPreservedStoreProducts) candidateProductStorePaths.add(clean);
+        } else {
+          manualReviewSet.add(clean);
+          manualLowerSet.add(lower);
+        }
+      };
+
+      const explicitProductPaths = Array.isArray(targetJob.cleanupObjectPaths)
+        ? targetJob.cleanupObjectPaths
+        : [];
+      for (const p of explicitProductPaths) {
+        if (typeof p === 'string') {
+          addCandidateOrManual(p, true);
+        }
+      }
+
+      const explicitProductPathSet = new Set<string>(retryPaths);
+      const failedHintPaths = Array.isArray(targetJob.failedObjectPaths)
+        ? targetJob.failedObjectPaths
+        : [];
+      for (const p of failedHintPaths) {
+        if (typeof p === 'string') {
+          addCandidateOrManual(p, explicitProductPathSet.has(p));
+        }
+      }
+
+      let listHadError = false;
+      const listedSitePaths = new Set<string>();
+      const siteListRes = await listStorageObjectsRecursively(
+        env.supabaseUrl,
+        serviceHeaders,
+        `${jobOwnerId}/${websiteId}`,
+        listedSitePaths
+      );
+      if (siteListRes.hadError) listHadError = true;
+      for (const p of listedSitePaths) {
+        addCandidateOrManual(p, false);
+      }
+
+      if (!jobIsSharedStore && !jobStorePreserved && jobDeletedStoreId !== null) {
+        const listedStorePaths = new Set<string>();
+        const storeListRes = await listStorageObjectsRecursively(
+          env.supabaseUrl,
+          serviceHeaders,
+          `${jobOwnerId}/${jobDeletedStoreId}`,
+          listedStorePaths
+        );
+        if (storeListRes.hadError) listHadError = true;
+        for (const p of listedStorePaths) {
+          addCandidateOrManual(p, false);
+        }
+      }
+
+      if (protectionRes.hadError) {
+        for (const p of retryPaths) {
+          manualReviewSet.add(p);
+        }
+        const manualArr = Array.from(manualReviewSet);
+        await recordStorageCleanupResultBestEffort(env.supabaseUrl, serviceHeaders, {
+          websiteId,
+          adminId: callerId,
+          status: 'manual_review_required',
+          deletedCount: 0,
+          deletedPaths: [],
+          failedPaths: [],
+          manualReviewPaths: manualArr,
+          error:
+            'Failed to verify surviving sibling website/store/order references during cleanup retry; assets preserved for manual review.',
+        });
+        sendJson(res, 502, {
+          code: 'STORAGE_PROTECTION_CHECK_FAILED',
+          error:
+            'Unable to verify surviving merchant and order assets before retrying storage cleanup; assets preserved for manual review.',
+          manualReviewRequired: manualArr.length > 0,
+          manualReviewAssetPaths: manualArr,
+        });
+        return;
+      }
+
+      const preVerifyCandidates = Array.from(retryPaths).filter(
+        (p) =>
+          !alreadyDeletedLower.has(p.trim().toLowerCase()) &&
+          !protectedLowerSet.has(p.trim().toLowerCase()) &&
+          !manualLowerSet.has(p.trim().toLowerCase())
+      );
+
+      let finalRetryPaths: string[] = [];
+      let verificationFailed = false;
+      let verificationToken: string | null = null;
+      const concurrentConflicts: string[] = [];
+      const addConcurrentConflict = (p: string) => {
+        const clean = p.trim();
+        if (!clean) return;
+        preservedRefSet.add(clean);
+        protectedLowerSet.add(clean.toLowerCase());
+        if (!concurrentConflicts.some((x) => x.toLowerCase() === clean.toLowerCase())) {
+          concurrentConflicts.push(clean);
+        }
+      };
+
+      if (preVerifyCandidates.length > 0) {
+        const globalVerifyRes = await verifyStoragePathsGloballyViaRpc(
+          env.supabaseUrl,
+          serviceHeaders,
+          {
+            adminId: callerId,
+            candidatePaths: preVerifyCandidates,
+            excludeWebsiteId: websiteId,
+          }
+        );
+        if (!globalVerifyRes.verified) {
+          verificationFailed = true;
+          for (const p of preVerifyCandidates) {
+            manualReviewSet.add(p);
+          }
+        } else {
+          verificationToken = globalVerifyRes.verificationToken;
+          for (const rp of globalVerifyRes.referencedPaths) {
+            preservedRefSet.add(rp);
+            protectedLowerSet.add(rp.trim().toLowerCase());
+          }
+          for (const ap of globalVerifyRes.abortedPaths) {
+            addConcurrentConflict(ap);
+          }
+          finalRetryPaths = globalVerifyRes.safeToDeletePaths;
+        }
+      }
+
+      const retryResult = verificationFailed
+        ? {
+            deletedCount: 0,
+            deletedPaths: [] as string[],
+            failedPaths: [] as string[],
+            abortedPaths: [] as string[],
+            unverifiedPaths: [] as string[],
+            skippedAlreadyDeletedCount: 0,
+            warning:
+              'Global Storage reference verification failed; unverified objects were preserved and flagged for manual review.',
+          }
+        : await removeStorageObjectsBatch(env.supabaseUrl, serviceHeaders, finalRetryPaths, {
+            excludePathsLower: alreadyDeletedLower,
+            preDeleteVerify: (batchPaths) =>
+              verifyStoragePathsGloballyViaRpc(env.supabaseUrl, serviceHeaders, {
+                adminId: callerId,
+                candidatePaths: batchPaths,
+                excludeWebsiteId: websiteId,
+                verificationToken,
+              }),
+          });
+
+      for (const ap of retryResult.abortedPaths) {
+        addConcurrentConflict(ap);
+      }
+      for (const up of retryResult.unverifiedPaths) {
+        manualReviewSet.add(up);
+      }
+
+      const finalManualArr = Array.from(manualReviewSet);
+      const finalManualRequired = finalManualArr.length > 0;
+
+      const finalStatus: 'completed' | 'partial_failed' | 'manual_review_required' =
+        retryResult.failedPaths.length > 0 || listHadError
+          ? 'partial_failed'
+          : finalManualRequired || verificationFailed || retryResult.unverifiedPaths.length > 0
+          ? 'manual_review_required'
+          : 'completed';
+      const finalWarning =
+        retryResult.warning ||
+        (listHadError
+          ? 'Some storage folders could not be listed cleanly during cleanup retry.'
+          : finalManualRequired
+          ? 'One or more storage objects could not be proven exclusive and were preserved for manual review.'
+          : undefined);
+
+      const recordRes = await recordStorageCleanupResultBestEffort(env.supabaseUrl, serviceHeaders, {
+        websiteId,
+        adminId: callerId,
+        status: finalStatus,
+        deletedCount: retryResult.deletedCount,
+        deletedPaths: retryResult.deletedPaths,
+        verificationToken,
+        failedPaths: retryResult.failedPaths,
+        manualReviewPaths: finalManualArr,
+        error: finalWarning || null,
+      });
+
+      for (const lateRef of recordRes.lateConcurrentReferencePaths) {
+        addConcurrentConflict(lateRef);
+      }
+      const finalPreservedArr = Array.from(preservedRefSet);
+
+      const responseCode =
+        finalStatus === 'completed'
+          ? 'STORAGE_CLEANUP_COMPLETED'
+          : finalStatus === 'manual_review_required'
+          ? 'STORAGE_CLEANUP_MANUAL_REVIEW_REQUIRED'
+          : 'STORAGE_CLEANUP_PARTIAL';
+
+      sendJson(res, 200, {
+        ok: true,
+        success: true,
+        idempotent: false,
+        code: responseCode,
+        message:
+          finalStatus === 'completed'
+            ? 'Pending storage cleanup completed successfully.'
+            : finalStatus === 'manual_review_required'
+            ? 'Verified exclusive storage objects were cleaned up; unverified objects were preserved for manual review.'
+            : 'Storage cleanup retried, though some objects remain pending retry.',
+        websiteId,
+        cleanupStatus: finalStatus,
+        deletedStorageObjects: retryResult.deletedCount,
+        failedStoragePaths: retryResult.failedPaths,
+        manualReviewRequired: finalManualRequired,
+        manualReviewAssetPaths: finalManualArr,
+        preservedReferencedAssetPaths: finalPreservedArr,
+        ...(concurrentConflicts.length > 0 ? { concurrentReferenceConflicts: concurrentConflicts } : {}),
+        ...(finalWarning ? { storageCleanupWarning: finalWarning } : {}),
       });
       return;
     }
@@ -843,23 +1812,32 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
     }
 
     // Pre-RPC metadata read (strictly non-destructive, zero store guessing):
-    // Keep website-scoped paths strictly separated from store/product paths so post-RPC
-    // cleanup only acts on the authoritative committed rpcResult outcome.
+    // Recursively walks live config, draft, sections, nested section items, and productCatalogMeta,
+    // plus cross-table references (sibling websites, products, orders, store logos, user avatars).
     const rawSiteConfigAssetPaths = new Set<string>();
+    const rawSiteUncertainRefs = new Set<string>();
     const preRpcWebsiteScopedPaths = new Set<string>();
-    const preRpcStoreProductPaths = new Map<string, Set<string>>();
+    const preRpcWebsiteUncertainPaths = new Set<string>();
     const protectedAssetPaths = new Set<string>();
     const ownerUserId = String(site.user_id || '').trim();
     const targetStoreId = String(site.store_id || '').trim();
 
-    collectConfigAssetPaths(site.config, rawSiteConfigAssetPaths);
+    collectJsonbAssetPaths(site.config, rawSiteConfigAssetPaths, rawSiteUncertainRefs);
+    for (const rawRef of rawSiteUncertainRefs) {
+      preRpcWebsiteUncertainPaths.add(rawRef);
+    }
     for (const p of rawSiteConfigAssetPaths) {
       if (isSafeOwnedScopePath(p, ownerUserId, websiteId)) {
         preRpcWebsiteScopedPaths.add(p);
+      } else {
+        // Store, general, foreign, or unowned paths referenced inside config are NOT blindly deleted;
+        // they stay protected if referenced elsewhere or go to manual review if unreferenced & unowned.
+        preRpcWebsiteUncertainPaths.add(p);
       }
     }
 
     // Collect protected asset references from ANY surviving sibling websites (both same-owner AND cross-user shared store_id)
+    let siblingLookupFailed = false;
     const siblingMap = new Map<
       string,
       { id: string; user_id?: string | null; store_id?: string | null; config?: unknown }
@@ -882,6 +1860,21 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
         for (const r of Array.isArray(rows) ? rows : []) {
           if (r?.id && r.id !== websiteId) siblingMap.set(r.id, r);
         }
+      } else {
+        siblingLookupFailed = true;
+      }
+
+      const ownerProfileRes = await fetchJsonAllowingMissingColumn(
+        `${env.supabaseUrl}/rest/v1/profiles?id=eq.${encodeURIComponent(
+          ownerUserId
+        )}&select=id,avatar_url&limit=1`,
+        serviceHeaders
+      );
+      if (!ownerProfileRes.ok) {
+        siblingLookupFailed = true;
+      } else if (ownerProfileRes.rows[0]) {
+        const p = extractWebsiteAssetPath(ownerProfileRes.rows[0].avatar_url);
+        if (p) protectedAssetPaths.add(p);
       }
     }
 
@@ -902,42 +1895,81 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
         for (const r of Array.isArray(rows) ? rows : []) {
           if (r?.id && r.id !== websiteId) siblingMap.set(r.id, r);
         }
+      } else {
+        siblingLookupFailed = true;
       }
     }
 
     const otherSites = Array.from(siblingMap.values());
     for (const other of otherSites) {
-      collectConfigAssetPaths(other.config, protectedAssetPaths);
+      collectJsonbAssetPaths(other.config, protectedAssetPaths);
     }
 
-    // Snapshot product image URLs BEFORE DB cascade deletes them (only used if rpcResult confirms
-    // deletedStoreId === targetStoreId AND isSharedStore === false). Never guess a store when store_id is null.
-    const deletedProdIds = new Set<string>();
+    const targetStoreProducts: Array<{
+      id: string;
+      website_id?: string | null;
+      image_url?: string | null;
+    }> = [];
+    const targetStoreProductIds = new Set<string>();
+    const targetStoreOrders: Array<{ id?: string; items?: unknown }> = [];
+    const targetStoreLogos: string[] = [];
+
     if (UUID_REGEX.test(targetStoreId) && UUID_REGEX.test(ownerUserId)) {
-      const targetProdsResp = await fetch(
-        `${env.supabaseUrl}/rest/v1/products?store_id=eq.${encodeURIComponent(
-          targetStoreId
-        )}&select=id,image_url`,
-        { method: 'GET', headers: serviceHeaders }
-      );
+      const [targetProdsResp, targetOrdersResp, targetStoreRes] = await Promise.all([
+        fetch(
+          `${env.supabaseUrl}/rest/v1/products?store_id=eq.${encodeURIComponent(
+            targetStoreId
+          )}&select=id,website_id,image_url`,
+          { method: 'GET', headers: serviceHeaders }
+        ),
+        fetch(
+          `${env.supabaseUrl}/rest/v1/orders?store_id=eq.${encodeURIComponent(
+            targetStoreId
+          )}&select=id,items`,
+          { method: 'GET', headers: serviceHeaders }
+        ),
+        fetchJsonAllowingMissingColumn(
+          `${env.supabaseUrl}/rest/v1/stores?id=eq.${encodeURIComponent(
+            targetStoreId
+          )}&select=id,logo_url&limit=1`,
+          serviceHeaders
+        ),
+      ]);
+
       if (targetProdsResp.ok) {
         const targetProds = (await targetProdsResp.json()) as Array<{
           id: string;
+          website_id?: string | null;
           image_url?: string | null;
         }>;
-        const storeSet = new Set<string>();
         for (const prod of Array.isArray(targetProds) ? targetProds : []) {
-          if (prod?.id) deletedProdIds.add(prod.id);
-          const imgPath = extractWebsiteAssetPath(prod?.image_url);
-          if (imgPath && isSafeOwnedScopePath(imgPath, ownerUserId, targetStoreId)) {
-            storeSet.add(imgPath);
+          if (prod?.id) {
+            targetStoreProducts.push(prod);
+            targetStoreProductIds.add(prod.id.toLowerCase());
           }
         }
-        preRpcStoreProductPaths.set(targetStoreId.toLowerCase(), storeSet);
+      } else {
+        siblingLookupFailed = true;
+      }
+
+      if (targetOrdersResp.ok) {
+        const tOrders = (await targetOrdersResp.json()) as Array<{ id?: string; items?: unknown }>;
+        if (Array.isArray(tOrders)) {
+          targetStoreOrders.push(...tOrders);
+        }
+      } else {
+        siblingLookupFailed = true;
+      }
+
+      if (!targetStoreRes.ok) {
+        siblingLookupFailed = true;
+      } else if (targetStoreRes.rows[0]) {
+        const lp = extractWebsiteAssetPath(targetStoreRes.rows[0].logo_url);
+        if (lp) targetStoreLogos.push(lp);
       }
     }
 
-    // Protect any asset paths still referenced by products in other surviving stores
+    // Protect any asset paths still referenced by products, order snapshots, or store logos in other surviving stores
     const otherStoreIds = Array.from(
       new Set(
         otherSites
@@ -946,20 +1978,52 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       )
     );
     if (otherStoreIds.length > 0) {
-      const otherProdsResp = await fetch(
-        `${env.supabaseUrl}/rest/v1/products?store_id=in.(${otherStoreIds.join(',')})&select=id,image_url`,
-        { method: 'GET', headers: serviceHeaders }
-      );
+      const otherIn = otherStoreIds.join(',');
+      const [otherProdsResp, otherOrdersResp, otherStoresLogoRes] = await Promise.all([
+        fetch(
+          `${env.supabaseUrl}/rest/v1/products?store_id=in.(${otherIn})&select=id,image_url`,
+          { method: 'GET', headers: serviceHeaders }
+        ),
+        fetch(
+          `${env.supabaseUrl}/rest/v1/orders?store_id=in.(${otherIn})&select=id,items`,
+          { method: 'GET', headers: serviceHeaders }
+        ),
+        fetchJsonAllowingMissingColumn(
+          `${env.supabaseUrl}/rest/v1/stores?id=in.(${otherIn})&select=id,logo_url`,
+          serviceHeaders
+        ),
+      ]);
+
       if (otherProdsResp.ok) {
         const otherProds = (await otherProdsResp.json()) as Array<{
           id: string;
           image_url?: string | null;
         }>;
         for (const op of Array.isArray(otherProds) ? otherProds : []) {
-          if (!deletedProdIds.has(op.id)) {
+          if (!targetStoreProductIds.has(op.id.toLowerCase())) {
             const p = extractWebsiteAssetPath(op.image_url);
             if (p) protectedAssetPaths.add(p);
           }
+        }
+      } else {
+        siblingLookupFailed = true;
+      }
+
+      if (otherOrdersResp.ok) {
+        const otherOrders = (await otherOrdersResp.json()) as Array<{ id?: string; items?: unknown }>;
+        for (const ord of Array.isArray(otherOrders) ? otherOrders : []) {
+          collectJsonbAssetPaths(ord?.items, protectedAssetPaths);
+        }
+      } else {
+        siblingLookupFailed = true;
+      }
+
+      if (!otherStoresLogoRes.ok) {
+        siblingLookupFailed = true;
+      } else {
+        for (const st of otherStoresLogoRes.rows) {
+          const p = extractWebsiteAssetPath(st?.logo_url);
+          if (p) protectedAssetPaths.add(p);
         }
       }
     }
@@ -1016,7 +2080,17 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       message?: unknown;
       deletedWebsiteId?: unknown;
       deletedStoreId?: unknown;
+      preservedStoreId?: unknown;
       isSharedStore?: unknown;
+      storePreserved?: unknown;
+      storePreservationReasons?: unknown;
+      deletedProductIds?: unknown;
+      preservedSharedProductIds?: unknown;
+      deletedProductImageUrls?: unknown;
+      cleanupObjectPaths?: unknown;
+      preservedReferencedObjectPaths?: unknown;
+      manualReviewObjectPaths?: unknown;
+      manualReviewRequired?: unknown;
       deletedCounts?: Record<string, number>;
       auditLogId?: unknown;
     } | null;
@@ -1053,8 +2127,7 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
     }
 
     // Post-commit authoritative RPC response validation before touching ANY Storage object:
-    // (C) If rpcResult is malformed, missing fields, or inconsistent (e.g. invalid deletedStoreId
-    //     or isSharedStore === true alongside non-null deletedStoreId), skip Storage cleanup completely.
+    // Reject malformed, missing, or contradictory store-deletion metadata.
     const rpcDeletedWebsiteId =
       typeof rpcResult.deletedWebsiteId === 'string' ? rpcResult.deletedWebsiteId.trim() : '';
     const hasValidWebsiteMatch =
@@ -1067,18 +2140,121 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       (typeof rawDeletedStoreId === 'string' && UUID_REGEX.test(rawDeletedStoreId.trim()));
     const normalizedDeletedStoreId =
       typeof rawDeletedStoreId === 'string' ? rawDeletedStoreId.trim() : null;
+    const normalizedPreservedStoreId =
+      typeof rpcResult.preservedStoreId === 'string' && UUID_REGEX.test(rpcResult.preservedStoreId.trim())
+        ? rpcResult.preservedStoreId.trim()
+        : null;
+    const rpcStorePreserved =
+      typeof rpcResult.storePreserved === 'boolean'
+        ? rpcResult.storePreserved
+        : normalizedDeletedStoreId === null;
     const hasInconsistentSharedState =
-      rpcResult.isSharedStore === true && normalizedDeletedStoreId !== null;
+      (rpcResult.isSharedStore === true || rpcStorePreserved) && normalizedDeletedStoreId !== null;
     const hasMismatchedDeletedStoreId =
       normalizedDeletedStoreId !== null &&
       (!UUID_REGEX.test(targetStoreId) ||
         normalizedDeletedStoreId.toLowerCase() !== targetStoreId.toLowerCase());
     const hasValidOwnerUid = UUID_REGEX.test(ownerUserId);
 
-    let storageCleanup: { deletedCount: number; warning?: string } = { deletedCount: 0 };
+    const rpcDeletedProductIds = Array.isArray(rpcResult.deletedProductIds)
+      ? rpcResult.deletedProductIds.filter(
+          (id): id is string => typeof id === 'string' && UUID_REGEX.test(id.trim())
+        )
+      : [];
+    const deletedProductIdSetLower = new Set(rpcDeletedProductIds.map((id) => id.trim().toLowerCase()));
+    const rpcPreservedSharedProductIds = Array.isArray(rpcResult.preservedSharedProductIds)
+      ? rpcResult.preservedSharedProductIds.filter(
+          (id): id is string => typeof id === 'string' && UUID_REGEX.test(id.trim())
+        )
+      : [];
+    const storePreservationReasons = Array.isArray(rpcResult.storePreservationReasons)
+      ? rpcResult.storePreservationReasons.filter((r): r is string => typeof r === 'string' && r.length > 0)
+      : [];
+    const hasOwnershipMismatch = storePreservationReasons.includes('ownership_mismatch');
+
+    const rpcPreservedRefPaths = Array.isArray(rpcResult.preservedReferencedObjectPaths)
+      ? rpcResult.preservedReferencedObjectPaths.filter(
+          (p): p is string => typeof p === 'string' && p.length > 0
+        )
+      : [];
+    const rpcManualReviewPaths = Array.isArray(rpcResult.manualReviewObjectPaths)
+      ? rpcResult.manualReviewObjectPaths.filter(
+          (p): p is string => typeof p === 'string' && p.length > 0
+        )
+      : [];
+
+    for (const rp of rpcPreservedRefPaths) {
+      protectedAssetPaths.add(rp);
+    }
+
+    // When target store is preserved, protect every surviving product's image_url,
+    // ALL surviving order item/branding snapshots, AND the preserved store's logo_url!
+    if (normalizedDeletedStoreId === null) {
+      for (const prod of targetStoreProducts) {
+        if (!deletedProductIdSetLower.has(prod.id.toLowerCase())) {
+          const p = extractWebsiteAssetPath(prod.image_url);
+          if (p) protectedAssetPaths.add(p);
+        }
+      }
+      for (const ord of targetStoreOrders) {
+        collectJsonbAssetPaths(ord?.items, protectedAssetPaths);
+      }
+      for (const lp of targetStoreLogos) {
+        protectedAssetPaths.add(lp);
+      }
+    }
+
+    const protectedAssetPathsLower = new Set(
+      Array.from(protectedAssetPaths).map((p) => p.trim().toLowerCase())
+    );
+    const manualReviewPaths = new Set<string>(rpcManualReviewPaths);
+    const manualReviewPathsLower = new Set<string>(
+      rpcManualReviewPaths.map((p) => p.trim().toLowerCase())
+    );
+
+    const recordManualReviewIfNotProtected = (rawOrPath: string) => {
+      const clean = rawOrPath.trim();
+      if (!clean) return;
+      const lower = clean.toLowerCase();
+      if (protectedAssetPathsLower.has(lower) || manualReviewPathsLower.has(lower)) return;
+      manualReviewPaths.add(clean);
+      manualReviewPathsLower.add(lower);
+    };
+
+    let storageCleanup: {
+      deletedCount: number;
+      deletedPaths: string[];
+      failedPaths: string[];
+      abortedPaths: string[];
+      unverifiedPaths: string[];
+      warning?: string;
+    } = {
+      deletedCount: 0,
+      deletedPaths: [],
+      failedPaths: [],
+      abortedPaths: [],
+      unverifiedPaths: [],
+    };
     let storageCleanupSkipped = false;
+    let verificationToken: string | null = null;
+    const concurrentReferenceConflicts: string[] = [];
+    const addConcurrentConflict = (p: string) => {
+      const clean = p.trim();
+      if (!clean) return;
+      protectedAssetPaths.add(clean);
+      protectedAssetPathsLower.add(clean.toLowerCase());
+      if (!concurrentReferenceConflicts.some((x) => x.toLowerCase() === clean.toLowerCase())) {
+        concurrentReferenceConflicts.push(clean);
+      }
+    };
+    let cleanupRecordedStatus:
+      | 'completed'
+      | 'partial_failed'
+      | 'manual_review_required'
+      | 'skipped' = 'completed';
 
     if (
+      siblingLookupFailed ||
       !hasValidWebsiteMatch ||
       !hasValidIsSharedFlag ||
       !hasValidDeletedStoreId ||
@@ -1087,19 +2263,52 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       !hasValidOwnerUid
     ) {
       storageCleanupSkipped = true;
+      for (const p of preRpcWebsiteScopedPaths) {
+        recordManualReviewIfNotProtected(p);
+      }
+      for (const p of preRpcWebsiteUncertainPaths) {
+        recordManualReviewIfNotProtected(p);
+      }
+      cleanupRecordedStatus = manualReviewPaths.size > 0 ? 'manual_review_required' : 'skipped';
       storageCleanup = {
         deletedCount: 0,
-        warning:
-          'Database deletion committed, but Storage cleanup was skipped because the deletion response metadata was malformed or ambiguous.',
+        deletedPaths: [],
+        failedPaths: [],
+        abortedPaths: [],
+        unverifiedPaths: [],
+        warning: siblingLookupFailed
+          ? 'Database deletion committed, but Storage cleanup was skipped because surviving website, product, or order references could not be verified. Any unverified paths were preserved for manual review.'
+          : 'Database deletion committed, but Storage cleanup was skipped because the deletion response metadata was malformed or ambiguous.',
       };
     } else {
       const cleanupPaths = new Set<string>();
+      const cleanupPathsLower = new Set<string>();
       let listHadError = false;
+
+      const addCandidatePath = (p: string) => {
+        const clean = p.trim();
+        const lower = clean.toLowerCase();
+        if (
+          !clean ||
+          protectedAssetPathsLower.has(lower) ||
+          manualReviewPathsLower.has(lower) ||
+          cleanupPathsLower.has(lower)
+        ) {
+          return;
+        }
+        cleanupPaths.add(clean);
+        cleanupPathsLower.add(lower);
+      };
+
+      // Flag any non-website-scoped config asset references that aren't protected as surviving references
+      for (const rawOrPath of preRpcWebsiteUncertainPaths) {
+        recordManualReviewIfNotProtected(rawOrPath);
+      }
 
       // Website-scoped assets: ALWAYS strictly scoped to <ownerUserId>/<websiteId>/*
       for (const p of preRpcWebsiteScopedPaths) {
         if (isSafeOwnedScopePath(p, ownerUserId, websiteId)) {
-          cleanupPaths.add(p);
+          addCandidatePath(p);
         }
       }
       const listedSitePaths = new Set<string>();
@@ -1112,20 +2321,74 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       if (siteListRes.hadError) listHadError = true;
       for (const p of listedSitePaths) {
         if (isSafeOwnedScopePath(p, ownerUserId, websiteId)) {
-          cleanupPaths.add(p);
+          addCandidatePath(p);
         }
       }
 
-      // (A) Exclusively deleted store: ONLY when rpcResult.isSharedStore === false AND deletedStoreId is a valid UUID
-      if (rpcResult.isSharedStore === false && normalizedDeletedStoreId !== null) {
-        const preStorePaths = preRpcStoreProductPaths.get(normalizedDeletedStoreId.toLowerCase());
-        if (preStorePaths) {
-          for (const p of preStorePaths) {
-            if (isSafeOwnedScopePath(p, ownerUserId, normalizedDeletedStoreId)) {
-              cleanupPaths.add(p);
+      // Deleted exclusive product image assets (applies both when whole store is deleted AND when
+      // individual website-exclusive products are deleted inside a shared or preserved store).
+      const considerProductImageRaw = (rawUrl: unknown) => {
+        if (typeof rawUrl !== 'string' || !rawUrl.trim()) return;
+        const imgPath = extractWebsiteAssetPath(rawUrl);
+        if (!imgPath) {
+          if (isSupabaseStorageUrlOrPath(rawUrl)) {
+            recordManualReviewIfNotProtected(rawUrl);
+          }
+          return;
+        }
+        const inSite = isSafeOwnedScopePath(imgPath, ownerUserId, websiteId);
+        const inOwnedStoreProducts =
+          !hasOwnershipMismatch &&
+          UUID_REGEX.test(targetStoreId) &&
+          isSafeOwnedScopePath(imgPath, ownerUserId, targetStoreId) &&
+          (normalizedDeletedStoreId !== null ||
+            imgPath.toLowerCase().startsWith(`${ownerUserId.toLowerCase()}/${targetStoreId.toLowerCase()}/products/`));
+
+        if (inSite || inOwnedStoreProducts) {
+          addCandidatePath(imgPath);
+        } else {
+          recordManualReviewIfNotProtected(imgPath);
+        }
+      };
+
+      for (const prod of targetStoreProducts) {
+        if (
+          normalizedDeletedStoreId !== null ||
+          deletedProductIdSetLower.has(prod.id.toLowerCase())
+        ) {
+          considerProductImageRaw(prod.image_url);
+        }
+      }
+      if (Array.isArray(rpcResult.deletedProductImageUrls)) {
+        for (const rawUrl of rpcResult.deletedProductImageUrls) {
+          considerProductImageRaw(rawUrl);
+        }
+      }
+      if (Array.isArray(rpcResult.cleanupObjectPaths)) {
+        for (const p of rpcResult.cleanupObjectPaths) {
+          if (typeof p === 'string') {
+            if (
+              isSafeOwnedScopePath(p, ownerUserId, websiteId) ||
+              (!hasOwnershipMismatch &&
+                UUID_REGEX.test(targetStoreId) &&
+                isSafeOwnedScopePath(p, ownerUserId, targetStoreId))
+            ) {
+              addCandidatePath(p);
+            } else {
+              recordManualReviewIfNotProtected(p);
             }
           }
         }
+      }
+
+      // Whole-store Storage directory sweep: ONLY when rpcResult confirms the entire store was exclusively deleted
+      // (isSharedStore === false AND storePreserved === false AND deletedStoreId is valid UUID AND no ownership mismatch).
+      if (
+        rpcResult.isSharedStore === false &&
+        !rpcStorePreserved &&
+        !hasOwnershipMismatch &&
+        normalizedDeletedStoreId !== null
+      ) {
         const listedStorePaths = new Set<string>();
         const storeListRes = await listStorageObjectsRecursively(
           env.supabaseUrl,
@@ -1136,26 +2399,119 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
         if (storeListRes.hadError) listHadError = true;
         for (const p of listedStorePaths) {
           if (isSafeOwnedScopePath(p, ownerUserId, normalizedDeletedStoreId)) {
-            cleanupPaths.add(p);
+            addCandidatePath(p);
           }
         }
       }
-      // (B) When deletedStoreId === null or isSharedStore === true, NEVER touch store/product paths.
 
-      const finalExclusiveAssetPaths = Array.from(cleanupPaths).filter(
-        (p) => !protectedAssetPaths.has(p)
-      );
+      const preVerifyCandidates = Array.from(cleanupPaths);
+      let finalExclusiveAssetPaths: string[] = [];
+      let globalVerifyFailed = false;
 
-      storageCleanup = await removeStorageObjectsBatch(
-        env.supabaseUrl,
-        serviceHeaders,
-        finalExclusiveAssetPaths
-      );
+      if (preVerifyCandidates.length > 0) {
+        const verifyRes = await verifyStoragePathsGloballyViaRpc(
+          env.supabaseUrl,
+          serviceHeaders,
+          {
+            adminId: callerId,
+            candidatePaths: preVerifyCandidates,
+            excludeWebsiteId: websiteId,
+          }
+        );
+
+        if (!verifyRes.verified) {
+          globalVerifyFailed = true;
+          for (const p of preVerifyCandidates) {
+            recordManualReviewIfNotProtected(p);
+          }
+        } else {
+          verificationToken = verifyRes.verificationToken;
+          for (const rp of verifyRes.referencedPaths) {
+            protectedAssetPaths.add(rp);
+            protectedAssetPathsLower.add(rp.trim().toLowerCase());
+          }
+          for (const ap of verifyRes.abortedPaths) {
+            addConcurrentConflict(ap);
+          }
+          finalExclusiveAssetPaths = verifyRes.safeToDeletePaths;
+        }
+      }
+
+      if (globalVerifyFailed) {
+        storageCleanupSkipped = true;
+        storageCleanup = {
+          deletedCount: 0,
+          deletedPaths: [],
+          failedPaths: [],
+          abortedPaths: [],
+          unverifiedPaths: [],
+          warning:
+            'Database deletion committed, but global Storage reference verification failed; objects were preserved and flagged for manual review.',
+        };
+      } else {
+        storageCleanup = await removeStorageObjectsBatch(
+          env.supabaseUrl,
+          serviceHeaders,
+          finalExclusiveAssetPaths,
+          {
+            preDeleteVerify: (batchPaths) =>
+              verifyStoragePathsGloballyViaRpc(env.supabaseUrl, serviceHeaders, {
+                adminId: callerId,
+                candidatePaths: batchPaths,
+                excludeWebsiteId: websiteId,
+                verificationToken,
+              }),
+          }
+        );
+        for (const ap of storageCleanup.abortedPaths) {
+          addConcurrentConflict(ap);
+        }
+        for (const up of storageCleanup.unverifiedPaths) {
+          recordManualReviewIfNotProtected(up);
+        }
+      }
+
       if (listHadError && !storageCleanup.warning) {
         storageCleanup.warning =
           'Some storage folders could not be listed cleanly during post-deletion cleanup.';
+      } else if (manualReviewPaths.size > 0 && !storageCleanup.warning) {
+        storageCleanup.warning =
+          'Database deletion committed cleanly; one or more storage references could not be proven exclusive and were preserved for manual review.';
+      }
+
+      if (storageCleanup.failedPaths.length > 0 || listHadError) {
+        cleanupRecordedStatus = 'partial_failed';
+      } else if (
+        manualReviewPaths.size > 0 ||
+        globalVerifyFailed ||
+        storageCleanup.unverifiedPaths.length > 0
+      ) {
+        cleanupRecordedStatus = 'manual_review_required';
+      } else {
+        cleanupRecordedStatus = 'completed';
       }
     }
+
+    const manualReviewAssetPaths = Array.from(manualReviewPaths);
+    const manualReviewRequired = manualReviewAssetPaths.length > 0;
+
+    const recordRes = await recordStorageCleanupResultBestEffort(env.supabaseUrl, serviceHeaders, {
+      websiteId,
+      adminId: callerId,
+      status: cleanupRecordedStatus,
+      deletedCount: storageCleanup.deletedCount,
+      deletedPaths: storageCleanup.deletedPaths,
+      verificationToken,
+      failedPaths: storageCleanup.failedPaths,
+      manualReviewPaths: manualReviewAssetPaths,
+      error: storageCleanup.warning || null,
+    });
+
+    for (const lateRef of recordRes.lateConcurrentReferencePaths) {
+      addConcurrentConflict(lateRef);
+    }
+
+    const preservedReferencedAssetPaths = Array.from(protectedAssetPaths);
 
     sendJson(res, 200, {
       ok: true,
@@ -1168,9 +2524,22 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       websiteId,
       deletedWebsiteId: hasValidWebsiteMatch ? rpcDeletedWebsiteId : websiteId,
       deletedStoreId: hasValidDeletedStoreId ? normalizedDeletedStoreId : null,
+      preservedStoreId: normalizedPreservedStoreId,
       isSharedStore: typeof rpcResult.isSharedStore === 'boolean' ? rpcResult.isSharedStore : false,
+      storePreserved: rpcStorePreserved,
+      storePreservationReasons,
+      deletedProductIds: rpcDeletedProductIds,
+      preservedSharedProductIds: rpcPreservedSharedProductIds,
       deletedCounts: rpcResult.deletedCounts || {},
       deletedStorageObjects: storageCleanup.deletedCount,
+      storageCleanupStatus: cleanupRecordedStatus,
+      manualReviewRequired,
+      manualReviewAssetPaths,
+      preservedReferencedAssetPaths,
+      ...(concurrentReferenceConflicts.length > 0
+        ? { concurrentReferenceConflicts }
+        : {}),
+      ...(storageCleanup.failedPaths.length > 0 ? { failedStoragePaths: storageCleanup.failedPaths } : {}),
       ...(storageCleanupSkipped ? { storageCleanupSkipped: true } : {}),
       ...(storageCleanup.warning ? { storageCleanupWarning: storageCleanup.warning } : {}),
       auditLogId: typeof rpcResult.auditLogId === 'string' ? rpcResult.auditLogId : undefined,

@@ -18,6 +18,9 @@ import {
   WebsiteLifecycleAuditLog,
   WebsiteEditableFields,
   AdminPaymentApprovalRpcResult,
+  AdminWebsiteDeleteResult,
+  AdminStorageCleanupRetryResult,
+  WebsiteStorageCleanupJob,
 } from '../types';
 import { validateImageFileBinaryAndExtension } from './security';
 import {
@@ -4216,11 +4219,18 @@ interface AdminWebsiteActionApiResult {
   handled: boolean;
   success: boolean;
   code?: string;
+  idempotent?: boolean;
   message: string;
   auditLogId?: string;
+  websiteId?: string;
   deletedWebsiteId?: string;
   deletedStoreId?: string | null;
+  preservedStoreId?: string | null;
   isSharedStore?: boolean;
+  storePreserved?: boolean;
+  storePreservationReasons?: string[];
+  deletedProductIds?: string[];
+  preservedSharedProductIds?: string[];
   deletedCounts?: {
     products?: number;
     inventoryMovements?: number;
@@ -4229,12 +4239,19 @@ interface AdminWebsiteActionApiResult {
     storeMembers?: number;
   };
   deletedStorageObjects?: number;
+  storageCleanupStatus?: string;
+  cleanupStatus?: string;
+  manualReviewRequired?: boolean;
+  manualReviewAssetPaths?: string[];
+  preservedReferencedAssetPaths?: string[];
+  failedStoragePaths?: string[];
+  concurrentReferenceConflicts?: string[];
   storageCleanupSkipped?: boolean;
   storageCleanupWarning?: string;
 }
 
 async function callServerAdminWebsiteActionApi(payload: {
-  action: 'suspend' | 'reactivate' | 'renew' | 'delete';
+  action: 'suspend' | 'reactivate' | 'renew' | 'delete' | 'retry_storage_cleanup';
   websiteId: string;
   reason?: string;
   confirmSubdomain?: string;
@@ -4276,14 +4293,28 @@ async function callServerAdminWebsiteActionApi(payload: {
       ok?: boolean;
       success?: boolean;
       code?: string;
+      idempotent?: boolean;
       message?: string;
       error?: string;
       auditLogId?: string;
+      websiteId?: string;
       deletedWebsiteId?: string;
       deletedStoreId?: string | null;
+      preservedStoreId?: string | null;
       isSharedStore?: boolean;
+      storePreserved?: boolean;
+      storePreservationReasons?: string[];
+      deletedProductIds?: string[];
+      preservedSharedProductIds?: string[];
       deletedCounts?: AdminWebsiteActionApiResult['deletedCounts'];
       deletedStorageObjects?: number;
+      storageCleanupStatus?: string;
+      cleanupStatus?: string;
+      manualReviewRequired?: boolean;
+      manualReviewAssetPaths?: string[];
+      preservedReferencedAssetPaths?: string[];
+      failedStoragePaths?: string[];
+      concurrentReferenceConflicts?: string[];
       storageCleanupSkipped?: boolean;
       storageCleanupWarning?: string;
     };
@@ -4297,16 +4328,42 @@ async function callServerAdminWebsiteActionApi(payload: {
       handled: true,
       success: isOk,
       code: body?.code,
+      idempotent: body?.idempotent,
       message:
         body?.message ||
         body?.error ||
         (isOk ? 'Administrative action completed.' : 'Administrative action failed.'),
       auditLogId: body?.auditLogId,
+      websiteId: body?.websiteId,
       deletedWebsiteId: body?.deletedWebsiteId,
       deletedStoreId: body?.deletedStoreId ?? null,
+      preservedStoreId: body?.preservedStoreId ?? null,
       isSharedStore: body?.isSharedStore,
+      storePreserved: body?.storePreserved,
+      storePreservationReasons: Array.isArray(body?.storePreservationReasons)
+        ? body.storePreservationReasons
+        : undefined,
+      deletedProductIds: Array.isArray(body?.deletedProductIds) ? body.deletedProductIds : undefined,
+      preservedSharedProductIds: Array.isArray(body?.preservedSharedProductIds)
+        ? body.preservedSharedProductIds
+        : undefined,
       deletedCounts: body?.deletedCounts,
       deletedStorageObjects: body?.deletedStorageObjects,
+      storageCleanupStatus: body?.storageCleanupStatus || body?.cleanupStatus,
+      cleanupStatus: body?.cleanupStatus || body?.storageCleanupStatus,
+      manualReviewRequired: body?.manualReviewRequired,
+      manualReviewAssetPaths: Array.isArray(body?.manualReviewAssetPaths)
+        ? body.manualReviewAssetPaths
+        : undefined,
+      preservedReferencedAssetPaths: Array.isArray(body?.preservedReferencedAssetPaths)
+        ? body.preservedReferencedAssetPaths
+        : undefined,
+      failedStoragePaths: Array.isArray(body?.failedStoragePaths)
+        ? body.failedStoragePaths
+        : undefined,
+      concurrentReferenceConflicts: Array.isArray(body?.concurrentReferenceConflicts)
+        ? body.concurrentReferenceConflicts
+        : undefined,
       storageCleanupSkipped: body?.storageCleanupSkipped,
       storageCleanupWarning: body?.storageCleanupWarning,
     };
@@ -4318,20 +4375,7 @@ async function callServerAdminWebsiteActionApi(payload: {
 export async function adminDeleteSubscribedWebsiteInDb(
   websiteId: string,
   confirm?: { confirmSubdomain?: string; explicitConfirmed?: boolean; reason?: string }
-): Promise<{
-  success: boolean;
-  code?: string;
-  message: string;
-  auditLogId?: string;
-  deletedWebsiteId?: string;
-  deletedStoreId?: string | null;
-  isSharedStore?: boolean;
-  deletedCounts?: AdminWebsiteActionApiResult['deletedCounts'];
-  deletedStorageObjects?: number;
-  storageCleanupSkipped?: boolean;
-  storageCleanupWarning?: string;
-  error: Error | null;
-}> {
+): Promise<AdminWebsiteDeleteResult & { error: Error | null }> {
   const cleanId = (websiteId || '').trim();
   if (!UUID_REGEX.test(cleanId)) {
     const err = new Error('Invalid website ID format');
@@ -4374,9 +4418,20 @@ export async function adminDeleteSubscribedWebsiteInDb(
         auditLogId: apiRes.auditLogId,
         deletedWebsiteId: apiRes.deletedWebsiteId,
         deletedStoreId: apiRes.deletedStoreId ?? null,
+        preservedStoreId: apiRes.preservedStoreId ?? null,
         isSharedStore: apiRes.isSharedStore,
+        storePreserved: apiRes.storePreserved,
+        storePreservationReasons: apiRes.storePreservationReasons,
+        deletedProductIds: apiRes.deletedProductIds,
+        preservedSharedProductIds: apiRes.preservedSharedProductIds,
         deletedCounts: apiRes.deletedCounts,
         deletedStorageObjects: apiRes.deletedStorageObjects,
+        storageCleanupStatus: apiRes.storageCleanupStatus,
+        manualReviewRequired: apiRes.manualReviewRequired,
+        manualReviewAssetPaths: apiRes.manualReviewAssetPaths,
+        preservedReferencedAssetPaths: apiRes.preservedReferencedAssetPaths,
+        failedStoragePaths: apiRes.failedStoragePaths,
+        concurrentReferenceConflicts: apiRes.concurrentReferenceConflicts,
         storageCleanupSkipped: apiRes.storageCleanupSkipped,
         storageCleanupWarning: apiRes.storageCleanupWarning,
         error: apiRes.success ? null : new Error(apiRes.message),
@@ -4460,6 +4515,114 @@ export async function adminUpdateWebsiteLifecycleInDb(
   } catch (err: unknown) {
     const error = err instanceof Error ? err : new Error(`Failed to ${action} website`);
     return { success: false, message: error.message, error };
+  }
+}
+
+export async function adminRetryWebsiteStorageCleanupInDb(
+  websiteId: string
+): Promise<AdminStorageCleanupRetryResult & { error: Error | null }> {
+  const cleanId = (websiteId || '').trim();
+  if (!UUID_REGEX.test(cleanId)) {
+    const err = new Error('Invalid website ID format');
+    return { success: false, message: err.message, error: err };
+  }
+  if (!isSupabaseConfigured || !supabase) {
+    return {
+      success: true,
+      code: 'STORAGE_CLEANUP_COMPLETED',
+      websiteId: cleanId,
+      cleanupStatus: 'completed',
+      deletedStorageObjects: 0,
+      message: 'Local storage cleanup completed.',
+      error: null,
+    };
+  }
+  try {
+    const apiRes = await callServerAdminWebsiteActionApi({
+      action: 'retry_storage_cleanup',
+      websiteId: cleanId,
+    });
+    if (apiRes.handled) {
+      return {
+        success: apiRes.success,
+        code: apiRes.code,
+        idempotent: apiRes.idempotent,
+        websiteId: apiRes.websiteId || cleanId,
+        cleanupStatus: apiRes.cleanupStatus || apiRes.storageCleanupStatus,
+        deletedStorageObjects: apiRes.deletedStorageObjects,
+        failedStoragePaths: apiRes.failedStoragePaths,
+        manualReviewRequired: apiRes.manualReviewRequired,
+        manualReviewAssetPaths: apiRes.manualReviewAssetPaths,
+        preservedReferencedAssetPaths: apiRes.preservedReferencedAssetPaths,
+        concurrentReferenceConflicts: apiRes.concurrentReferenceConflicts,
+        storageCleanupWarning: apiRes.storageCleanupWarning,
+        message: apiRes.message,
+        error: apiRes.success ? null : new Error(apiRes.message),
+      };
+    }
+    const msg =
+      apiRes.message ||
+      'Server-side storage cleanup endpoint (/api/admin-website-action) is unavailable.';
+    return {
+      success: false,
+      code: apiRes.code || 'STORAGE_CLEANUP_RETRY_UNAVAILABLE',
+      message: msg,
+      error: new Error(msg),
+    };
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err : new Error('Failed to retry storage cleanup');
+    return { success: false, message: error.message, error };
+  }
+}
+
+export async function fetchPendingWebsiteStorageCleanupsFromDb(): Promise<{
+  data: WebsiteStorageCleanupJob[];
+  error: Error | null;
+}> {
+  if (!isSupabaseConfigured || !supabase) {
+    return { data: [], error: null };
+  }
+  try {
+    const { data, error } = await supabase
+      .from('website_deletion_storage_cleanups')
+      .select(
+        'id, website_id, owner_user_id, deleted_store_id, preserved_store_id, is_shared_store, store_preserved, subdomain, business_name, cleanup_status, deleted_objects_count, attempt_count, failed_object_paths, manual_review_paths, manual_review_required, last_error, last_attempt_at, created_at'
+      )
+      .in('cleanup_status', ['pending', 'partial_failed', 'manual_review_required', 'skipped'])
+      .order('created_at', { ascending: false })
+      .limit(25);
+
+    if (error) {
+      return { data: [], error: new Error(error.message) };
+    }
+
+    const mapped: WebsiteStorageCleanupJob[] = (Array.isArray(data) ? data : []).map((row: any) => ({
+      id: String(row.id),
+      websiteId: String(row.website_id),
+      ownerUserId: String(row.owner_user_id),
+      deletedStoreId: row.deleted_store_id || null,
+      preservedStoreId: row.preserved_store_id || null,
+      isSharedStore: Boolean(row.is_shared_store),
+      storePreserved: Boolean(row.store_preserved),
+      subdomain: String(row.subdomain || ''),
+      businessName: row.business_name || null,
+      cleanupStatus: row.cleanup_status,
+      deletedObjectsCount: Number(row.deleted_objects_count || 0),
+      attemptCount: Number(row.attempt_count || 0),
+      failedObjectPaths: Array.isArray(row.failed_object_paths) ? row.failed_object_paths : [],
+      manualReviewPaths: Array.isArray(row.manual_review_paths) ? row.manual_review_paths : [],
+      manualReviewRequired: Boolean(row.manual_review_required),
+      lastError: row.last_error || null,
+      lastAttemptAt: row.last_attempt_at || null,
+      createdAt: String(row.created_at || ''),
+    }));
+
+    return { data: mapped, error: null };
+  } catch (err: unknown) {
+    return {
+      data: [],
+      error: err instanceof Error ? err : new Error('Failed to load pending storage cleanups'),
+    };
   }
 }
 

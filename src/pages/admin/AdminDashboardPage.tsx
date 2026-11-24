@@ -110,6 +110,9 @@ export const AdminDashboardPage: React.FC = () => {
     reactivateSubscribedWebsite,
     renewSubscribedWebsite,
     adminDeleteSubscribedWebsite,
+    pendingStorageCleanups,
+    refreshPendingStorageCleanups,
+    retryWebsiteStorageCleanup,
     websiteLifecycleAuditLogs,
     refreshWebsiteLifecycleAuditLogs,
     invoices,
@@ -215,6 +218,19 @@ export const AdminDashboardPage: React.FC = () => {
   } | null>(null);
   const [isDeletingWebsite, setIsDeletingWebsite] = useState(false);
   const [deleteWebsiteError, setDeleteWebsiteError] = useState<string | null>(null);
+  const inFlightWebsiteActionIdsRef = useRef<Set<string>>(new Set());
+  const [processingWebsiteActions, setProcessingWebsiteActions] = useState<
+    Record<string, 'suspend' | 'reactivate' | 'renew' | 'delete' | 'cleanup'>
+  >({});
+  const [retryingCleanupWebsiteIds, setRetryingCleanupWebsiteIds] = useState<Record<string, boolean>>({});
+  const [websiteWorkflowFeedback, setWebsiteWorkflowFeedback] = useState<{
+    websiteId: string;
+    tone: 'success' | 'warning' | 'error';
+    title: string;
+    detail: string;
+    cleanupStatus?: string;
+    canRetryStorageCleanup?: boolean;
+  } | null>(null);
 
   // Plan Settings Modal State
   const [isPlanSettingsModalOpen, setIsPlanSettingsModalOpen] = useState(false);
@@ -328,8 +344,11 @@ export const AdminDashboardPage: React.FC = () => {
     ) {
       void refreshPaymentRequests({ asAdmin: true });
       void refreshSubscribedWebsites();
+      if (activeSection === 'websites') {
+        void refreshPendingStorageCleanups();
+      }
     }
-  }, [isOnline, activeSection, verifiedAdmin.id, refreshPaymentRequests, refreshSubscribedWebsites]);
+  }, [isOnline, activeSection, verifiedAdmin.id, refreshPaymentRequests, refreshSubscribedWebsites, refreshPendingStorageCleanups]);
 
   useEffect(() => {
     if (!isOnline || (activeSection !== 'overview' && activeSection !== 'payments')) return;
@@ -512,6 +531,7 @@ export const AdminDashboardPage: React.FC = () => {
       refreshPaymentRequests({ asAdmin: true }),
       refreshSubscribedWebsites(),
       refreshWebsiteLifecycleAuditLogs(),
+      refreshPendingStorageCleanups(),
     ]);
     showToast('Synchronized live admin queues.', 'info');
   };
@@ -689,7 +709,7 @@ export const AdminDashboardPage: React.FC = () => {
     }
   };
 
-  // Sensitive Action 3: Website Lifecycle Update (with server revalidation)
+  // Sensitive Action 3: Website Lifecycle Update (with server revalidation & double-click lock)
   const handleConfirmLifecycleAction = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!lifecycleModal || isLifecycleSubmitting) return;
@@ -700,10 +720,14 @@ export const AdminDashboardPage: React.FC = () => {
       return;
     }
 
+    const { site, action } = lifecycleModal;
+    if (inFlightWebsiteActionIdsRef.current.has(site.id)) return;
+
+    inFlightWebsiteActionIdsRef.current.add(site.id);
+    setProcessingWebsiteActions((prev) => ({ ...prev, [site.id]: action }));
     setIsLifecycleSubmitting(true);
     setLifecycleError(null);
     try {
-      const { site, action } = lifecycleModal;
       const recheck = await revalidateAdminBeforeAction({
         action: `website_${action}`,
         targetType: 'website',
@@ -737,6 +761,20 @@ export const AdminDashboardPage: React.FC = () => {
       });
 
       if (res.success) {
+        setWebsiteWorkflowFeedback({
+          websiteId: site.id,
+          tone: action === 'suspend' ? 'warning' : 'success',
+          title:
+            action === 'suspend'
+              ? `Website Suspended: ${site.fullDomainUrl}`
+              : action === 'reactivate'
+              ? `Website Reactivated: ${site.fullDomainUrl}`
+              : `Subscription Renewed: ${site.fullDomainUrl}`,
+          detail:
+            action === 'suspend'
+              ? `${site.businessName} is now offline to public visitors while all store, product, customer, order, and payment data remains preserved. (${cleanReason})`
+              : res.message,
+        });
         setLifecycleModal(null);
         setLifecycleReason('');
         setLifecycleError(null);
@@ -744,11 +782,17 @@ export const AdminDashboardPage: React.FC = () => {
         setLifecycleError(res.message || `Failed to ${action} website.`);
       }
     } finally {
+      inFlightWebsiteActionIdsRef.current.delete(site.id);
+      setProcessingWebsiteActions((prev) => {
+        const next = { ...prev };
+        delete next[site.id];
+        return next;
+      });
       setIsLifecycleSubmitting(false);
     }
   };
 
-  // Sensitive Action 4: Permanent Website Deletion (two-step verified, preserves store/products/orders/payments)
+  // Sensitive Action 4: Permanent Website Deletion (two-step verified, server-side store exclusivity)
   const handleConfirmDeleteWebsite = async () => {
     if (!deleteWebsiteModal || deleteWebsiteModal.step !== 2 || isDeletingWebsite) return;
     const { site, typedSubdomain, acknowledged } = deleteWebsiteModal;
@@ -763,7 +807,10 @@ export const AdminDashboardPage: React.FC = () => {
       setDeleteWebsiteError('Please check the explicit final confirmation box before deleting.');
       return;
     }
+    if (inFlightWebsiteActionIdsRef.current.has(site.id)) return;
 
+    inFlightWebsiteActionIdsRef.current.add(site.id);
+    setProcessingWebsiteActions((prev) => ({ ...prev, [site.id]: 'delete' }));
     setIsDeletingWebsite(true);
     setDeleteWebsiteError(null);
     try {
@@ -795,13 +842,104 @@ export const AdminDashboardPage: React.FC = () => {
       });
 
       if (res.success) {
+        const needsStorageRetry =
+          res.storageCleanupStatus === 'partial_failed' ||
+          res.storageCleanupStatus === 'skipped';
+        const storeSummary = res.deletedStoreId
+          ? 'Exclusive store and all associated store records were deleted.'
+          : res.isSharedStore || res.storePreserved
+          ? 'Shared merchant store and surviving sibling website data were preserved.'
+          : 'Website record deleted.';
+        const storageSummary =
+          typeof res.deletedStorageObjects === 'number' && res.deletedStorageObjects > 0
+            ? ` Removed ${res.deletedStorageObjects} exclusive storage file(s).`
+            : '';
+
+        setWebsiteWorkflowFeedback({
+          websiteId: site.id,
+          tone: needsStorageRetry || res.manualReviewRequired ? 'warning' : 'success',
+          title: needsStorageRetry
+            ? `Website Deleted — Storage Cleanup Needs Retry (${site.fullDomainUrl})`
+            : `Permanently Deleted: ${site.businessName} (${site.fullDomainUrl})`,
+          detail: `${res.message || storeSummary}${storageSummary}`,
+          cleanupStatus: res.storageCleanupStatus,
+          canRetryStorageCleanup: needsStorageRetry,
+        });
         setDeleteWebsiteModal(null);
         setDeleteWebsiteError(null);
       } else {
         setDeleteWebsiteError(res.message || 'Unable to delete website record.');
       }
     } finally {
+      inFlightWebsiteActionIdsRef.current.delete(site.id);
+      setProcessingWebsiteActions((prev) => {
+        const next = { ...prev };
+        delete next[site.id];
+        return next;
+      });
       setIsDeletingWebsite(false);
+    }
+  };
+
+  // Recovery Action: Retry pending/failed post-deletion Storage object cleanup via server-side outbox
+  const handleRetryWebsiteStorageCleanup = async (websiteId: string, label?: string) => {
+    if (inFlightWebsiteActionIdsRef.current.has(websiteId) || !isOnline) return;
+    inFlightWebsiteActionIdsRef.current.add(websiteId);
+    setProcessingWebsiteActions((prev) => ({ ...prev, [websiteId]: 'cleanup' }));
+    setRetryingCleanupWebsiteIds((prev) => ({ ...prev, [websiteId]: true }));
+
+    try {
+      const recheck = await revalidateAdminBeforeAction({
+        action: 'retry_website_storage_cleanup',
+        targetType: 'website',
+        targetId: websiteId,
+      });
+      if (!recheck.allowed) {
+        const msg = recheck.errorMessage || 'Session verification failed.';
+        showToast(msg, 'error');
+        await refreshVerification();
+        return;
+      }
+
+      const res = await retryWebsiteStorageCleanup(websiteId);
+      recordAdminSessionEvent({
+        adminId: verifiedAdmin.id,
+        action: 'retry_website_storage_cleanup',
+        targetType: 'website',
+        targetId: websiteId,
+        outcome: res.success ? 'success' : 'failed',
+        summary: res.message,
+      });
+
+      const stillNeedsRetry =
+        !res.success ||
+        res.cleanupStatus === 'partial_failed' ||
+        res.cleanupStatus === 'skipped';
+
+      setWebsiteWorkflowFeedback({
+        websiteId,
+        tone: !res.success ? 'error' : stillNeedsRetry ? 'warning' : 'success',
+        title: !res.success
+          ? `Storage Cleanup Retry Failed${label ? ` (${label})` : ''}`
+          : stillNeedsRetry
+          ? `Storage Cleanup Partially Pending${label ? ` (${label})` : ''}`
+          : `Storage Cleanup Completed${label ? ` (${label})` : ''}`,
+        detail: res.storageCleanupWarning ? `${res.message} (${res.storageCleanupWarning})` : res.message,
+        cleanupStatus: res.cleanupStatus,
+        canRetryStorageCleanup: stillNeedsRetry,
+      });
+    } finally {
+      inFlightWebsiteActionIdsRef.current.delete(websiteId);
+      setProcessingWebsiteActions((prev) => {
+        const next = { ...prev };
+        delete next[websiteId];
+        return next;
+      });
+      setRetryingCleanupWebsiteIds((prev) => {
+        const next = { ...prev };
+        delete next[websiteId];
+        return next;
+      });
     }
   };
 
@@ -1864,16 +2002,169 @@ export const AdminDashboardPage: React.FC = () => {
             </button>
           </div>
 
-          <div className="relative w-full sm:max-w-md">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-            <input
-              type="search"
-              value={websiteSearch}
-              onChange={(e) => setWebsiteSearch(e.target.value)}
-              placeholder="Filter by business name, owner, or subdomain..."
-              className="w-full min-h-[44px] pl-10 pr-4 py-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white text-xs focus:outline-hidden focus:border-blue-600"
-            />
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="relative w-full sm:max-w-md">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="search"
+                value={websiteSearch}
+                onChange={(e) => setWebsiteSearch(e.target.value)}
+                placeholder="Filter by business name, owner, or subdomain..."
+                className="w-full min-h-[44px] pl-10 pr-4 py-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white text-xs focus:outline-hidden focus:border-blue-600"
+              />
+            </div>
+
+            <button
+              type="button"
+              disabled={isWebsitesLoading || !isOnline}
+              onClick={() => void handleSyncAll()}
+              className="min-h-[44px] px-4 py-2 rounded-xl bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 font-semibold text-xs inline-flex items-center justify-center gap-2 transition-colors cursor-pointer self-start sm:self-auto whitespace-nowrap disabled:opacity-50"
+            >
+              <RefreshCw
+                className={`w-4 h-4 text-blue-600 dark:text-blue-400 ${
+                  isWebsitesLoading ? 'animate-spin' : ''
+                }`}
+              />
+              <span>Refresh</span>
+            </button>
           </div>
+
+          {websiteWorkflowFeedback && (
+            <div
+              role="status"
+              className={`p-4 rounded-2xl border text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                websiteWorkflowFeedback.tone === 'success'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200'
+                  : websiteWorkflowFeedback.tone === 'warning'
+                  ? 'bg-amber-50 dark:bg-amber-950/60 border-amber-200 dark:border-amber-800 text-amber-900 dark:text-amber-200'
+                  : 'bg-rose-50 dark:bg-rose-950/60 border-rose-200 dark:border-rose-800 text-rose-900 dark:text-rose-200'
+              }`}
+            >
+              <div className="flex items-start gap-2.5">
+                {websiteWorkflowFeedback.tone === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                ) : websiteWorkflowFeedback.tone === 'warning' ? (
+                  <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                ) : (
+                  <XCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+                )}
+                <div>
+                  <strong className="font-bold text-slate-900 dark:text-white block">
+                    {websiteWorkflowFeedback.title}
+                  </strong>
+                  <p className="text-[11px] mt-0.5 leading-relaxed">{websiteWorkflowFeedback.detail}</p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                {websiteWorkflowFeedback.canRetryStorageCleanup && (
+                  <button
+                    type="button"
+                    disabled={
+                      !isOnline ||
+                      Boolean(retryingCleanupWebsiteIds[websiteWorkflowFeedback.websiteId])
+                    }
+                    onClick={() =>
+                      void handleRetryWebsiteStorageCleanup(websiteWorkflowFeedback.websiteId)
+                    }
+                    className="min-h-[40px] px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    {retryingCleanupWebsiteIds[websiteWorkflowFeedback.websiteId] ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-3.5 h-3.5" />
+                    )}
+                    <span>Retry Storage Cleanup</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setWebsiteWorkflowFeedback(null)}
+                  className="min-h-[40px] min-w-[40px] inline-flex items-center justify-center rounded-xl hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer"
+                  aria-label="Dismiss website feedback"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {pendingStorageCleanups.length > 0 && (
+            <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 space-y-3 text-xs">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-2.5">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                  <div>
+                    <h2 className="font-bold text-slate-900 dark:text-white">
+                      Pending Storage Asset Cleanups ({pendingStorageCleanups.length})
+                    </h2>
+                    <p className="text-[11px] text-amber-800 dark:text-amber-200 mt-0.5">
+                      These deleted websites still have exclusive Storage objects queued for safe post-deletion cleanup. Retry when Storage connectivity is healthy.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                {pendingStorageCleanups.map((job) => {
+                  const isRetrying = Boolean(retryingCleanupWebsiteIds[job.websiteId]);
+                  const pendingCount = Array.isArray(job.failedObjectPaths)
+                    ? job.failedObjectPaths.length
+                    : 0;
+                  const manualCount = Array.isArray(job.manualReviewPaths)
+                    ? job.manualReviewPaths.length
+                    : 0;
+
+                  return (
+                    <div
+                      key={job.websiteId}
+                      className="p-3 rounded-xl bg-white dark:bg-slate-900 border border-amber-200/80 dark:border-amber-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                    >
+                      <div className="min-w-0 space-y-0.5">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono font-bold text-slate-900 dark:text-white">
+                            {job.subdomain ? `${job.subdomain}.amaas.xyz` : job.websiteId}
+                          </span>
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-200">
+                            {job.cleanupStatus.replace('_', ' ')}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-600 dark:text-slate-400">
+                          Pending files: <strong>{pendingCount}</strong>
+                          {manualCount > 0 ? ` · Manual review paths: ${manualCount}` : ''}
+                          {job.attemptCount > 0 ? ` · Attempts: ${job.attemptCount}` : ''}
+                        </p>
+                        {job.lastError && (
+                          <p className="text-[11px] text-rose-600 dark:text-rose-400 break-words">
+                            Last error: {job.lastError}
+                          </p>
+                        )}
+                      </div>
+
+                      <button
+                        type="button"
+                        disabled={!isOnline || isRetrying}
+                        onClick={() =>
+                          void handleRetryWebsiteStorageCleanup(
+                            job.websiteId,
+                            job.subdomain ? `${job.subdomain}.amaas.xyz` : undefined
+                          )
+                        }
+                        className="min-h-[40px] px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs inline-flex items-center justify-center gap-1.5 cursor-pointer shrink-0 whitespace-nowrap"
+                      >
+                        {isRetrying ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <RefreshCw className="w-3.5 h-3.5" />
+                        )}
+                        <span>{isRetrying ? 'Retrying...' : 'Retry Cleanup'}</span>
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {filteredWebsites.length === 0 ? (
             <EmptyState
@@ -1889,7 +2180,10 @@ export const AdminDashboardPage: React.FC = () => {
                   const isSuspended =
                     site.subscriptionStatus === 'suspended' ||
                     site.deploymentStatus === 'suspended';
+                  const isCancelled = site.subscriptionStatus === 'cancelled';
                   const trulyLive = isWebsiteTrulyLive(site);
+                  const activeWebsiteStep = processingWebsiteActions[site.id];
+                  const isRowBusy = Boolean(activeWebsiteStep);
                   const hasPaymentHistory = paymentRequests.some(
                     (r) =>
                       isWebsitePaymentService(r.serviceType) && r.serviceId === site.id
@@ -1920,7 +2214,7 @@ export const AdminDashboardPage: React.FC = () => {
                             className={`font-semibold block ${
                               trulyLive
                                 ? 'text-emerald-600 dark:text-emerald-400'
-                                : isSuspended || isWebsiteSubscriptionExpired(site)
+                                : isSuspended || isCancelled || isWebsiteSubscriptionExpired(site)
                                 ? 'text-rose-600 dark:text-rose-400'
                                 : 'text-amber-600 dark:text-amber-400'
                             }`}
@@ -1929,6 +2223,8 @@ export const AdminDashboardPage: React.FC = () => {
                               ? 'Published Live'
                               : isSuspended
                               ? 'Suspended'
+                              : isCancelled
+                              ? 'Cancelled'
                               : site.paymentStatus === 'paid' && isWebsiteSubscriptionExpired(site)
                               ? 'Expired · Offline (Saved)'
                               : site.paymentStatus === 'paid'
@@ -1959,13 +2255,13 @@ export const AdminDashboardPage: React.FC = () => {
                           className="min-h-[44px] px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
                         >
                           <Eye className="w-3.5 h-3.5" />
-                          <span>Preview</span>
+                          <span>View Details</span>
                         </button>
 
                         {isSuspended ? (
                           <button
                             type="button"
-                            disabled={site.paymentStatus !== 'paid' || !isOnline}
+                            disabled={site.paymentStatus !== 'paid' || !isOnline || isRowBusy}
                             onClick={() => {
                               setLifecycleReason('');
                               setLifecycleError(null);
@@ -1973,13 +2269,17 @@ export const AdminDashboardPage: React.FC = () => {
                             }}
                             className="min-h-[44px] px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
                           >
-                            <PlayCircle className="w-3.5 h-3.5" />
-                            <span>Activate</span>
+                            {activeWebsiteStep === 'reactivate' ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <PlayCircle className="w-3.5 h-3.5" />
+                            )}
+                            <span>{activeWebsiteStep === 'reactivate' ? 'Reactivating...' : 'Reactivate'}</span>
                           </button>
                         ) : (
                           <button
                             type="button"
-                            disabled={!isOnline}
+                            disabled={!isOnline || isRowBusy || isCancelled}
                             onClick={() => {
                               setLifecycleReason('');
                               setLifecycleError(null);
@@ -1987,14 +2287,18 @@ export const AdminDashboardPage: React.FC = () => {
                             }}
                             className="min-h-[44px] px-3 py-2 rounded-xl bg-amber-500/15 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-800 disabled:opacity-40 text-amber-800 dark:text-amber-300 font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
                           >
-                            <PauseCircle className="w-3.5 h-3.5" />
-                            <span>Suspend</span>
+                            {activeWebsiteStep === 'suspend' ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <PauseCircle className="w-3.5 h-3.5" />
+                            )}
+                            <span>{activeWebsiteStep === 'suspend' ? 'Suspending...' : 'Suspend'}</span>
                           </button>
                         )}
 
                         <button
                           type="button"
-                          disabled={site.paymentStatus !== 'paid' || !isOnline}
+                          disabled={site.paymentStatus !== 'paid' || !isOnline || isRowBusy}
                           onClick={() => {
                             setLifecycleReason('');
                             setLifecycleError(null);
@@ -2002,13 +2306,13 @@ export const AdminDashboardPage: React.FC = () => {
                           }}
                           className="min-h-[44px] px-3 py-2 rounded-xl bg-blue-50 dark:bg-blue-950/60 border border-blue-200 dark:border-blue-800 disabled:opacity-40 text-blue-700 dark:text-blue-300 font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
                         >
-                          <RefreshCw className="w-3.5 h-3.5" />
+                          <RefreshCw className={`w-3.5 h-3.5 ${activeWebsiteStep === 'renew' ? 'animate-spin' : ''}`} />
                           <span>Renew</span>
                         </button>
 
                         <button
                           type="button"
-                          disabled={!isOnline}
+                          disabled={!isOnline || isRowBusy}
                           onClick={() => {
                             setDeleteWebsiteError(null);
                             setDeleteWebsiteModal({
@@ -2022,8 +2326,12 @@ export const AdminDashboardPage: React.FC = () => {
                           className="min-h-[44px] px-3 py-2 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900 disabled:opacity-30 text-rose-700 dark:text-rose-300 font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
                           title="Permanently delete website and all associated business data"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          <span>Delete</span>
+                          {activeWebsiteStep === 'delete' ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Trash2 className="w-3.5 h-3.5" />
+                          )}
+                          <span>{activeWebsiteStep === 'delete' ? 'Deleting...' : 'Delete'}</span>
                         </button>
                       </div>
                     </div>
@@ -2049,7 +2357,10 @@ export const AdminDashboardPage: React.FC = () => {
                       const isSuspended =
                         site.subscriptionStatus === 'suspended' ||
                         site.deploymentStatus === 'suspended';
+                      const isCancelled = site.subscriptionStatus === 'cancelled';
                       const trulyLive = isWebsiteTrulyLive(site);
+                      const activeWebsiteStep = processingWebsiteActions[site.id];
+                      const isRowBusy = Boolean(activeWebsiteStep);
                       const hasPaymentHistory = paymentRequests.some(
                         (r) =>
                           isWebsitePaymentService(r.serviceType) && r.serviceId === site.id
@@ -2066,9 +2377,14 @@ export const AdminDashboardPage: React.FC = () => {
                             <span className="font-semibold text-slate-900 dark:text-white block">
                               {site.businessName}
                             </span>
-                            <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                            <span className="text-[11px] text-slate-500 dark:text-slate-400 block">
                               {site.ownerName} &middot; {site.phone || '—'}
                             </span>
+                            {site.email && (
+                              <span className="text-[10px] text-slate-400 dark:text-slate-500 block break-all">
+                                {site.email}
+                              </span>
+                            )}
                           </td>
 
                           <td className="py-3.5 px-4 font-mono">
@@ -2104,7 +2420,7 @@ export const AdminDashboardPage: React.FC = () => {
                               className={`font-semibold block ${
                                 trulyLive
                                   ? 'text-emerald-600 dark:text-emerald-400'
-                                  : isSuspended || isWebsiteSubscriptionExpired(site)
+                                  : isSuspended || isCancelled || isWebsiteSubscriptionExpired(site)
                                   ? 'text-rose-600 dark:text-rose-400'
                                   : 'text-amber-600 dark:text-amber-400'
                               }`}
@@ -2113,6 +2429,8 @@ export const AdminDashboardPage: React.FC = () => {
                                 ? 'Active · Live'
                                 : isSuspended
                                 ? 'Suspended · Offline'
+                                : isCancelled
+                                ? 'Cancelled · Offline'
                                 : site.paymentStatus === 'paid' &&
                                   isWebsiteSubscriptionExpired(site)
                                 ? 'Expired (30d) · Offline (Saved)'
@@ -2144,13 +2462,13 @@ export const AdminDashboardPage: React.FC = () => {
                                 className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
                               >
                                 <Eye className="w-3.5 h-3.5" />
-                                <span>Preview</span>
+                                <span>View Details</span>
                               </button>
 
                               {isSuspended ? (
                                 <button
                                   type="button"
-                                  disabled={site.paymentStatus !== 'paid' || !isOnline}
+                                  disabled={site.paymentStatus !== 'paid' || !isOnline || isRowBusy}
                                   onClick={() => {
                                     setLifecycleReason('');
                                     setLifecycleError(null);
@@ -2158,13 +2476,17 @@ export const AdminDashboardPage: React.FC = () => {
                                   }}
                                   className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
                                 >
-                                  <PlayCircle className="w-3.5 h-3.5" />
-                                  <span>Activate</span>
+                                  {activeWebsiteStep === 'reactivate' ? (
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  ) : (
+                                    <PlayCircle className="w-3.5 h-3.5" />
+                                  )}
+                                  <span>{activeWebsiteStep === 'reactivate' ? 'Reactivating...' : 'Reactivate'}</span>
                                 </button>
                               ) : (
                                 <button
                                   type="button"
-                                  disabled={!isOnline}
+                                  disabled={!isOnline || isRowBusy || isCancelled}
                                   onClick={() => {
                                     setLifecycleReason('');
                                     setLifecycleError(null);
@@ -2172,14 +2494,18 @@ export const AdminDashboardPage: React.FC = () => {
                                   }}
                                   className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-amber-500/15 dark:bg-amber-900/50 hover:bg-amber-500/25 disabled:opacity-40 text-amber-800 dark:text-amber-200 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
                                 >
-                                  <PauseCircle className="w-3.5 h-3.5" />
-                                  <span>Suspend</span>
+                                  {activeWebsiteStep === 'suspend' ? (
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  ) : (
+                                    <PauseCircle className="w-3.5 h-3.5" />
+                                  )}
+                                  <span>{activeWebsiteStep === 'suspend' ? 'Suspending...' : 'Suspend'}</span>
                                 </button>
                               )}
 
                               <button
                                 type="button"
-                                disabled={site.paymentStatus !== 'paid' || !isOnline}
+                                disabled={site.paymentStatus !== 'paid' || !isOnline || isRowBusy}
                                 onClick={() => {
                                   setLifecycleReason('');
                                   setLifecycleError(null);
@@ -2187,13 +2513,13 @@ export const AdminDashboardPage: React.FC = () => {
                                 }}
                                 className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-blue-50 dark:bg-blue-900/50 hover:bg-blue-100 dark:hover:bg-blue-800 disabled:opacity-40 text-blue-700 dark:text-blue-200 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
                               >
-                                <RefreshCw className="w-3.5 h-3.5" />
+                                <RefreshCw className={`w-3.5 h-3.5 ${activeWebsiteStep === 'renew' ? 'animate-spin' : ''}`} />
                                 <span>Renew</span>
                               </button>
 
                               <button
                                 type="button"
-                                disabled={!isOnline}
+                                disabled={!isOnline || isRowBusy}
                                 onClick={() => {
                                   setDeleteWebsiteError(null);
                                   setDeleteWebsiteModal({
@@ -2204,10 +2530,15 @@ export const AdminDashboardPage: React.FC = () => {
                                     hasPaymentHistory,
                                   });
                                 }}
-                                className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-rose-50 dark:bg-rose-950/60 hover:bg-rose-100 dark:hover:bg-rose-900 disabled:opacity-30 text-rose-700 dark:text-rose-300 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                                className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-rose-50 dark:bg-rose-950/60 hover:bg-rose-100 dark:hover:bg-rose-900 disabled:opacity-30 text-rose-700 dark:text-rose-300 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
                                 title="Permanently delete website and all associated business data"
                               >
-                                <Trash2 className="w-3.5 h-3.5" />
+                                {activeWebsiteStep === 'delete' ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                )}
+                                <span>{activeWebsiteStep === 'delete' ? 'Deleting...' : 'Delete'}</span>
                               </button>
                             </div>
                           </td>
@@ -3709,7 +4040,7 @@ export const AdminDashboardPage: React.FC = () => {
                   {lifecycleModal.action === 'suspend'
                     ? 'Suspend Website'
                     : lifecycleModal.action === 'reactivate'
-                    ? 'Activate Website'
+                    ? 'Reactivate Website'
                     : 'Confirm & Log Action'}
                 </span>
               </button>
@@ -3748,7 +4079,7 @@ export const AdminDashboardPage: React.FC = () => {
             <div className="space-y-4 text-xs">
               <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1.5">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-slate-500 dark:text-slate-400">Website Name</span>
+                  <span className="text-slate-500 dark:text-slate-400">Business Name</span>
                   <span className="font-bold text-slate-900 dark:text-white text-right">
                     {site.businessName}
                   </span>
@@ -3765,6 +4096,22 @@ export const AdminDashboardPage: React.FC = () => {
                     {site.ownerName}
                   </span>
                 </div>
+                {site.email && (
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500 dark:text-slate-400">Owner Email</span>
+                    <span className="font-mono text-slate-700 dark:text-slate-300 text-right break-all">
+                      {site.email}
+                    </span>
+                  </div>
+                )}
+                {site.phone && (
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500 dark:text-slate-400">Owner Phone</span>
+                    <span className="font-mono text-slate-700 dark:text-slate-300 text-right tabular-nums">
+                      {site.phone}
+                    </span>
+                  </div>
+                )}
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-slate-500 dark:text-slate-400">Status</span>
                   <span className="text-slate-700 dark:text-slate-300 capitalize text-right">

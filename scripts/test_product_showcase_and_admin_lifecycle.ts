@@ -299,6 +299,32 @@ async function runTests() {
     assert.ok(deleteWrapperSlice.includes('ATOMIC_DELETE_UNAVAILABLE'));
   });
 
+  await check('2.2 AdminDashboardPage & AppContext wire View Details, Suspend/Reactivate, owner email/phone, inline feedback, retry cleanup queue, and synchronous double-click lock', () => {
+    const supabaseLibSrc = fs.readFileSync(path.join(root, 'src/lib/supabase.ts'), 'utf8');
+    // UI action labels & owner info in Permanent Delete modal
+    assert.ok(adminPageSrc.includes('View Details'));
+    assert.ok(adminPageSrc.includes('<span>Suspend</span>') || adminPageSrc.includes("'Suspending...'"));
+    assert.ok(adminPageSrc.includes("'Reactivate'"));
+    assert.ok(adminPageSrc.includes('Reactivate Website'));
+    assert.ok(adminPageSrc.includes('Owner Email'));
+    assert.ok(adminPageSrc.includes('Owner Phone'));
+    assert.ok(adminPageSrc.includes('site.email'));
+    assert.ok(adminPageSrc.includes('site.phone'));
+    // Synchronous double-click / concurrency guard + inline feedback + retry queue
+    assert.ok(adminPageSrc.includes('inFlightWebsiteActionIdsRef'));
+    assert.ok(adminPageSrc.includes('websiteWorkflowFeedback'));
+    assert.ok(adminPageSrc.includes('pendingStorageCleanups'));
+    assert.ok(adminPageSrc.includes('handleRetryWebsiteStorageCleanup'));
+    assert.ok(adminPageSrc.includes('Pending Storage Asset Cleanups'));
+    // AppContext & Supabase client wrappers
+    assert.ok(appCtxSrc.includes('retryWebsiteStorageCleanup'));
+    assert.ok(appCtxSrc.includes('refreshPendingStorageCleanups'));
+    assert.ok(appCtxSrc.includes('inFlightWebsiteDeletionIdsRef'));
+    assert.ok(appCtxSrc.includes('AdminWebsiteDeleteResult'));
+    assert.ok(supabaseLibSrc.includes('adminRetryWebsiteStorageCleanupInDb'));
+    assert.ok(supabaseLibSrc.includes('fetchPendingWebsiteStorageCleanupsFromDb'));
+  });
+
   // Set up controlled mock environment for testing /api/admin-website-action handler
   const prevEnv = {
     VITE_SUPABASE_URL: process.env.VITE_SUPABASE_URL,
@@ -318,10 +344,40 @@ async function runTests() {
   const adminToken = buildFakeJwt({ sub: ADMIN_UUID, aal: 'aal2' });
   const adminAal1Token = buildFakeJwt({ sub: ADMIN_UUID, aal: 'aal1' });
   const merchantToken = buildFakeJwt({ sub: MERCHANT_UUID, aal: 'aal1' });
+  const SPOOFED_ADMIN_UUID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbb99';
+  const spoofedAdminToken = buildFakeJwt({ sub: SPOOFED_ADMIN_UUID, aal: 'aal2' });
 
   let rpcInstalledInMock = true;
   let customRpcResultOverride: Record<string, unknown> | null = null;
   let forceStorageDeleteFail = false;
+  let forceGlobalVerifyFail = false;
+  let forceBatchConfirmVerifyFail = false;
+  let adminFactorsOverride: Array<{ factor_type: string; status: string }> | null = null;
+  let verifyCallCount = 0;
+  let onBeforeBatchConfirmVerify: ((candidatePaths: string[], callNum: number) => void) | null = null;
+  let simulateMissingLogoColumn = false;
+  let targetStoreOrdersOverride: Array<{ id: string; items: unknown }> = [];
+  let siblingOrdersOverride: Array<{ id: string; items: unknown }> = [];
+  let siblingSiteConfigOverride: Record<string, unknown> | null = null;
+  let globallyProtectedPathsMock = new Set<string>();
+  let globallyAbortedPathsMock = new Set<string>();
+  let mockCleanupJobState: {
+    id: string;
+    websiteId: string;
+    ownerUserId: string;
+    deletedStoreId: string | null;
+    preservedStoreId?: string | null;
+    isSharedStore: boolean;
+    storePreserved?: boolean;
+    cleanupStatus: string;
+    cleanupObjectPaths: string[];
+    preservedReferencePaths: string[];
+    manualReviewPaths: string[];
+    manualReviewRequired: boolean;
+    deletedObjectPaths?: string[];
+    failedObjectPaths: string[];
+    deletedObjectsCount: number;
+  } | null = null;
   let crossUserSiblingSite: { id: string; user_id: string; store_id: string; config: Record<string, unknown> } | null = null;
   let siteStoreIdOverride: string | null | undefined = undefined;
   let storageDeleteRequests: Array<{ url: string; prefixes: string[] }> = [];
@@ -397,6 +453,17 @@ async function runTests() {
               id: ADMIN_UUID,
               email: 'official.amaas.dev@gmail.com',
               email_confirmed_at: '2026-01-01T00:00:00Z',
+              factors: adminFactorsOverride ?? [{ factor_type: 'totp', status: 'verified' }],
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        if (token === spoofedAdminToken) {
+          return new Response(
+            JSON.stringify({
+              id: SPOOFED_ADMIN_UUID,
+              email: 'spoofed.admin@amaas.test',
+              email_confirmed_at: '2026-01-01T00:00:00Z',
               factors: [{ factor_type: 'totp', status: 'verified' }],
             }),
             { status: 200, headers: { 'Content-Type': 'application/json' } }
@@ -419,16 +486,49 @@ async function runTests() {
       dbCalls.push({ method, url, body: parsedBody });
 
       if (url.includes('/rest/v1/profiles')) {
+        if (url.includes(`id=eq.${ADMIN_UUID}`)) {
+          return new Response(
+            JSON.stringify([
+              {
+                id: ADMIN_UUID,
+                email: 'official.amaas.dev@gmail.com',
+                role: 'admin',
+                avatar_url: null,
+              },
+            ]),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
         return new Response(
-          JSON.stringify([
-            {
-              id: ADMIN_UUID,
-              email: 'official.amaas.dev@gmail.com',
-              role: 'admin',
-            },
-          ]),
+          JSON.stringify([{ id: MERCHANT_UUID, avatar_url: null }]),
           { status: 200, headers: { 'Content-Type': 'application/json' } }
         );
+      }
+
+      if (url.includes('/rest/v1/stores') && method === 'GET') {
+        if (simulateMissingLogoColumn) {
+          return new Response(
+            JSON.stringify({ code: '42703', message: 'column stores.logo_url does not exist' }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      if (url.includes('/rest/v1/orders') && method === 'GET') {
+        if (url.includes(`store_id=in.`)) {
+          return new Response(JSON.stringify(siblingOrdersOverride), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify(targetStoreOrdersOverride), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
       }
 
       if (url.includes('/rest/v1/subscribed_websites') && method === 'GET') {
@@ -459,7 +559,7 @@ async function runTests() {
                 id: SIBLING_SITE_UUID,
                 user_id: MERCHANT_UUID,
                 store_id: SIBLING_STORE_UUID,
-                config: { logoUrl: SHARED_IMAGE_URL },
+                config: siblingSiteConfigOverride ?? { logoUrl: SHARED_IMAGE_URL },
               },
             ]),
             { status: 200, headers: { 'Content-Type': 'application/json' } }
@@ -552,6 +652,133 @@ async function runTests() {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
+      }
+
+      if (url.endsWith('/rest/v1/rpc/admin_verify_storage_paths_for_deletion') && method === 'POST') {
+        verifyCallCount += 1;
+        if (forceGlobalVerifyFail || (verifyCallCount > 1 && forceBatchConfirmVerifyFail)) {
+          return new Response(JSON.stringify({ message: 'Transient RPC error' }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        const rawCandidates = Array.isArray((parsedBody as { p_candidate_paths?: unknown[] })?.p_candidate_paths)
+          ? ((parsedBody as { p_candidate_paths: string[] }).p_candidate_paths)
+          : [];
+        if (verifyCallCount > 1 && onBeforeBatchConfirmVerify) {
+          onBeforeBatchConfirmVerify(rawCandidates, verifyCallCount);
+        }
+        const refPaths: string[] = [];
+        const abortedPaths: string[] = [];
+        const safePaths: string[] = [];
+        for (const p of rawCandidates) {
+          const lower = p.toLowerCase();
+          if (globallyAbortedPathsMock.has(lower)) {
+            abortedPaths.push(p);
+            refPaths.push(p);
+          } else if (globallyProtectedPathsMock.has(lower)) {
+            refPaths.push(p);
+          } else {
+            safePaths.push(p);
+          }
+        }
+        const reqToken = (parsedBody as { p_verification_token?: string })?.p_verification_token;
+        return new Response(
+          JSON.stringify({
+            success: true,
+            verificationToken: reqToken || '99999999-1111-4111-8111-999999999999',
+            safeToDeletePaths: safePaths,
+            referencedPaths: refPaths,
+            abortedPaths,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      if (url.endsWith('/rest/v1/rpc/admin_get_website_storage_cleanup_job') && method === 'POST') {
+        if (mockCleanupJobState) {
+          return new Response(JSON.stringify({ success: true, job: mockCleanupJobState }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(
+          JSON.stringify({ success: false, code: 'CLEANUP_JOB_NOT_FOUND' }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      if (url.endsWith('/rest/v1/rpc/admin_get_pending_website_storage_cleanups') && method === 'POST') {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            jobs: [
+              mockCleanupJobState ?? {
+                id: 'cleanup-job-1',
+                websiteId: WEBSITE_UUID,
+                ownerUserId: MERCHANT_UUID,
+                deletedStoreId: STORE_UUID,
+                isSharedStore: false,
+                cleanupStatus: 'partial_failed',
+                failedObjectPaths: [`${MERCHANT_UUID}/${WEBSITE_UUID}/heroes/hero-1.png`],
+              },
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      if (url.endsWith('/rest/v1/rpc/admin_record_website_storage_cleanup_result') && method === 'POST') {
+        const pb = (parsedBody || {}) as {
+          p_status?: string;
+          p_deleted_count?: number;
+          p_deleted_paths?: string[];
+          p_failed_paths?: string[];
+          p_manual_review_paths?: string[] | null;
+        };
+        if (mockCleanupJobState) {
+          const nextManual = Array.isArray(pb.p_manual_review_paths)
+            ? pb.p_manual_review_paths
+            : mockCleanupJobState.manualReviewPaths;
+          const prevDeleted = Array.isArray(mockCleanupJobState.deletedObjectPaths)
+            ? mockCleanupJobState.deletedObjectPaths
+            : [];
+          const prevDeletedLower = new Set(prevDeleted.map((p) => p.toLowerCase()));
+          let addedCount = 0;
+          const nextDeleted = [...prevDeleted];
+          if (Array.isArray(pb.p_deleted_paths) && pb.p_deleted_paths.length > 0) {
+            for (const dp of pb.p_deleted_paths) {
+              const lower = String(dp).toLowerCase();
+              if (!prevDeletedLower.has(lower)) {
+                prevDeletedLower.add(lower);
+                nextDeleted.push(dp);
+                addedCount += 1;
+              }
+            }
+          } else {
+            addedCount = Number(pb.p_deleted_count || 0);
+          }
+          mockCleanupJobState = {
+            ...mockCleanupJobState,
+            cleanupStatus: pb.p_status || mockCleanupJobState.cleanupStatus,
+            deletedObjectPaths: nextDeleted,
+            deletedObjectsCount: (mockCleanupJobState.deletedObjectsCount || 0) + addedCount,
+            failedObjectPaths: Array.isArray(pb.p_failed_paths) ? pb.p_failed_paths : [],
+            manualReviewPaths: nextManual,
+            manualReviewRequired: nextManual.length > 0,
+          };
+        }
+        return new Response(
+          JSON.stringify({
+            success: true,
+            lateConcurrentReferencePaths: Array.from(globallyAbortedPathsMock),
+            deletedObjectsCount: mockCleanupJobState?.deletedObjectsCount ?? Number(pb.p_deleted_count || 0),
+          }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }
+        );
       }
 
       if (url.endsWith('/rest/v1/rpc/admin_permanently_delete_website') && method === 'POST') {
@@ -851,7 +1078,7 @@ async function runTests() {
         );
       }
     });
-    await check('2.12 Post-RPC Storage cleanup NEVER deletes store/product assets when rpcResult.isSharedStore === true', async () => {
+    await check('2.12 Post-RPC Storage cleanup NEVER deletes surviving store/product assets or lists store folder when isSharedStore === true', async () => {
       storageDeleteRequests = [];
       storageListRequests = [];
       customRpcResultOverride = {
@@ -860,6 +1087,8 @@ async function runTests() {
         deletedWebsiteId: WEBSITE_UUID,
         deletedStoreId: null,
         isSharedStore: true,
+        storePreserved: true,
+        deletedProductIds: [],
         deletedCounts: { products: 0, inventoryMovements: 0, customers: 0, orders: 0, storeMembers: 0 },
       };
       const { req, res, getResult } = makeMockReqRes({
@@ -876,12 +1105,60 @@ async function runTests() {
       const out = getResult();
       assert.equal(out.statusCode, 200);
       assert.equal(out.json?.isSharedStore, true);
+      assert.equal(out.json?.storePreserved, true);
       assert.equal(out.json?.deletedStoreId, null);
       assert.equal(storageDeleteRequests.length, 1);
       const removed = storageDeleteRequests[0].prefixes;
       assert.ok(removed.includes(`${MERCHANT_UUID}/${WEBSITE_UUID}/heroes/hero-1.png`));
       assert.ok(!removed.includes(`${MERCHANT_UUID}/${STORE_UUID}/products/item-1.png`));
       assert.ok(!storageListRequests.includes(`${MERCHANT_UUID}/${STORE_UUID}`));
+      customRpcResultOverride = null;
+    });
+
+    await check('2.12b Shared/preserved store cleanup removes confirmed deletedProductIds image assets without wiping surviving store assets', async () => {
+      storageDeleteRequests = [];
+      storageListRequests = [];
+      const DEL_PROD_UUID = '77777777-7777-4777-8777-777777777701';
+      const DEL_PROD_ONLY_PATH = `${MERCHANT_UUID}/${STORE_UUID}/products/exclusive-site-only.png`;
+      const DEL_PROD_ONLY_URL = `https://mock.supabase.co/storage/v1/object/public/website-assets/${DEL_PROD_ONLY_PATH}`;
+      customRpcResultOverride = {
+        success: true,
+        code: 'DELETED',
+        deletedWebsiteId: WEBSITE_UUID,
+        deletedStoreId: null,
+        preservedStoreId: STORE_UUID,
+        isSharedStore: true,
+        storePreserved: true,
+        deletedProductIds: [DEL_PROD_UUID],
+        deletedProductImageUrls: [DEL_PROD_ONLY_URL],
+        cleanupObjectPaths: [DEL_PROD_ONLY_PATH],
+        deletedCounts: { products: 1, inventoryMovements: 1, customers: 0, orders: 0, storeMembers: 0 },
+      };
+      const { req, res, getResult } = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        body: {
+          action: 'delete',
+          websiteId: WEBSITE_UUID,
+          confirmSubdomain: 'fortyninee',
+          explicitConfirmed: true,
+        },
+      });
+      await adminWebsiteActionHandler(req, res);
+      const out = getResult();
+      assert.equal(out.statusCode, 200);
+      assert.equal(out.json?.storePreserved, true);
+      assert.equal(out.json?.preservedStoreId, STORE_UUID);
+      assert.deepEqual(out.json?.deletedProductIds, [DEL_PROD_UUID]);
+      assert.equal(storageDeleteRequests.length, 1);
+      const removed = storageDeleteRequests[0].prefixes;
+      assert.ok(removed.includes(`${MERCHANT_UUID}/${WEBSITE_UUID}/heroes/hero-1.png`));
+      assert.ok(removed.includes(DEL_PROD_ONLY_PATH));
+      // Surviving product ('prod-del-1' -> item-1.png) inside preserved store MUST stay protected!
+      assert.ok(!removed.includes(`${MERCHANT_UUID}/${STORE_UUID}/products/item-1.png`));
+      // Still must NEVER recursively list the preserved store folder!
+      assert.ok(!storageListRequests.includes(`${MERCHANT_UUID}/${STORE_UUID}`));
+      assert.ok(!removed.includes(`${MERCHANT_UUID}/general/shared-logo.png`));
       customRpcResultOverride = null;
     });
 
@@ -912,8 +1189,8 @@ async function runTests() {
       const out = getResult();
       assert.equal(out.statusCode, 200);
       assert.equal(out.json?.deletedStoreId, null);
-      // Never queried public.stores to guess store by owner_id
-      assert.ok(!dbCalls.some((c) => c.url.includes('/rest/v1/stores')));
+      // Never queried public.stores to guess store by owner_id (only explicit surviving sibling store_id logo_url check is allowed)
+      assert.ok(!dbCalls.some((c) => c.url.includes('/rest/v1/stores') && c.url.includes('owner_id')));
       assert.equal(storageDeleteRequests.length, 1);
       assert.deepEqual(storageDeleteRequests[0].prefixes, [
         `${MERCHANT_UUID}/${WEBSITE_UUID}/heroes/hero-1.png`,
@@ -1013,9 +1290,27 @@ async function runTests() {
       customRpcResultOverride = null;
     });
 
-    await check('2.16 Partial Storage failure returns 200 post-commit with storageCleanupWarning', async () => {
+    await check('2.16 Partial Storage failure returns 200 post-commit with storageCleanupWarning, retry completes, and duplicate retry is idempotent', async () => {
       storageDeleteRequests = [];
       forceStorageDeleteFail = true;
+      mockCleanupJobState = {
+        id: 'cleanup-job-1',
+        websiteId: WEBSITE_UUID,
+        ownerUserId: MERCHANT_UUID,
+        deletedStoreId: STORE_UUID,
+        isSharedStore: false,
+        storePreserved: false,
+        cleanupStatus: 'pending',
+        cleanupObjectPaths: [
+          `${MERCHANT_UUID}/${WEBSITE_UUID}/heroes/hero-1.png`,
+          `${MERCHANT_UUID}/${STORE_UUID}/products/item-1.png`,
+        ],
+        preservedReferencePaths: [],
+        manualReviewPaths: [],
+        manualReviewRequired: false,
+        failedObjectPaths: [],
+        deletedObjectsCount: 0,
+      };
       const { req, res, getResult } = makeMockReqRes({
         origin: 'https://app.amaas.xyz',
         authorization: `Bearer ${adminToken}`,
@@ -1031,8 +1326,389 @@ async function runTests() {
       assert.equal(out.statusCode, 200);
       assert.equal(out.json?.ok, true);
       assert.equal(out.json?.deletedStorageObjects, 0);
+      assert.equal(out.json?.storageCleanupStatus, 'partial_failed');
+      assert.ok(Array.isArray(out.json?.failedStoragePaths) && (out.json?.failedStoragePaths as string[]).length > 0);
       assert.ok(typeof out.json?.storageCleanupWarning === 'string' && out.json.storageCleanupWarning.length > 10);
+
+      // Now retry cleanup after Storage recovers
       forceStorageDeleteFail = false;
+      storageDeleteRequests = [];
+      const retryReq = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        body: {
+          action: 'retry_storage_cleanup',
+          websiteId: WEBSITE_UUID,
+        },
+      });
+      await adminWebsiteActionHandler(retryReq.req, retryReq.res);
+      const retryOut = retryReq.getResult();
+      assert.equal(retryOut.statusCode, 200);
+      assert.equal(retryOut.json?.code, 'STORAGE_CLEANUP_COMPLETED');
+      assert.equal(retryOut.json?.cleanupStatus, 'completed');
+      assert.equal(storageDeleteRequests.length, 1);
+      assert.ok(!storageDeleteRequests[0].prefixes.includes(`${MERCHANT_UUID}/general/shared-logo.png`));
+
+      // Duplicate cleanup attempt returns idempotent 200 without invoking Storage DELETE again
+      storageDeleteRequests = [];
+      const dupReq = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        body: {
+          action: 'retry_storage_cleanup',
+          websiteId: WEBSITE_UUID,
+        },
+      });
+      await adminWebsiteActionHandler(dupReq.req, dupReq.res);
+      const dupOut = dupReq.getResult();
+      assert.equal(dupOut.statusCode, 200);
+      assert.equal(dupOut.json?.code, 'STORAGE_CLEANUP_ALREADY_COMPLETED');
+      assert.equal(dupOut.json?.idempotent, true);
+      assert.equal(dupOut.json?.deletedStorageObjects, 0);
+      assert.equal(storageDeleteRequests.length, 0);
+      mockCleanupJobState = null;
+    });
+
+    await check('2.17 Image referenced by surviving order snapshot is preserved even when store is preserved and handles missing stores.logo_url gracefully', async () => {
+      storageDeleteRequests = [];
+      simulateMissingLogoColumn = true;
+      const DEL_PROD_UUID = '77777777-7777-4777-8777-777777777702';
+      const ORDER_SNAP_PATH = `${MERCHANT_UUID}/${STORE_UUID}/products/order-snap-prod.png`;
+      const ORDER_SNAP_URL = `https://example-project.supabase.co/storage/v1/object/public/website-assets/${ORDER_SNAP_PATH}`;
+      targetStoreOrdersOverride = [
+        {
+          id: 'ord-snap-1',
+          items: [
+            {
+              productId: DEL_PROD_UUID,
+              name: 'Ordered Product',
+              imageUrl: ORDER_SNAP_URL,
+              orderMeta: {
+                websiteId: WEBSITE_UUID,
+                merchantBrandingSnapshot: { logoUrl: EXCLUSIVE_HERO_URL },
+              },
+            },
+          ],
+        },
+      ];
+      customRpcResultOverride = {
+        success: true,
+        code: 'DELETED',
+        deletedWebsiteId: WEBSITE_UUID,
+        deletedStoreId: null,
+        preservedStoreId: STORE_UUID,
+        isSharedStore: true,
+        storePreserved: true,
+        deletedProductIds: [DEL_PROD_UUID],
+        deletedProductImageUrls: [ORDER_SNAP_URL],
+        cleanupObjectPaths: [],
+        preservedReferencedObjectPaths: [ORDER_SNAP_PATH, `${MERCHANT_UUID}/${WEBSITE_UUID}/heroes/hero-1.png`],
+        manualReviewObjectPaths: [],
+        manualReviewRequired: false,
+      };
+      const { req, res, getResult } = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        body: {
+          action: 'delete',
+          websiteId: WEBSITE_UUID,
+          confirmSubdomain: 'fortyninee',
+          explicitConfirmed: true,
+        },
+      });
+      await adminWebsiteActionHandler(req, res);
+      const out = getResult();
+      assert.equal(out.statusCode, 200);
+      assert.equal(out.json?.storageCleanupStatus, 'completed');
+      const allDeletedPrefixes = storageDeleteRequests.flatMap((r) => r.prefixes);
+      assert.ok(!allDeletedPrefixes.includes(ORDER_SNAP_PATH));
+      assert.ok(!allDeletedPrefixes.includes(`${MERCHANT_UUID}/${WEBSITE_UUID}/heroes/hero-1.png`));
+      const preservedRefs = (out.json?.preservedReferencedAssetPaths || []) as string[];
+      assert.ok(preservedRefs.includes(ORDER_SNAP_PATH));
+      simulateMissingLogoColumn = false;
+      targetStoreOrdersOverride = [];
+      customRpcResultOverride = null;
+    });
+
+    await check('2.18 Image referenced in surviving sibling draft, nested section items, or productCatalogMeta is preserved across deletion', async () => {
+      storageDeleteRequests = [];
+      const HERO_PATH = `${MERCHANT_UUID}/${WEBSITE_UUID}/heroes/hero-1.png`;
+      const PROD_SHARED_DRAFT_PATH = `${MERCHANT_UUID}/${STORE_UUID}/products/draft-section-prod.png`;
+      siblingSiteConfigOverride = {
+        draft: {
+          sections: [
+            {
+              id: 'sec-1',
+              items: [
+                {
+                  imageUrl: `https://example-project.supabase.co/storage/v1/object/public/website-assets/${HERO_PATH}`,
+                },
+              ],
+            },
+          ],
+          productCatalogMeta: {
+            'prod-x': {
+              imageUrl: `https://example-project.supabase.co/storage/v1/object/public/website-assets/${PROD_SHARED_DRAFT_PATH}`,
+            },
+          },
+        },
+      };
+      customRpcResultOverride = {
+        success: true,
+        code: 'DELETED',
+        deletedWebsiteId: WEBSITE_UUID,
+        deletedStoreId: null,
+        preservedStoreId: STORE_UUID,
+        isSharedStore: true,
+        storePreserved: true,
+        deletedProductIds: ['77777777-7777-4777-8777-777777777703'],
+        deletedProductImageUrls: [
+          `https://example-project.supabase.co/storage/v1/object/public/website-assets/${PROD_SHARED_DRAFT_PATH}`,
+        ],
+        cleanupObjectPaths: [],
+        preservedReferencedObjectPaths: [HERO_PATH, PROD_SHARED_DRAFT_PATH],
+      };
+      const { req, res, getResult } = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        body: {
+          action: 'delete',
+          websiteId: WEBSITE_UUID,
+          confirmSubdomain: 'fortyninee',
+          explicitConfirmed: true,
+        },
+      });
+      await adminWebsiteActionHandler(req, res);
+      const out = getResult();
+      assert.equal(out.statusCode, 200);
+      const allDeletedPrefixes = storageDeleteRequests.flatMap((r) => r.prefixes);
+      assert.ok(!allDeletedPrefixes.includes(HERO_PATH));
+      assert.ok(!allDeletedPrefixes.includes(PROD_SHARED_DRAFT_PATH));
+      siblingSiteConfigOverride = null;
+      customRpcResultOverride = null;
+    });
+
+    await check('2.19 Unverified ownership paths and global verification failures preserve assets and mark manual_review_required without rolling back DB', async () => {
+      storageDeleteRequests = [];
+      const UNOWNED_FOREIGN_URL = `https://example-project.supabase.co/storage/v1/object/public/website-assets/${OTHER_MERCHANT_UUID}/some-site/unowned.png`;
+      const OTHER_BUCKET_URL = `https://example-project.supabase.co/storage/v1/object/public/custom-bucket/orphan.png`;
+      const prevConfig = currentSiteState.config;
+      currentSiteState = {
+        ...currentSiteState,
+        config: {
+          logoUrl: UNOWNED_FOREIGN_URL,
+          heroImageUrl: EXCLUSIVE_HERO_URL,
+          sections: [{ imageUrl: OTHER_BUCKET_URL }],
+        },
+      };
+      customRpcResultOverride = {
+        success: true,
+        code: 'DELETED',
+        deletedWebsiteId: WEBSITE_UUID,
+        deletedStoreId: STORE_UUID,
+        isSharedStore: false,
+        storePreserved: false,
+        manualReviewObjectPaths: [
+          `${OTHER_MERCHANT_UUID}/some-site/unowned.png`,
+          OTHER_BUCKET_URL,
+        ],
+        manualReviewRequired: true,
+      };
+      const { req, res, getResult } = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        body: {
+          action: 'delete',
+          websiteId: WEBSITE_UUID,
+          confirmSubdomain: 'fortyninee',
+          explicitConfirmed: true,
+        },
+      });
+      await adminWebsiteActionHandler(req, res);
+      const out = getResult();
+      assert.equal(out.statusCode, 200);
+      assert.equal(out.json?.ok, true);
+      assert.equal(out.json?.storageCleanupStatus, 'manual_review_required');
+      assert.equal(out.json?.manualReviewRequired, true);
+      const manualPaths = (out.json?.manualReviewAssetPaths || []) as string[];
+      assert.ok(manualPaths.includes(`${OTHER_MERCHANT_UUID}/some-site/unowned.png`));
+      assert.ok(manualPaths.includes(OTHER_BUCKET_URL));
+      const allDeleted = storageDeleteRequests.flatMap((r) => r.prefixes);
+      assert.ok(!allDeleted.includes(`${OTHER_MERCHANT_UUID}/some-site/unowned.png`));
+      assert.ok(allDeleted.includes(`${MERCHANT_UUID}/${WEBSITE_UUID}/heroes/hero-1.png`));
+
+      // Now simulate global verification RPC failure -> must preserve all candidates and return 200 with manual_review_required
+      storageDeleteRequests = [];
+      forceGlobalVerifyFail = true;
+      currentSiteState = { ...currentSiteState, config: prevConfig };
+      customRpcResultOverride = null;
+      const failVerify = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        body: {
+          action: 'delete',
+          websiteId: WEBSITE_UUID,
+          confirmSubdomain: 'fortyninee',
+          explicitConfirmed: true,
+        },
+      });
+      await adminWebsiteActionHandler(failVerify.req, failVerify.res);
+      const failOut = failVerify.getResult();
+      assert.equal(failOut.statusCode, 200);
+      assert.equal(failOut.json?.ok, true);
+      assert.equal(failOut.json?.storageCleanupSkipped, true);
+      assert.equal(failOut.json?.storageCleanupStatus, 'manual_review_required');
+      assert.equal(failOut.json?.manualReviewRequired, true);
+      assert.equal(failOut.json?.deletedStorageObjects, 0);
+      assert.equal(storageDeleteRequests.length, 0);
+
+      forceGlobalVerifyFail = false;
+      currentSiteState = { ...currentSiteState, config: prevConfig };
+      customRpcResultOverride = null;
+    });
+
+    await check('2.20 Unenrolled TOTP admin and non-primary admin identity are blocked on delete and retry_storage_cleanup', async () => {
+      dbCalls = [];
+      adminFactorsOverride = [];
+      const noTotpDel = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        body: {
+          action: 'delete',
+          websiteId: WEBSITE_UUID,
+          confirmSubdomain: 'fortyninee',
+          explicitConfirmed: true,
+        },
+      });
+      await adminWebsiteActionHandler(noTotpDel.req, noTotpDel.res);
+      assert.equal(noTotpDel.getResult().statusCode, 403);
+      assert.equal(noTotpDel.getResult().json?.code, 'MFA_REQUIRED');
+
+      const noTotpRetry = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        body: {
+          action: 'retry_storage_cleanup',
+          websiteId: WEBSITE_UUID,
+        },
+      });
+      await adminWebsiteActionHandler(noTotpRetry.req, noTotpRetry.res);
+      assert.equal(noTotpRetry.getResult().statusCode, 403);
+      assert.equal(noTotpRetry.getResult().json?.code, 'MFA_REQUIRED');
+      assert.equal(dbCalls.length, 0);
+
+      adminFactorsOverride = null;
+      const spoofedRes = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${spoofedAdminToken}`,
+        body: {
+          action: 'delete',
+          websiteId: WEBSITE_UUID,
+          confirmSubdomain: 'fortyninee',
+          explicitConfirmed: true,
+        },
+      });
+      await adminWebsiteActionHandler(spoofedRes.req, spoofedRes.res);
+      assert.equal(spoofedRes.getResult().statusCode, 403);
+      assert.equal(spoofedRes.getResult().json?.code, 'FORBIDDEN_ADMIN_REQUIRED');
+    });
+
+    await check('2.21 Two-pass pre-DELETE confirm catches late concurrent reference between initial verify and Storage DELETE', async () => {
+      storageDeleteRequests = [];
+      verifyCallCount = 0;
+      globallyAbortedPathsMock.clear();
+      const RACE_PROD_PATH = `${MERCHANT_UUID}/${STORE_UUID}/products/item-1.png`.toLowerCase();
+      onBeforeBatchConfirmVerify = () => {
+        // Simulate a concurrent order/product write committing AFTER initial verify succeeded
+        globallyAbortedPathsMock.add(RACE_PROD_PATH);
+      };
+
+      const { req, res, getResult } = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        body: {
+          action: 'delete',
+          websiteId: WEBSITE_UUID,
+          confirmSubdomain: 'fortyninee',
+          explicitConfirmed: true,
+        },
+      });
+      await adminWebsiteActionHandler(req, res);
+      const out = getResult();
+      assert.equal(out.statusCode, 200);
+      assert.ok(verifyCallCount >= 2);
+      const deletedPrefixes = storageDeleteRequests.flatMap((r) => r.prefixes.map((p) => p.toLowerCase()));
+      assert.ok(!deletedPrefixes.includes(RACE_PROD_PATH));
+      assert.ok(deletedPrefixes.includes(`${MERCHANT_UUID}/${WEBSITE_UUID}/heroes/hero-1.png`.toLowerCase()));
+      const conflicts = ((out.json?.concurrentReferenceConflicts || []) as string[]).map((p) => p.toLowerCase());
+      assert.ok(conflicts.includes(RACE_PROD_PATH));
+
+      // Also verify failing pre-DELETE per-batch confirm preserves objects without Storage DELETE
+      storageDeleteRequests = [];
+      verifyCallCount = 0;
+      onBeforeBatchConfirmVerify = null;
+      globallyAbortedPathsMock.clear();
+      forceBatchConfirmVerifyFail = true;
+      const failConfirm = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        body: {
+          action: 'delete',
+          websiteId: WEBSITE_UUID,
+          confirmSubdomain: 'fortyninee',
+          explicitConfirmed: true,
+        },
+      });
+      await adminWebsiteActionHandler(failConfirm.req, failConfirm.res);
+      const failConfirmOut = failConfirm.getResult();
+      assert.equal(failConfirmOut.statusCode, 200);
+      assert.equal(failConfirmOut.json?.storageCleanupStatus, 'manual_review_required');
+      assert.equal(failConfirmOut.json?.deletedStorageObjects, 0);
+      assert.equal(storageDeleteRequests.length, 0);
+
+      forceBatchConfirmVerifyFail = false;
+    });
+
+    await check('2.22 retry_storage_cleanup excludes already-deleted objects and avoids double-counting across retries', async () => {
+      storageDeleteRequests = [];
+      verifyCallCount = 0;
+      globallyAbortedPathsMock.clear();
+      const ALREADY_DELETED = `${MERCHANT_UUID}/${WEBSITE_UUID}/heroes/hero-1.png`;
+      const STILL_PENDING = `${MERCHANT_UUID}/${STORE_UUID}/products/item-1.png`;
+      mockCleanupJobState = {
+        id: 'cleanup-job-dedup',
+        websiteId: WEBSITE_UUID,
+        ownerUserId: MERCHANT_UUID,
+        deletedStoreId: STORE_UUID,
+        isSharedStore: false,
+        storePreserved: false,
+        cleanupStatus: 'partial_failed',
+        cleanupObjectPaths: [ALREADY_DELETED, STILL_PENDING],
+        preservedReferencePaths: [],
+        manualReviewPaths: [],
+        manualReviewRequired: false,
+        deletedObjectPaths: [ALREADY_DELETED],
+        failedObjectPaths: [ALREADY_DELETED, STILL_PENDING],
+        deletedObjectsCount: 1,
+      };
+      const retryReq = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        body: {
+          action: 'retry_storage_cleanup',
+          websiteId: WEBSITE_UUID,
+        },
+      });
+      await adminWebsiteActionHandler(retryReq.req, retryReq.res);
+      const retryOut = retryReq.getResult();
+      assert.equal(retryOut.statusCode, 200);
+      assert.equal(retryOut.json?.code, 'STORAGE_CLEANUP_COMPLETED');
+      assert.equal(retryOut.json?.deletedStorageObjects, 1);
+      const prefixes = storageDeleteRequests.flatMap((r) => r.prefixes);
+      assert.ok(!prefixes.includes(ALREADY_DELETED));
+      assert.ok(prefixes.includes(STILL_PENDING));
+      assert.equal(mockCleanupJobState?.deletedObjectsCount, 2);
+      mockCleanupJobState = null;
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -1047,12 +1723,12 @@ async function runTests() {
   // =========================================================================
   // PART 3: ISOLATED IN-MEMORY POSTGRES (PGlite) LIFECYCLE & ATOMIC DELETE
   // =========================================================================
-  // Loads the local reviewed migration file (/proposed_migrations/20261122_admin_permanent_website_deletion.sql)
+  // Loads the new local reviewed migration file (/proposed_migrations/20261123_admin_permanent_website_deletion.sql)
   // completely in-memory (NEVER touches production Supabase or files inside supabase/).
   console.log('\n[3] Running isolated in-memory PGlite lifecycle, trigger & atomic permanent-delete verification...');
 
   const PROPOSED_PERMANENT_DELETE_SQL = fs.readFileSync(
-    path.join(root, 'proposed_migrations/20261122_admin_permanent_website_deletion.sql'),
+    path.join(root, 'proposed_migrations/20261123_admin_permanent_website_deletion.sql'),
     'utf8'
   );
 
@@ -1224,8 +1900,7 @@ async function runTests() {
   await setDbSession(DB_MERCH_A, 'merchant.a@amaas.test', 'authenticated');
   await db.exec(`
     INSERT INTO public.store_members (store_id, user_id, name, email, role, status) VALUES
-      ('${storeAId}', '${DB_MERCH_A}', 'Merchant A Owner', 'merchant.a@amaas.test', 'owner', 'active'),
-      ('${storeAId}', NULL, 'Alpha Staff', 'staff@alpha.test', 'staff', 'invited');
+      ('${storeAId}', '${DB_MERCH_A}', 'Merchant A Owner', 'merchant.a@amaas.test', 'owner', 'active');
   `);
 
   await setDbSession(DB_MERCH_B, 'merchant.b@amaas.test', 'authenticated');
@@ -1306,14 +1981,63 @@ async function runTests() {
       RETURNING id;
     `)
   ).rows[0].id;
+
+  // Issue 1 shared store fixture products:
+  // - sharedNullProdId: dashboard/shared product (website_id IS NULL) -> MUST survive
+  // - sharedSite1ExclusiveProdId: exclusive to siteShared1Id -> MUST be deleted cleanly with inventory + storage path
+  // - sharedSite1CrossRefProdId: website_id = siteShared1Id BUT referenced in siteShared2Id.config -> MUST survive as shared (website_id = NULL)
+  // - sharedSite2ExclusiveProdId: belongs to siteShared2Id -> MUST survive with website_id = siteShared2Id
+  const sharedNullProdId = (
+    await db.query<{ id: string }>(`
+      INSERT INTO public.products (store_id, website_id, name, sku, price, stock, image_url)
+      VALUES ('${storeSharedId}', NULL, 'Shared Catalog Base', 'SHARED-NULL-1', 900, 12,
+        'https://mock.supabase.co/storage/v1/object/public/website-assets/${DB_MERCH_C}/${storeSharedId}/products/shared-base.png')
+      RETURNING id;
+    `)
+  ).rows[0].id;
+  const sharedSite1ExclusiveProdId = (
+    await db.query<{ id: string }>(`
+      INSERT INTO public.products (store_id, website_id, name, sku, price, stock, image_url)
+      VALUES ('${storeSharedId}', '${siteShared1Id}', 'Site 1 Exclusive Item', 'SHARED-S1-EXCL', 1200, 8,
+        'https://mock.supabase.co/storage/v1/object/public/website-assets/${DB_MERCH_C}/${storeSharedId}/products/site1-exclusive.png')
+      RETURNING id;
+    `)
+  ).rows[0].id;
+  const sharedSite1CrossRefProdId = (
+    await db.query<{ id: string }>(`
+      INSERT INTO public.products (store_id, website_id, name, sku, price, stock, image_url)
+      VALUES ('${storeSharedId}', '${siteShared1Id}', 'Cross-Showcased Item', 'SHARED-CROSS-1', 1500, 6,
+        'https://mock.supabase.co/storage/v1/object/public/website-assets/${DB_MERCH_C}/${storeSharedId}/products/cross-shared.png')
+      RETURNING id;
+    `)
+  ).rows[0].id;
+  const sharedSite2ExclusiveProdId = (
+    await db.query<{ id: string }>(`
+      INSERT INTO public.products (store_id, website_id, name, sku, price, stock, image_url)
+      VALUES ('${storeSharedId}', '${siteShared2Id}', 'Site 2 Exclusive Item', 'SHARED-S2-EXCL', 1800, 5,
+        'https://mock.supabase.co/storage/v1/object/public/website-assets/${DB_MERCH_C}/${siteShared2Id}/products/site2-exclusive.png')
+      RETURNING id;
+    `)
+  ).rows[0].id;
+
   await db.exec(`
-    INSERT INTO public.products (store_id, website_id, name, sku, price, stock)
-    VALUES ('${storeSharedId}', '${siteShared1Id}', 'Shared Item', 'SHARED-1', 1200, 8);
+    UPDATE public.subscribed_websites
+    SET config = jsonb_build_object(
+      'servicesOrProducts', jsonb_build_array(
+        jsonb_build_object('id', '${sharedSite1CrossRefProdId}', 'productId', '${sharedSite1CrossRefProdId}', 'name', 'Cross-Showcased Item'),
+        jsonb_build_object('id', '${sharedSite2ExclusiveProdId}', 'productId', '${sharedSite2ExclusiveProdId}', 'name', 'Site 2 Exclusive Item')
+      )
+    )
+    WHERE id = '${siteShared2Id}';
 
     INSERT INTO public.inventory_movements (store_id, product_id, product_name, type, quantity_change, new_stock, reason)
     VALUES
       ('${storeAId}', '${prodAId}', 'Alpha Tee', 'restock', 10, 10, 'Initial stock'),
-      ('${storeBId}', '${prodBId}', 'Beta Laptop', 'restock', 3, 3, 'Initial stock');
+      ('${storeBId}', '${prodBId}', 'Beta Laptop', 'restock', 3, 3, 'Initial stock'),
+      ('${storeSharedId}', '${sharedNullProdId}', 'Shared Catalog Base', 'restock', 12, 12, 'Shared base stock'),
+      ('${storeSharedId}', '${sharedSite1ExclusiveProdId}', 'Site 1 Exclusive Item', 'restock', 8, 8, 'Site 1 stock'),
+      ('${storeSharedId}', '${sharedSite1CrossRefProdId}', 'Cross-Showcased Item', 'restock', 6, 6, 'Cross shared stock'),
+      ('${storeSharedId}', '${sharedSite2ExclusiveProdId}', 'Site 2 Exclusive Item', 'restock', 5, 5, 'Site 2 stock');
 
     INSERT INTO public.customers (store_id, name, phone, email)
     VALUES
@@ -1321,14 +2045,14 @@ async function runTests() {
       ('${storeBId}', 'Beta Customer', '01722222222', 'beta.customer@amaas.test'),
       ('${storeSharedId}', 'Shared Customer', '01733333333', 'shared.customer@amaas.test');
 
-    INSERT INTO public.orders (store_id, order_number, customer_name, customer_phone, address, city, total, subtotal, items)
+    INSERT INTO public.orders (store_id, order_number, customer_name, customer_phone, customer_email, address, city, total, subtotal, source, items)
     VALUES
-      ('${storeAId}', 'ORD-ALPHA-1', 'Alpha Customer', '01711111111', 'Dhaka', 'Dhaka', 500, 500, '[{"name":"Alpha Tee","qty":1}]'::jsonb),
-      ('${storeBId}', 'ORD-BETA-1', 'Beta Customer', '01722222222', 'Chattogram', 'Chattogram', 50000, 50000, '[{"name":"Beta Laptop","qty":1}]'::jsonb),
-      ('${storeSharedId}', 'ORD-SHARED-1', 'Shared Customer', '01733333333', 'Sylhet', 'Sylhet', 1200, 1200, '[{"name":"Shared Item","qty":1}]'::jsonb);
-
-    INSERT INTO public.service_trials (user_id, store_id, service_id, service_name, service_category)
-    VALUES ('${DB_MERCH_A}', '${storeAId}', 'dashboard_pro', 'Dashboard Pro', 'dashboard');
+      ('${storeAId}', 'ORD-ALPHA-1', 'Alpha Customer', '01711111111', 'google.customer@amaas.test', 'Dhaka', 'Dhaka', 500, 500,
+       'Website (alpha-shop.amaas.xyz)', '[{"name":"Alpha Tee","qty":1,"orderMeta":{"websiteId":"${siteAId}","websiteSubdomain":"alpha-shop"}}]'::jsonb),
+      ('${storeBId}', 'ORD-BETA-1', 'Beta Customer', '01722222222', 'beta.customer@amaas.test', 'Chattogram', 'Chattogram', 50000, 50000,
+       'Website (beta-shop.amaas.xyz)', '[{"name":"Beta Laptop","qty":1,"orderMeta":{"websiteId":"${siteBId}","websiteSubdomain":"beta-shop"}}]'::jsonb),
+      ('${storeSharedId}', 'ORD-SHARED-1', 'Shared Customer', '01733333333', 'shared.customer@amaas.test', 'Sylhet', 'Sylhet', 1200, 1200,
+       'Website (shared-one.amaas.xyz)', '[{"name":"Site 1 Exclusive Item","qty":1,"orderMeta":{"websiteId":"${siteShared1Id}","websiteSubdomain":"shared-one"}}]'::jsonb);
 
     INSERT INTO public.payment_requests (
       user_id, store_id, customer_name, customer_phone, customer_email,
@@ -1382,7 +2106,7 @@ async function runTests() {
     assert.equal(Number(counts.rows[0].inventory), 1);
     assert.equal(Number(counts.rows[0].customers), 1);
     assert.equal(Number(counts.rows[0].orders), 1);
-    assert.equal(Number(counts.rows[0].members), 2);
+    assert.equal(Number(counts.rows[0].members), 1);
   });
 
   await check('3.2 DB REACTIVATE restores original live website and keeps all original data intact', async () => {
@@ -1557,7 +2281,7 @@ async function runTests() {
     assert.equal(out.deletedCounts.inventoryMovements, 1);
     assert.equal(out.deletedCounts.customers, 1);
     assert.equal(out.deletedCounts.orders, 1);
-    assert.equal(out.deletedCounts.storeMembers, 2);
+    assert.equal(out.deletedCounts.storeMembers, 1);
 
     const alphaGone = await db.query<{
       websites: string;
@@ -1592,7 +2316,6 @@ async function runTests() {
       merch_a_store_id: string | null;
       alpha_payments: string;
       alpha_payment_store_id: string | null;
-      alpha_trials: string;
       delete_audits: string;
       beta_stores: string;
       beta_websites: string;
@@ -1605,7 +2328,6 @@ async function runTests() {
         (SELECT store_id::text FROM public.profiles WHERE id = '${DB_MERCH_A}') AS merch_a_store_id,
         (SELECT COUNT(*) FROM public.payment_requests WHERE service_id = '${siteAId}') AS alpha_payments,
         (SELECT store_id::text FROM public.payment_requests WHERE service_id = '${siteAId}' LIMIT 1) AS alpha_payment_store_id,
-        (SELECT COUNT(*) FROM public.service_trials WHERE user_id = '${DB_MERCH_A}') AS alpha_trials,
         (SELECT COUNT(*) FROM public.website_lifecycle_audit_logs WHERE website_id = '${siteAId}' AND action = 'delete') AS delete_audits,
         (SELECT COUNT(*) FROM public.stores WHERE id = '${storeBId}') AS beta_stores,
         (SELECT COUNT(*) FROM public.subscribed_websites WHERE id = '${siteBId}') AS beta_websites,
@@ -1617,7 +2339,6 @@ async function runTests() {
     assert.equal(retained.rows[0].merch_a_store_id, null);
     assert.equal(Number(retained.rows[0].alpha_payments), 1);
     assert.equal(retained.rows[0].alpha_payment_store_id, null);
-    assert.equal(Number(retained.rows[0].alpha_trials), 1);
     assert.equal(Number(retained.rows[0].delete_audits), 1);
     assert.equal(Number(retained.rows[0].beta_stores), 1);
     assert.equal(Number(retained.rows[0].beta_websites), 1);
@@ -1625,14 +2346,20 @@ async function runTests() {
     assert.equal(Number(retained.rows[0].beta_orders), 1);
   });
 
-  await check('3.6 DB shared store protection preserves shared store, products, and sibling website when deleting shared-one', async () => {
+  await check('3.6 DB Issue 1 (Shared Store Product Cleanup): deletes only deleted website exclusive products/inventory/assets while preserving shared store, shared products, cross-referenced products, and sibling website products', async () => {
     await setDbSession(null, null, 'service_role');
     const sharedRes = await db.query<{
       res: {
         success: boolean;
         deletedWebsiteId: string;
         deletedStoreId: string | null;
+        preservedStoreId: string | null;
         isSharedStore: boolean;
+        storePreserved: boolean;
+        deletedProductIds: string[];
+        preservedSharedProductIds: string[];
+        cleanupObjectPaths: string[];
+        deletedCounts: { products: number; inventoryMovements: number };
       };
     }>(
       `SELECT public.admin_permanently_delete_website('${siteShared1Id}'::uuid, '${DB_ADMIN}'::uuid, 'shared-one', 'Delete one site sharing a store') AS res;`
@@ -1641,27 +2368,61 @@ async function runTests() {
     assert.equal(out.success, true);
     assert.equal(out.deletedWebsiteId, siteShared1Id);
     assert.equal(out.deletedStoreId, null);
+    assert.equal(out.preservedStoreId, storeSharedId);
     assert.equal(out.isSharedStore, true);
+    assert.equal(out.storePreserved, true);
+    assert.deepEqual(out.deletedProductIds, [sharedSite1ExclusiveProdId]);
+    assert.deepEqual(out.preservedSharedProductIds, [sharedSite1CrossRefProdId]);
+    assert.deepEqual(out.cleanupObjectPaths, [
+      `${DB_MERCH_C}/${storeSharedId}/products/site1-exclusive.png`,
+    ]);
+    assert.equal(out.deletedCounts.products, 1);
+    assert.equal(out.deletedCounts.inventoryMovements, 1);
 
-    const sharedSurvived = await db.query<{
+    const sharedCheck = await db.query<{
       site1: string;
       site2: string;
       shared_store: string;
-      shared_products: string;
       shared_orders: string;
+      null_prod_cnt: string;
+      s1_excl_prod_cnt: string;
+      s1_excl_inv_cnt: string;
+      cross_prod_website_id: string | null;
+      cross_prod_inv_cnt: string;
+      s2_prod_website_id: string | null;
+      s2_prod_inv_cnt: string;
+      orphaned_cnt: string;
     }>(`
       SELECT
         (SELECT COUNT(*) FROM public.subscribed_websites WHERE id = '${siteShared1Id}') AS site1,
         (SELECT COUNT(*) FROM public.subscribed_websites WHERE id = '${siteShared2Id}') AS site2,
         (SELECT COUNT(*) FROM public.stores WHERE id = '${storeSharedId}') AS shared_store,
-        (SELECT COUNT(*) FROM public.products WHERE store_id = '${storeSharedId}') AS shared_products,
-        (SELECT COUNT(*) FROM public.orders WHERE store_id = '${storeSharedId}') AS shared_orders;
+        (SELECT COUNT(*) FROM public.orders WHERE store_id = '${storeSharedId}') AS shared_orders,
+        (SELECT COUNT(*) FROM public.products WHERE id = '${sharedNullProdId}' AND website_id IS NULL) AS null_prod_cnt,
+        (SELECT COUNT(*) FROM public.products WHERE id = '${sharedSite1ExclusiveProdId}') AS s1_excl_prod_cnt,
+        (SELECT COUNT(*) FROM public.inventory_movements WHERE product_id = '${sharedSite1ExclusiveProdId}') AS s1_excl_inv_cnt,
+        (SELECT website_id::text FROM public.products WHERE id = '${sharedSite1CrossRefProdId}') AS cross_prod_website_id,
+        (SELECT COUNT(*) FROM public.inventory_movements WHERE product_id = '${sharedSite1CrossRefProdId}') AS cross_prod_inv_cnt,
+        (SELECT website_id::text FROM public.products WHERE id = '${sharedSite2ExclusiveProdId}') AS s2_prod_website_id,
+        (SELECT COUNT(*) FROM public.inventory_movements WHERE product_id = '${sharedSite2ExclusiveProdId}') AS s2_prod_inv_cnt,
+        (SELECT COUNT(*) FROM public.products WHERE store_id = '${storeSharedId}' AND id NOT IN ('${sharedNullProdId}', '${sharedSite1CrossRefProdId}', '${sharedSite2ExclusiveProdId}')) AS orphaned_cnt;
     `);
-    assert.equal(Number(sharedSurvived.rows[0].site1), 0);
-    assert.equal(Number(sharedSurvived.rows[0].site2), 1);
-    assert.equal(Number(sharedSurvived.rows[0].shared_store), 1);
-    assert.equal(Number(sharedSurvived.rows[0].shared_products), 1);
-    assert.equal(Number(sharedSurvived.rows[0].shared_orders), 1);
+    const row = sharedCheck.rows[0];
+    assert.equal(Number(row.site1), 0);
+    assert.equal(Number(row.site2), 1);
+    assert.equal(Number(row.shared_store), 1);
+    assert.equal(Number(row.shared_orders), 1);
+    assert.equal(Number(row.null_prod_cnt), 1);
+    // Exclusive product & its inventory deleted (zero orphan!)
+    assert.equal(Number(row.s1_excl_prod_cnt), 0);
+    assert.equal(Number(row.s1_excl_inv_cnt), 0);
+    assert.equal(Number(row.orphaned_cnt), 0);
+    // Cross-referenced product preserved cleanly with website_id = NULL + inventory intact
+    assert.equal(row.cross_prod_website_id, null);
+    assert.equal(Number(row.cross_prod_inv_cnt), 1);
+    // Surviving sibling website product + inventory preserved intact
+    assert.equal(row.s2_prod_website_id, siteShared2Id);
+    assert.equal(Number(row.s2_prod_inv_cnt), 1);
   });
 
   await check('3.7 DB Fix 2: Hardened protect_payment_request_integrity() blocks rogue FK-bypass and preserves payment approval/rejection', async () => {
@@ -1923,6 +2684,25 @@ async function runTests() {
 
     // 2. Deadlock (SQLSTATE 40P01) during deletion rolls back all subtransaction changes and returns CONCURRENT_MODIFICATION_RETRY
     await setDbSession(null, null, 'postgres');
+    const deadlockStoreId = (
+      await db.query<{ id: string }>(
+        `INSERT INTO public.stores (owner_id, name, slug, category, currency) VALUES ('${DB_MERCH_B}', 'Deadlock Test Store', 'deadlock-test-store', 'Retail', '৳') RETURNING id;`
+      )
+    ).rows[0].id;
+    const deadlockSiteId = (
+      await db.query<{ id: string }>(`
+        INSERT INTO public.subscribed_websites (
+          user_id, store_id, business_name, niche, subdomain, full_domain,
+          template_id, template_name, status, payment_status, deployment_status,
+          current_period_end, grace_period_end
+        ) VALUES (
+          '${DB_MERCH_B}', '${deadlockStoreId}', 'Deadlock Shop', 'ecommerce', 'deadlock-shop', 'deadlock-shop.amaas.xyz',
+          't1', 'Modern', 'active', 'paid', 'live',
+          NOW() + INTERVAL '30 days', NOW() + INTERVAL '35 days'
+        ) RETURNING id;
+      `)
+    ).rows[0].id;
+
     await db.exec(`
       CREATE OR REPLACE FUNCTION public._test_deadlock_store_delete()
       RETURNS trigger AS $$
@@ -1937,21 +2717,21 @@ async function runTests() {
 
     await setDbSession(null, null, 'service_role');
     const dlRes = await db.query<{ res: { success: boolean; code: string } }>(
-      `SELECT public.admin_permanently_delete_website('${siteBId}'::uuid, '${DB_ADMIN}'::uuid, 'beta-shop', 'Deadlock rollback') AS res;`
+      `SELECT public.admin_permanently_delete_website('${deadlockSiteId}'::uuid, '${DB_ADMIN}'::uuid, 'deadlock-shop', 'Deadlock rollback') AS res;`
     );
     assert.equal(dlRes.rows[0].res.success, false);
     assert.equal(dlRes.rows[0].res.code, 'CONCURRENT_MODIFICATION_RETRY');
 
-    // Beta site + store + audit logs remain completely intact
-    const betaIntact = await db.query<{ site_cnt: string; store_cnt: string; del_audit_cnt: string }>(`
+    // Exclusive site + store + audit logs remain completely intact after 40P01 rollback
+    const dlIntact = await db.query<{ site_cnt: string; store_cnt: string; del_audit_cnt: string }>(`
       SELECT
-        (SELECT COUNT(*) FROM public.subscribed_websites WHERE id = '${siteBId}') AS site_cnt,
-        (SELECT COUNT(*) FROM public.stores WHERE id = '${storeBId}') AS store_cnt,
-        (SELECT COUNT(*) FROM public.website_lifecycle_audit_logs WHERE website_id = '${siteBId}' AND action = 'delete') AS del_audit_cnt;
+        (SELECT COUNT(*) FROM public.subscribed_websites WHERE id = '${deadlockSiteId}') AS site_cnt,
+        (SELECT COUNT(*) FROM public.stores WHERE id = '${deadlockStoreId}') AS store_cnt,
+        (SELECT COUNT(*) FROM public.website_lifecycle_audit_logs WHERE website_id = '${deadlockSiteId}' AND action = 'delete') AS del_audit_cnt;
     `);
-    assert.equal(Number(betaIntact.rows[0].site_cnt), 1);
-    assert.equal(Number(betaIntact.rows[0].store_cnt), 1);
-    assert.equal(Number(betaIntact.rows[0].del_audit_cnt), 0);
+    assert.equal(Number(dlIntact.rows[0].site_cnt), 1);
+    assert.equal(Number(dlIntact.rows[0].store_cnt), 1);
+    assert.equal(Number(dlIntact.rows[0].del_audit_cnt), 0);
 
     await setDbSession(null, null, 'postgres');
     await db.exec(`
@@ -1972,6 +2752,798 @@ async function runTests() {
       crossTenantMemberBlocked = true;
     }
     assert.equal(crossTenantMemberBlocked, true);
+  });
+
+  await check('3.13 DB legacy website service_trials row does NOT block exclusive store deletion while new website trials stay blocked', async () => {
+    await setDbSession(null, null, 'postgres');
+    const legacyStoreId = (
+      await db.query<{ id: string }>(
+        `INSERT INTO public.stores (owner_id, name, slug, category, currency) VALUES ('${DB_MERCH_A}', 'Legacy Trial Store', 'legacy-trial-store', 'Retail', '৳') RETURNING id;`
+      )
+    ).rows[0].id;
+    const legacySiteId = (
+      await db.query<{ id: string }>(`
+        INSERT INTO public.subscribed_websites (
+          user_id, store_id, business_name, niche, subdomain, full_domain,
+          template_id, template_name, status, payment_status, deployment_status,
+          current_period_end, grace_period_end
+        ) VALUES (
+          '${DB_MERCH_A}', '${legacyStoreId}', 'Legacy Trial Shop', 'ecommerce', 'legacy-trial-shop', 'legacy-trial-shop.amaas.xyz',
+          't1', 'Modern', 'active', 'paid', 'live',
+          NOW() + INTERVAL '30 days', NOW() + INTERVAL '35 days'
+        ) RETURNING id;
+      `)
+    ).rows[0].id;
+
+    // Simulate historical pre-20261026 service_trials row with service_category = 'website' linked to this store
+    await db.exec(`
+      ALTER TABLE public.service_trials DISABLE TRIGGER trg_protect_service_trial;
+      INSERT INTO public.service_trials (user_id, store_id, service_id, service_name, service_category)
+      VALUES ('${DB_MERCH_A}', '${legacyStoreId}', 'website_lite', 'Website Lite Legacy', 'website');
+      ALTER TABLE public.service_trials ENABLE TRIGGER trg_protect_service_trial;
+    `);
+
+    // Inserting a new website trial must still be blocked
+    await setDbSession(DB_MERCH_B, 'merchant.b@amaas.test', 'authenticated');
+    let websiteTrialBlocked = false;
+    try {
+      await db.query(`
+        INSERT INTO public.service_trials (user_id, store_id, service_id, service_name, service_category)
+        VALUES ('${DB_MERCH_B}', '${storeBId}', 'website_lite', 'Blocked Trial', 'website');
+      `);
+    } catch {
+      websiteTrialBlocked = true;
+    }
+    assert.equal(websiteTrialBlocked, true);
+
+    // Deleting legacySiteId via service_role must succeed and null out legacy service_trials.store_id cleanly
+    await setDbSession(null, null, 'service_role');
+    const delLegacyRes = await db.query<{ res: { success: boolean; deletedStoreId: string } }>(
+      `SELECT public.admin_permanently_delete_website('${legacySiteId}'::uuid, '${DB_ADMIN}'::uuid, 'legacy-trial-shop', 'Legacy trial cascade test') AS res;`
+    );
+    assert.equal(delLegacyRes.rows[0].res.success, true);
+    assert.equal(delLegacyRes.rows[0].res.deletedStoreId, legacyStoreId);
+
+    await setDbSession(null, null, 'postgres');
+    const legacyTrialRow = await db.query<{ store_id: string | null }>(
+      `SELECT store_id::text FROM public.service_trials WHERE user_id = '${DB_MERCH_A}' AND service_category = 'website';`
+    );
+    assert.equal(legacyTrialRow.rows.length, 1);
+    assert.equal(legacyTrialRow.rows[0].store_id, null);
+  });
+
+  await check('3.14 DB retriable storage cleanup outbox tracks pending -> partial_failed -> completed and blocks non-service_role access', async () => {
+    await setDbSession(null, null, 'postgres');
+    const outboxCheck = await db.query<{
+      website_id: string;
+      deleted_store_id: string | null;
+      preserved_store_id: string | null;
+      is_shared_store: boolean;
+      store_preserved: boolean;
+      cleanup_status: string;
+      cleanup_scope_prefixes: string[];
+      cleanup_object_paths: string[];
+    }>(`
+      SELECT website_id::text, deleted_store_id::text, preserved_store_id::text,
+             is_shared_store, store_preserved, cleanup_status, cleanup_scope_prefixes, cleanup_object_paths
+      FROM public.website_deletion_storage_cleanups
+      WHERE website_id IN ('${siteAId}', '${siteShared1Id}')
+      ORDER BY created_at ASC;
+    `);
+    const alphaJob = outboxCheck.rows.find((r) => r.website_id === siteAId);
+    const sharedJob = outboxCheck.rows.find((r) => r.website_id === siteShared1Id);
+    assert.ok(alphaJob);
+    assert.equal(alphaJob.deleted_store_id, storeAId);
+    assert.equal(alphaJob.preserved_store_id, null);
+    assert.equal(alphaJob.is_shared_store, false);
+    assert.equal(alphaJob.store_preserved, false);
+    assert.equal(alphaJob.cleanup_status, 'pending');
+    assert.deepEqual(alphaJob.cleanup_scope_prefixes, [
+      `${DB_MERCH_A}/${siteAId}`,
+      `${DB_MERCH_A}/${storeAId}`,
+    ]);
+
+    assert.ok(sharedJob);
+    assert.equal(sharedJob.deleted_store_id, null);
+    assert.equal(sharedJob.preserved_store_id, storeSharedId);
+    assert.equal(sharedJob.is_shared_store, true);
+    assert.equal(sharedJob.store_preserved, true);
+    assert.deepEqual(sharedJob.cleanup_scope_prefixes, [`${DB_MERCH_C}/${siteShared1Id}`]);
+    assert.deepEqual(sharedJob.cleanup_object_paths, [
+      `${DB_MERCH_C}/${storeSharedId}/products/site1-exclusive.png`,
+    ]);
+
+    // Authenticated merchant cannot call cleanup RPCs or read cleanup table via RLS
+    await setDbSession(DB_MERCH_A, 'merchant.a@amaas.test', 'authenticated');
+    let clientRpcBlocked = false;
+    try {
+      await db.query(
+        `SELECT public.admin_record_website_storage_cleanup_result('${siteAId}'::uuid, '${DB_ADMIN}'::uuid, 'completed', 1);`
+      );
+    } catch {
+      clientRpcBlocked = true;
+    }
+    assert.equal(clientRpcBlocked, true);
+    const merchRows = await db.query(`SELECT id FROM public.website_deletion_storage_cleanups;`);
+    assert.equal(merchRows.rows.length, 0);
+
+    // Service role records partial failure -> lists pending jobs -> marks completed
+    await setDbSession(null, null, 'service_role');
+    const partialRes = await db.query<{ res: { success: boolean; cleanupStatus: string; attemptCount: number } }>(`
+      SELECT public.admin_record_website_storage_cleanup_result(
+        '${siteAId}'::uuid,
+        '${DB_ADMIN}'::uuid,
+        'partial_failed',
+        1,
+        '["${DB_MERCH_A}/${siteAId}/heroes/hero-1.png"]'::jsonb,
+        'Transient 503 during storage delete'
+      ) AS res;
+    `);
+    assert.equal(partialRes.rows[0].res.success, true);
+    assert.equal(partialRes.rows[0].res.cleanupStatus, 'partial_failed');
+    assert.equal(partialRes.rows[0].res.attemptCount, 1);
+
+    const pendingRes = await db.query<{ res: { success: boolean; jobs: Array<{ websiteId: string }> } }>(
+      `SELECT public.admin_get_pending_website_storage_cleanups('${DB_ADMIN}'::uuid, 20) AS res;`
+    );
+    assert.equal(pendingRes.rows[0].res.success, true);
+    assert.ok(pendingRes.rows[0].res.jobs.some((j) => j.websiteId === siteAId));
+
+    const completeRes = await db.query<{ res: { success: boolean; cleanupStatus: string; deletedObjectsCount: number; attemptCount: number } }>(`
+      SELECT public.admin_record_website_storage_cleanup_result(
+        '${siteAId}'::uuid,
+        '${DB_ADMIN}'::uuid,
+        'completed',
+        1,
+        '[]'::jsonb,
+        NULL
+      ) AS res;
+    `);
+    assert.equal(completeRes.rows[0].res.success, true);
+    assert.equal(completeRes.rows[0].res.cleanupStatus, 'completed');
+    assert.equal(completeRes.rows[0].res.deletedObjectsCount, 2);
+    assert.equal(completeRes.rows[0].res.attemptCount, 2);
+  });
+
+  await check('3.15 DB Issue 2 (Store Exclusivity Verification): single-website stores used by Merchant Dashboard, profiles.store_id, team members, dashboard products/orders/customers/inventory, service trials, or ownership mismatch are PRESERVED while website-exclusive products are removed', async () => {
+    await setDbSession(null, null, 'postgres');
+
+    const createSingleSiteScenario = async (opts: {
+      ownerId: string;
+      siteUserId?: string;
+      subdomain: string;
+      onboardedProfile?: boolean;
+      extraProfileUserId?: string;
+      addStaffMember?: boolean;
+      addDashboardProduct?: boolean;
+      addDashboardOrder?: boolean;
+      addManualCustomer?: boolean;
+      addDashboardTrial?: boolean;
+      addDashboardPayment?: boolean;
+      preexistingDaysAgo?: number;
+    }) => {
+      const storeId = (
+        await db.query<{ id: string }>(
+          `INSERT INTO public.stores (owner_id, name, slug, category, currency${
+            opts.preexistingDaysAgo ? ', created_at' : ''
+          }) VALUES ('${opts.ownerId}', 'Store ${opts.subdomain}', 'store-${opts.subdomain}', 'Retail', '৳'${
+            opts.preexistingDaysAgo ? `, NOW() - INTERVAL '${opts.preexistingDaysAgo} days'` : ''
+          }) RETURNING id;`
+        )
+      ).rows[0].id;
+
+      const siteId = (
+        await db.query<{ id: string }>(`
+          INSERT INTO public.subscribed_websites (
+            user_id, store_id, business_name, niche, subdomain, full_domain,
+            template_id, template_name, status, payment_status, deployment_status,
+            current_period_end, grace_period_end
+          ) VALUES (
+            '${opts.siteUserId || opts.ownerId}', '${storeId}', 'Site ${opts.subdomain}', 'ecommerce', '${opts.subdomain}', '${opts.subdomain}.amaas.xyz',
+            't1', 'Modern', 'active', 'paid', 'live',
+            NOW() + INTERVAL '30 days', NOW() + INTERVAL '35 days'
+          ) RETURNING id;
+        `)
+      ).rows[0].id;
+
+      if (opts.onboardedProfile) {
+        await db.exec(
+          `UPDATE public.profiles SET store_id = '${storeId}', onboarding_completed = true WHERE id = '${opts.ownerId}';`
+        );
+      } else if (opts.preexistingDaysAgo) {
+        await db.exec(
+          `UPDATE public.profiles SET store_id = '${storeId}', onboarding_completed = false WHERE id = '${opts.ownerId}';`
+        );
+      }
+
+      if (opts.extraProfileUserId) {
+        await db.exec(
+          `UPDATE public.profiles SET store_id = '${storeId}' WHERE id = '${opts.extraProfileUserId}';`
+        );
+      }
+
+      if (opts.addStaffMember) {
+        await setDbSession(opts.ownerId, 'merchant.a@amaas.test', 'authenticated');
+        await db.exec(`
+          INSERT INTO public.store_members (store_id, user_id, name, email, role, status)
+          VALUES ('${storeId}', NULL, 'Team Staff', 'team-${opts.subdomain}@amaas.test', 'staff', 'invited');
+        `);
+        await setDbSession(null, null, 'postgres');
+      }
+
+      let siteProdId: string | null = null;
+      if (!opts.preexistingDaysAgo) {
+        siteProdId = (
+          await db.query<{ id: string }>(`
+            INSERT INTO public.products (store_id, website_id, name, sku, price, stock)
+            VALUES ('${storeId}', '${siteId}', 'Site Only Item', 'SKU-${opts.subdomain}-W', 400, 5)
+            RETURNING id;
+          `)
+        ).rows[0].id;
+      }
+
+      let dashProdId: string | null = null;
+      if (opts.addDashboardProduct) {
+        dashProdId = (
+          await db.query<{ id: string }>(`
+            INSERT INTO public.products (store_id, website_id, name, sku, price, stock)
+            VALUES ('${storeId}', NULL, 'Dashboard POS Item', 'SKU-${opts.subdomain}-D', 800, 9)
+            RETURNING id;
+          `)
+        ).rows[0].id;
+        await db.exec(`
+          INSERT INTO public.inventory_movements (store_id, product_id, product_name, type, quantity_change, new_stock, reason)
+          VALUES ('${storeId}', '${dashProdId}', 'Dashboard POS Item', 'restock', 9, 9, 'Dashboard restock');
+        `);
+      }
+
+      if (opts.addDashboardOrder) {
+        await db.exec(`
+          INSERT INTO public.orders (store_id, order_number, customer_name, customer_phone, address, city, total, subtotal, source, items)
+          VALUES ('${storeId}', 'ORD-DASH-${opts.subdomain}', 'Walk-in Buyer', '01800000000', 'Dhaka', 'Dhaka', 800, 800, 'Dashboard', '[{"name":"Manual Sale","qty":1}]'::jsonb);
+        `);
+      }
+
+      if (opts.addManualCustomer) {
+        await db.exec(`
+          INSERT INTO public.customers (store_id, name, phone, email)
+          VALUES ('${storeId}', 'Manual CRM Client', '01900000000', 'crm-${opts.subdomain}@amaas.test');
+        `);
+      }
+
+      if (opts.addDashboardTrial) {
+        await db.exec(`
+          INSERT INTO public.service_trials (user_id, store_id, service_id, service_name, service_category)
+          VALUES ('${opts.ownerId}', '${storeId}', 'dashboard_pro', 'Dashboard Pro', 'dashboard');
+        `);
+      }
+
+      if (opts.addDashboardPayment) {
+        await db.exec(`
+          INSERT INTO public.payment_requests (
+            user_id, store_id, customer_name, customer_phone, customer_email,
+            service_type, service_id, service_name, plan_tier, amount, payment_method, transaction_id, status
+          ) VALUES (
+            '${opts.ownerId}', '${storeId}', 'Merchant', '01711111111', 'merchant@amaas.test',
+            'dashboard_plan', 'dashboard_pro', 'Dashboard Pro', 'Pro', 1200, 'bKash', 'TRX-DASH-${opts.subdomain}', 'approved'
+          );
+        `);
+      }
+
+      return { storeId, siteId, siteProdId, dashProdId };
+    };
+
+    const DB_MERCH_PREEX = '55555555-5555-4555-8555-555555555555';
+    await db.exec(`
+      INSERT INTO auth.users (id, email) VALUES ('${DB_MERCH_PREEX}', 'preex.merchant@amaas.test');
+      INSERT INTO public.profiles (id, email, full_name, role)
+      VALUES ('${DB_MERCH_PREEX}', 'preex.merchant@amaas.test', 'Preexisting Merchant', 'merchant')
+      ON CONFLICT (id) DO NOTHING;
+    `);
+
+    const s1 = await createSingleSiteScenario({
+      ownerId: DB_MERCH_A,
+      subdomain: 'iso-onboarded',
+      onboardedProfile: true,
+    });
+    const s2 = await createSingleSiteScenario({
+      ownerId: DB_MERCH_A,
+      subdomain: 'iso-team',
+      addStaffMember: true,
+    });
+    const s3 = await createSingleSiteScenario({
+      ownerId: DB_MERCH_A,
+      subdomain: 'iso-dash-prod',
+      addDashboardProduct: true,
+    });
+    const s4 = await createSingleSiteScenario({
+      ownerId: DB_MERCH_A,
+      subdomain: 'iso-dash-order-crm',
+      addDashboardOrder: true,
+      addManualCustomer: true,
+    });
+    const s5 = await createSingleSiteScenario({
+      ownerId: DB_MERCH_A,
+      subdomain: 'iso-workflows',
+      addDashboardTrial: true,
+      addDashboardPayment: true,
+    });
+    const s6 = await createSingleSiteScenario({
+      ownerId: DB_MERCH_B,
+      siteUserId: DB_MERCH_A,
+      subdomain: 'iso-owner-mismatch',
+    });
+    const s7 = await createSingleSiteScenario({
+      ownerId: DB_MERCH_PREEX,
+      subdomain: 'iso-preexisting-prof',
+      preexistingDaysAgo: 7,
+    });
+
+    await setDbSession(null, null, 'service_role');
+
+    const runAndAssertPreserved = async (
+      scenario: { storeId: string; siteId: string; siteProdId: string | null; dashProdId: string | null },
+      subdomain: string,
+      expectedReason: string
+    ) => {
+      const delRes = await db.query<{
+        res: {
+          success: boolean;
+          deletedWebsiteId: string;
+          deletedStoreId: string | null;
+          preservedStoreId: string | null;
+          isSharedStore: boolean;
+          storePreserved: boolean;
+          storePreservationReasons: string[];
+          deletedProductIds: string[];
+        };
+      }>(
+        `SELECT public.admin_permanently_delete_website('${scenario.siteId}'::uuid, '${DB_ADMIN}'::uuid, '${subdomain}', 'Issue 2 exclusivity test') AS res;`
+      );
+      const out = delRes.rows[0].res;
+      assert.equal(out.success, true);
+      assert.equal(out.deletedWebsiteId, scenario.siteId);
+      assert.equal(out.deletedStoreId, null, `${subdomain}: store must NOT be deleted`);
+      assert.equal(out.preservedStoreId, scenario.storeId);
+      assert.equal(out.isSharedStore, false);
+      assert.equal(out.storePreserved, true);
+      assert.ok(
+        out.storePreservationReasons.includes(expectedReason),
+        `${subdomain}: expected reason ${expectedReason}, got ${JSON.stringify(out.storePreservationReasons)}`
+      );
+      if (scenario.siteProdId) {
+        assert.deepEqual(out.deletedProductIds, [scenario.siteProdId]);
+      }
+
+      const verifyDb = await db.query<{
+        site_cnt: string;
+        store_cnt: string;
+        site_prod_cnt: string;
+        dash_prod_cnt: string;
+      }>(`
+        SELECT
+          (SELECT COUNT(*) FROM public.subscribed_websites WHERE id = '${scenario.siteId}') AS site_cnt,
+          (SELECT COUNT(*) FROM public.stores WHERE id = '${scenario.storeId}') AS store_cnt,
+          ${scenario.siteProdId ? `(SELECT COUNT(*) FROM public.products WHERE id = '${scenario.siteProdId}')` : '0'} AS site_prod_cnt,
+          ${scenario.dashProdId ? `(SELECT COUNT(*) FROM public.products WHERE id = '${scenario.dashProdId}')` : '0'} AS dash_prod_cnt;
+      `);
+      assert.equal(Number(verifyDb.rows[0].site_cnt), 0);
+      assert.equal(Number(verifyDb.rows[0].store_cnt), 1);
+      assert.equal(Number(verifyDb.rows[0].site_prod_cnt), 0);
+      if (scenario.dashProdId) {
+        assert.equal(Number(verifyDb.rows[0].dash_prod_cnt), 1);
+      }
+    };
+
+    await runAndAssertPreserved(s1, 'iso-onboarded', 'merchant_dashboard_onboarded_store');
+    await runAndAssertPreserved(s2, 'iso-team', 'team_store_members');
+    await runAndAssertPreserved(s3, 'iso-dash-prod', 'non_website_or_shared_products');
+    await runAndAssertPreserved(s4, 'iso-dash-order-crm', 'non_website_orders');
+    await runAndAssertPreserved(s5, 'iso-workflows', 'non_website_service_workflows');
+    await runAndAssertPreserved(s6, 'iso-owner-mismatch', 'ownership_mismatch');
+    await runAndAssertPreserved(s7, 'iso-preexisting-prof', 'preexisting_profile_store_without_website_records');
+
+    // Verify s4 manual order/customer & s5 trial/payment remained completely intact
+    const s4s5Check = await db.query<{ ord_cnt: string; cust_cnt: string; tr_cnt: string; pr_cnt: string }>(`
+      SELECT
+        (SELECT COUNT(*) FROM public.orders WHERE store_id = '${s4.storeId}' AND source = 'Dashboard') AS ord_cnt,
+        (SELECT COUNT(*) FROM public.customers WHERE store_id = '${s4.storeId}') AS cust_cnt,
+        (SELECT COUNT(*) FROM public.service_trials WHERE store_id = '${s5.storeId}' AND service_category = 'dashboard') AS tr_cnt,
+        (SELECT COUNT(*) FROM public.payment_requests WHERE store_id = '${s5.storeId}' AND service_type = 'dashboard_plan') AS pr_cnt;
+    `);
+    assert.equal(Number(s4s5Check.rows[0].ord_cnt), 1);
+    assert.equal(Number(s4s5Check.rows[0].cust_cnt), 1);
+    assert.equal(Number(s4s5Check.rows[0].tr_cnt), 1);
+    assert.equal(Number(s4s5Check.rows[0].pr_cnt), 1);
+  });
+
+  await check('3.16 DB Storage Ownership & Fail-Safe Audit: protects sibling configs/drafts, surviving orders, support_tickets & unowned general/foreign/other-bucket URLs while recording manual review and idempotent retries', async () => {
+    await setDbSession(null, null, 'postgres');
+    const storeStgId = (
+      await db.query<{ id: string }>(
+        `INSERT INTO public.stores (owner_id, name, slug, category, currency) VALUES ('${DB_MERCH_C}', 'Storage Audit Store', 'storage-audit-store', 'Retail', '৳') RETURNING id;`
+      )
+    ).rows[0].id;
+    const siteSurvId = (
+      await db.query<{ id: string }>(
+        `INSERT INTO public.subscribed_websites (user_id, store_id, business_name, niche, subdomain, full_domain, template_id, template_name, status, payment_status, deployment_status, current_period_end, grace_period_end)
+         VALUES ('${DB_MERCH_C}', '${storeStgId}', 'Surviving Audit Site', 'ecommerce', 'audit-surv', 'audit-surv.amaas.xyz', 't1', 'Modern', 'active', 'paid', 'live', NOW() + INTERVAL '30 days', NOW() + INTERVAL '35 days') RETURNING id;`
+      )
+    ).rows[0].id;
+    const siteDelId = (
+      await db.query<{ id: string }>(
+        `INSERT INTO public.subscribed_websites (user_id, store_id, business_name, niche, subdomain, full_domain, template_id, template_name, status, payment_status, deployment_status, current_period_end, grace_period_end)
+         VALUES ('${DB_MERCH_C}', '${storeStgId}', 'Deleted Audit Site', 'ecommerce', 'audit-del', 'audit-del.amaas.xyz', 't1', 'Modern', 'active', 'paid', 'live', NOW() + INTERVAL '30 days', NOW() + INTERVAL '35 days') RETURNING id;`
+      )
+    ).rows[0].id;
+
+    const safeSiteImgPath = `${DB_MERCH_C}/${siteDelId}/heroes/exclusive-hero.png`;
+    const safeProdImgPath = `${DB_MERCH_C}/${storeStgId}/products/exclusive-item.png`;
+    const sharedSiblingProdImgPath = `${DB_MERCH_C}/${storeStgId}/products/shared-via-draft.png`;
+    const orderSnapImgPath = `${DB_MERCH_C}/${siteDelId}/products/ordered-snapshot.png`;
+    const unownedGeneralPath = `${DB_MERCH_C}/general/shared-brand.png`;
+    const foreignOwnerPath = `${DB_MERCH_B}/99999999-9999-4999-8999-999999999999/foreign.png`;
+    const otherBucketUrl = `https://mock.supabase.co/storage/v1/object/public/other-bucket/asset.png`;
+    const ticketImgPath = `${DB_MERCH_C}/${siteDelId}/tickets/evidence.png`;
+
+    await db.exec(`
+      INSERT INTO public.products (store_id, website_id, name, sku, price, stock, image_url) VALUES
+        ('${storeStgId}', '${siteDelId}', 'Exclusive Asset Prod', 'STG-1', 100, 5, 'https://mock.supabase.co/storage/v1/object/public/website-assets/${safeProdImgPath}'),
+        ('${storeStgId}', '${siteDelId}', 'Sibling Draft Image Prod', 'STG-2', 200, 5, 'https://mock.supabase.co/storage/v1/object/public/website-assets/${sharedSiblingProdImgPath}'),
+        ('${storeStgId}', '${siteDelId}', 'Order Snapshot Image Prod', 'STG-3', 300, 5, 'https://mock.supabase.co/storage/v1/object/public/website-assets/${orderSnapImgPath}');
+
+      UPDATE public.subscribed_websites
+      SET config = jsonb_build_object(
+        'heroImageUrl', 'https://mock.supabase.co/storage/v1/object/public/website-assets/${safeSiteImgPath}',
+        'logoUrl', 'https://mock.supabase.co/storage/v1/object/public/website-assets/${unownedGeneralPath}',
+        'bannerImageUrl', 'https://mock.supabase.co/storage/v1/object/public/website-assets/${foreignOwnerPath}',
+        'sections', jsonb_build_array(
+          jsonb_build_object('imageUrl', '${otherBucketUrl}', 'items', jsonb_build_array(
+            jsonb_build_object('imageUrl', 'https://mock.supabase.co/storage/v1/object/public/website-assets/${ticketImgPath}')
+          ))
+        )
+      )
+      WHERE id = '${siteDelId}';
+
+      UPDATE public.subscribed_websites
+      SET config = jsonb_build_object(
+        'draft', jsonb_build_object(
+          'sections', jsonb_build_array(
+            jsonb_build_object('items', jsonb_build_array(
+              jsonb_build_object('imageUrl', 'https://mock.supabase.co/storage/v1/object/public/website-assets/${sharedSiblingProdImgPath}')
+            ))
+          )
+        )
+      )
+      WHERE id = '${siteSurvId}';
+
+      INSERT INTO public.orders (store_id, order_number, customer_name, customer_phone, address, city, total, subtotal, source, items)
+      VALUES (
+        '${storeStgId}', 'ORD-AUDIT-SNAP', 'Snap Buyer', '01755555555', 'Dhaka', 'Dhaka', 300, 300,
+        'Website (audit-del.amaas.xyz)',
+        jsonb_build_array(
+          jsonb_build_object(
+            'name', 'Order Snapshot Image Prod',
+            'qty', 1,
+            'imageUrl', 'https://mock.supabase.co/storage/v1/object/public/website-assets/${orderSnapImgPath}',
+            'orderMeta', jsonb_build_object('websiteId', '${siteDelId}')
+          )
+        )
+      );
+
+      INSERT INTO public.support_tickets (ticket_number, user_id, subject, category, messages)
+      VALUES (
+        'TKT-AUDIT-001',
+        '${DB_MERCH_B}', 'Unrelated ticket referencing image', 'technical',
+        jsonb_build_array(jsonb_build_object('text', 'Ref', 'attachmentUrl', 'https://mock.supabase.co/storage/v1/object/public/website-assets/${ticketImgPath}'))
+      );
+    `);
+
+    await setDbSession(null, null, 'service_role');
+    const delAuditRes = await db.query<{
+      res: {
+        success: boolean;
+        deletedStoreId: string | null;
+        cleanupObjectPaths: string[];
+        preservedReferencedObjectPaths: string[];
+        manualReviewObjectPaths: string[];
+        manualReviewRequired: boolean;
+      };
+    }>(
+      `SELECT public.admin_permanently_delete_website('${siteDelId}'::uuid, '${DB_ADMIN}'::uuid, 'audit-del', 'Storage ownership audit') AS res;`
+    );
+    const out = delAuditRes.rows[0].res;
+    assert.equal(out.success, true);
+    assert.equal(out.deletedStoreId, null);
+
+    // Only truly exclusive, verified-ownership paths are in cleanupObjectPaths
+    assert.ok(out.cleanupObjectPaths.includes(safeSiteImgPath));
+    assert.ok(out.cleanupObjectPaths.includes(safeProdImgPath));
+    assert.ok(!out.cleanupObjectPaths.includes(sharedSiblingProdImgPath));
+    assert.ok(!out.cleanupObjectPaths.includes(orderSnapImgPath));
+    assert.ok(!out.cleanupObjectPaths.includes(unownedGeneralPath));
+    assert.ok(!out.cleanupObjectPaths.includes(foreignOwnerPath));
+    assert.ok(!out.cleanupObjectPaths.includes(otherBucketUrl));
+    assert.ok(!out.cleanupObjectPaths.includes(ticketImgPath));
+
+    // Surviving references from draft, orders, and support_tickets are all preserved!
+    assert.ok(out.preservedReferencedObjectPaths.includes(sharedSiblingProdImgPath));
+    assert.ok(out.preservedReferencedObjectPaths.includes(orderSnapImgPath));
+    assert.ok(out.preservedReferencedObjectPaths.includes(ticketImgPath));
+
+    // Unowned general/foreign/other-bucket URLs are flagged for manual review!
+    assert.equal(out.manualReviewRequired, true);
+    assert.ok(out.manualReviewObjectPaths.includes(unownedGeneralPath));
+    assert.ok(out.manualReviewObjectPaths.includes(foreignOwnerPath));
+    assert.ok(out.manualReviewObjectPaths.includes(otherBucketUrl));
+
+    // Pre-Storage-DELETE global verification excludes referenced paths and approves safe ones
+    const verifyRes = await db.query<{
+      res: { success: boolean; safeToDeletePaths: string[]; referencedPaths: string[] };
+    }>(`
+      SELECT public.admin_verify_storage_paths_for_deletion(
+        '${DB_ADMIN}'::uuid,
+        to_jsonb(ARRAY['${safeSiteImgPath}', '${orderSnapImgPath}', '${ticketImgPath}']),
+        '${siteDelId}'::uuid
+      ) AS res;
+    `);
+    assert.equal(verifyRes.rows[0].res.success, true);
+    assert.deepEqual(verifyRes.rows[0].res.safeToDeletePaths, [safeSiteImgPath]);
+    assert.ok(verifyRes.rows[0].res.referencedPaths.includes(orderSnapImgPath));
+    assert.ok(verifyRes.rows[0].res.referencedPaths.includes(ticketImgPath));
+
+    // Idempotent duplicate completion test when manual review paths are cleared later
+    const completeOnce = await db.query<{
+      res: { success: boolean; idempotent: boolean; cleanupStatus: string; deletedObjectsCount: number };
+    }>(`
+      SELECT public.admin_record_website_storage_cleanup_result(
+        '${siteDelId}'::uuid, '${DB_ADMIN}'::uuid, 'completed', 2, '[]'::jsonb, NULL, '[]'::jsonb
+      ) AS res;
+    `);
+    assert.equal(completeOnce.rows[0].res.success, true);
+    assert.equal(completeOnce.rows[0].res.idempotent, false);
+    assert.equal(completeOnce.rows[0].res.cleanupStatus, 'completed');
+    assert.equal(completeOnce.rows[0].res.deletedObjectsCount, 2);
+
+    const completeDup = await db.query<{
+      res: { success: boolean; idempotent: boolean; cleanupStatus: string; deletedObjectsCount: number };
+    }>(`
+      SELECT public.admin_record_website_storage_cleanup_result(
+        '${siteDelId}'::uuid, '${DB_ADMIN}'::uuid, 'completed', 2, '[]'::jsonb, NULL, '[]'::jsonb
+      ) AS res;
+    `);
+    assert.equal(completeDup.rows[0].res.success, true);
+    assert.equal(completeDup.rows[0].res.idempotent, true);
+    assert.equal(completeDup.rows[0].res.deletedObjectsCount, 2);
+
+    // Non-service_role client cannot invoke admin_verify_storage_paths_for_deletion or admin_get_website_storage_cleanup_job
+    await setDbSession(DB_MERCH_C, 'merchant.c@amaas.test', 'authenticated');
+    let verifyBlocked = false;
+    try {
+      await db.query(
+        `SELECT public.admin_verify_storage_paths_for_deletion('${DB_ADMIN}'::uuid, '[]'::jsonb, '${siteDelId}'::uuid);`
+      );
+    } catch {
+      verifyBlocked = true;
+    }
+    assert.equal(verifyBlocked, true);
+  });
+
+  await check('3.17 Concurrent DB writes flip storage_deletion_reservations to referenced_aborted via triggers, verification excludes them, retries deduplicate, and unauthorized RPC calls fail', async () => {
+    await setDbSession(null, null, 'postgres');
+
+    const storeRaceId = (
+      await db.query<{ id: string }>(
+        `INSERT INTO public.stores (owner_id, name, slug, category, currency) VALUES ('${DB_MERCH_C}', 'Race Guard Store', 'race-guard-store', 'Retail', '৳') RETURNING id;`
+      )
+    ).rows[0].id;
+
+    const siteRaceDelId = (
+      await db.query<{ id: string }>(
+        `INSERT INTO public.subscribed_websites (
+          user_id, store_id, business_name, niche, subdomain, full_domain,
+          template_id, template_name, status, payment_status, deployment_status,
+          current_period_end, grace_period_end
+        ) VALUES (
+          '${DB_MERCH_C}', '${storeRaceId}', 'Race Del Site', 'ecommerce', 'race-del', 'race-del.amaas.xyz',
+          't1', 'Modern', 'active', 'paid', 'live',
+          NOW() + INTERVAL '30 days', NOW() + INTERVAL '35 days'
+        ) RETURNING id;`
+      )
+    ).rows[0].id;
+
+    const siteRaceSurvId = (
+      await db.query<{ id: string }>(
+        `INSERT INTO public.subscribed_websites (
+          user_id, store_id, business_name, niche, subdomain, full_domain,
+          template_id, template_name, status, payment_status, deployment_status,
+          current_period_end, grace_period_end
+        ) VALUES (
+          '${DB_MERCH_C}', '${storeRaceId}', 'Race Surv Site', 'ecommerce', 'race-surv', 'race-surv.amaas.xyz',
+          't1', 'Modern', 'active', 'paid', 'live',
+          NOW() + INTERVAL '30 days', NOW() + INTERVAL '35 days'
+        ) RETURNING id;`
+      )
+    ).rows[0].id;
+
+    const survProdRaceId = (
+      await db.query<{ id: string }>(
+        `INSERT INTO public.products (store_id, website_id, name, sku, price, stock, image_url)
+         VALUES ('${storeRaceId}', '${siteRaceSurvId}', 'Surviving Race Prod', 'RACE-SURV-1', 250, 10, NULL)
+         RETURNING id;`
+      )
+    ).rows[0].id;
+
+    const pathOrderRace = `${DB_MERCH_C}/${siteRaceDelId}/heroes/order-race.png`;
+    const pathProdRace = `${DB_MERCH_C}/${storeRaceId}/products/prod-race.png`;
+    const pathSiteRace = `${DB_MERCH_C}/${siteRaceDelId}/banners/site-race.png`;
+    const pathSafeDelete = `${DB_MERCH_C}/${siteRaceDelId}/heroes/truly-exclusive.png`;
+
+    await db.exec(`
+      INSERT INTO public.products (store_id, website_id, name, sku, price, stock, image_url)
+      VALUES ('${storeRaceId}', '${siteRaceDelId}', 'Deleted Race Prod', 'RACE-DEL-1', 150, 4,
+        'https://mock.supabase.co/storage/v1/object/public/website-assets/${pathProdRace}');
+
+      UPDATE public.subscribed_websites
+      SET config = jsonb_build_object(
+        'heroImageUrl', 'https://mock.supabase.co/storage/v1/object/public/website-assets/${pathOrderRace}',
+        'bannerImageUrl', 'https://mock.supabase.co/storage/v1/object/public/website-assets/${pathSiteRace}',
+        'sections', jsonb_build_array(
+          jsonb_build_object('imageUrl', 'https://mock.supabase.co/storage/v1/object/public/website-assets/${pathSafeDelete}')
+        )
+      )
+      WHERE id = '${siteRaceDelId}';
+    `);
+
+    await setDbSession(null, null, 'service_role');
+    const delRace = await db.query<{
+      res: { success: boolean; cleanupObjectPaths: string[] };
+    }>(
+      `SELECT public.admin_permanently_delete_website('${siteRaceDelId}'::uuid, '${DB_ADMIN}'::uuid, 'race-del', 'Race reservation check') AS res;`
+    );
+    assert.equal(delRace.rows[0].res.success, true);
+    assert.ok(delRace.rows[0].res.cleanupObjectPaths.includes(pathOrderRace));
+    assert.ok(delRace.rows[0].res.cleanupObjectPaths.includes(pathProdRace));
+    assert.ok(delRace.rows[0].res.cleanupObjectPaths.includes(pathSiteRace));
+    assert.ok(delRace.rows[0].res.cleanupObjectPaths.includes(pathSafeDelete));
+
+    // Reservations created atomically as 'reserved'
+    const resRows = await db.query<{ object_path: string; status: string }>(
+      `SELECT object_path, status FROM public.storage_deletion_reservations WHERE website_id = '${siteRaceDelId}'::uuid;`
+    );
+    assert.equal(resRows.rows.length, 4);
+    assert.ok(resRows.rows.every((r) => r.status === 'reserved'));
+
+    // Concurrent DB writers reference 3 of those paths AFTER deletion committed
+    await setDbSession(null, null, 'postgres');
+    await db.exec(`
+      INSERT INTO public.orders (store_id, order_number, customer_name, customer_phone, address, city, total, subtotal, source, items)
+      VALUES (
+        '${storeRaceId}', 'ORD-RACE-CONC', 'Concurrent Buyer', '01766666666', 'Dhaka', 'Dhaka', 150, 150,
+        'Website (race-surv.amaas.xyz)',
+        jsonb_build_array(jsonb_build_object(
+          'name', 'Concurrent Item',
+          'qty', 1,
+          'imageUrl', 'https://mock.supabase.co/storage/v1/object/public/website-assets/${pathOrderRace}'
+        ))
+      );
+
+      UPDATE public.products
+      SET image_url = 'https://mock.supabase.co/storage/v1/object/public/website-assets/${pathProdRace}'
+      WHERE id = '${survProdRaceId}'::uuid;
+
+      UPDATE public.subscribed_websites
+      SET config = jsonb_build_object(
+        'bannerImageUrl', 'https://mock.supabase.co/storage/v1/object/public/website-assets/${pathSiteRace}'
+      )
+      WHERE id = '${siteRaceSurvId}'::uuid;
+    `);
+
+    await setDbSession(null, null, 'service_role');
+    const postWriteResRows = await db.query<{ object_path: string; status: string }>(
+      `SELECT object_path, status FROM public.storage_deletion_reservations WHERE website_id = '${siteRaceDelId}'::uuid;`
+    );
+    const statusMap = new Map(postWriteResRows.rows.map((r) => [r.object_path, r.status]));
+    assert.equal(statusMap.get(pathOrderRace), 'referenced_aborted');
+    assert.equal(statusMap.get(pathProdRace), 'referenced_aborted');
+    assert.equal(statusMap.get(pathSiteRace), 'referenced_aborted');
+    assert.equal(statusMap.get(pathSafeDelete), 'reserved');
+
+    // Global verify RPC sees all 3 aborted paths + excludes them, returning only pathSafeDelete
+    const raceVerify = await db.query<{
+      res: {
+        success: boolean;
+        verificationToken: string;
+        safeToDeletePaths: string[];
+        referencedPaths: string[];
+        abortedPaths: string[];
+      };
+    }>(`
+      SELECT public.admin_verify_storage_paths_for_deletion(
+        '${DB_ADMIN}'::uuid,
+        to_jsonb(ARRAY['${pathOrderRace}', '${pathProdRace}', '${pathSiteRace}', '${pathSafeDelete}']),
+        '${siteRaceDelId}'::uuid
+      ) AS res;
+    `);
+    assert.equal(raceVerify.rows[0].res.success, true);
+    assert.ok(raceVerify.rows[0].res.verificationToken.length > 10);
+    assert.deepEqual(raceVerify.rows[0].res.safeToDeletePaths, [pathSafeDelete]);
+    assert.ok(raceVerify.rows[0].res.abortedPaths.includes(pathOrderRace));
+    assert.ok(raceVerify.rows[0].res.abortedPaths.includes(pathProdRace));
+    assert.ok(raceVerify.rows[0].res.abortedPaths.includes(pathSiteRace));
+
+    // Record partial with explicit p_deleted_paths & verify overlapping retry deduplicates
+    const rec1 = await db.query<{
+      res: {
+        success: boolean;
+        deletedObjectsCount: number;
+        lateConcurrentReferencePaths: string[];
+      };
+    }>(`
+      SELECT public.admin_record_website_storage_cleanup_result(
+        '${siteRaceDelId}'::uuid,
+        '${DB_ADMIN}'::uuid,
+        'partial_failed',
+        1,
+        to_jsonb(ARRAY['${pathSafeDelete}']),
+        'Retry test',
+        '[]'::jsonb,
+        to_jsonb(ARRAY['${pathSafeDelete}']),
+        '${raceVerify.rows[0].res.verificationToken}'::uuid
+      ) AS res;
+    `);
+    assert.equal(rec1.rows[0].res.deletedObjectsCount, 1);
+    assert.equal(rec1.rows[0].res.lateConcurrentReferencePaths.length, 3);
+
+    // Retry overlapping SAME path -> count must NOT increase to 2!
+    const rec2 = await db.query<{
+      res: { success: boolean; deletedObjectsCount: number; cleanupStatus: string };
+    }>(`
+      SELECT public.admin_record_website_storage_cleanup_result(
+        '${siteRaceDelId}'::uuid,
+        '${DB_ADMIN}'::uuid,
+        'completed',
+        1,
+        '[]'::jsonb,
+        NULL,
+        '[]'::jsonb,
+        to_jsonb(ARRAY['${pathSafeDelete}']),
+        '${raceVerify.rows[0].res.verificationToken}'::uuid
+      ) AS res;
+    `);
+    assert.equal(rec2.rows[0].res.deletedObjectsCount, 1);
+    assert.equal(rec2.rows[0].res.cleanupStatus, 'completed');
+
+    // Invalid secondary admin ID fails even under service_role
+    let secondaryBlocked = false;
+    try {
+      await db.query(
+        `SELECT public.admin_verify_storage_paths_for_deletion('${DB_SECONDARY_ADMIN}'::uuid, '[]'::jsonb, '${siteRaceDelId}'::uuid);`
+      );
+    } catch {
+      secondaryBlocked = true;
+    }
+    assert.equal(secondaryBlocked, true);
+
+    // Direct client (authenticated / anon) cannot access storage_deletion_reservations or record cleanup RPC
+    await setDbSession(DB_MERCH_C, 'merchant.c@amaas.test', 'authenticated');
+    let directTableBlocked = false;
+    try {
+      await db.query(`SELECT * FROM public.storage_deletion_reservations LIMIT 1;`);
+    } catch {
+      directTableBlocked = true;
+    }
+    assert.equal(directTableBlocked, true);
+
+    let directRecordBlocked = false;
+    try {
+      await db.query(
+        `SELECT public.admin_record_website_storage_cleanup_result('${siteRaceDelId}'::uuid, '${DB_ADMIN}'::uuid, 'completed', 0);`
+      );
+    } catch {
+      directRecordBlocked = true;
+    }
+    assert.equal(directRecordBlocked, true);
   });
 
   await db.close();
