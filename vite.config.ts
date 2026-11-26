@@ -10,18 +10,43 @@ import publicOrderHandler from './api/public-order.ts';
 import publicInquiryHandler from './api/public-inquiry.ts';
 import customerPortalHandler from './api/customer-portal.ts';
 import adminWebsiteActionHandler from './api/admin-website-action.ts';
+import adminDiagnosticHandler from './api/admin-diagnostic.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '');
+  const gitBranch = (process.env.VERCEL_GIT_COMMIT_REF || process.env.GIT_BRANCH || '').trim().toLowerCase();
+  const vercelEnv = (process.env.VERCEL_ENV || '').trim().toLowerCase();
+  const explicitEnv = (process.env.VITE_SUPABASE_ENV || '').trim().toLowerCase();
+
+  // Staging detection:
+  // 1. Vite mode is explicitly 'staging' (e.g. npm run build:staging / npm run dev:staging)
+  // 2. VITE_SUPABASE_ENV is set to 'staging'
+  // 3. Vercel build is on the 'staging' branch (VERCEL_GIT_COMMIT_REF === 'staging')
+  // 4. Vercel preview build from a staging branch/PR (not main)
+  const isStaging =
+    mode === 'staging' ||
+    explicitEnv === 'staging' ||
+    gitBranch === 'staging' ||
+    (vercelEnv === 'preview' && gitBranch !== 'main' && (gitBranch.startsWith('staging') || gitBranch.startsWith('stage')));
+
+  const effectiveMode = isStaging ? 'staging' : mode;
+  const env = loadEnv(effectiveMode, process.cwd(), '');
+
+  // Separate environment file scan order:
+  // If Staging: prioritize .env.staging.local and .env.staging
+  // If Production/main: strictly avoid .env.staging to protect Production from bleed-through
+  const envFilesToScan = isStaging
+    ? ['.env.staging.local', '.env.staging', '.env.local', '.env']
+    : ['.env.production.local', '.env.production', '.env.local', '.env'];
 
   let localUrl = '';
   let localKey = '';
-  let localEnv = '';
+  let localEnv = isStaging ? 'staging' : '';
   let localServiceRoleKey = '';
-  for (const f of ['.env.local', '.env']) {
+
+  for (const f of envFilesToScan) {
     if (fs.existsSync(f)) {
       const content = fs.readFileSync(f, 'utf8');
       for (const line of content.split('\n')) {
@@ -47,6 +72,13 @@ export default defineConfig(({ mode }) => {
     if (localUrl && localKey) break;
   }
 
+  // If building for Staging, ensure Staging project defaults are used if not provided by env or files
+  if (isStaging) {
+    if (!localUrl) localUrl = 'https://umiheyukaddfaupsyooh.supabase.co';
+    if (!localKey) localKey = 'sb_publishable_7TtAiiuodpRVh1YxxNyZTQ_tVjv4VL_';
+    localEnv = 'staging';
+  }
+
   // Server-only environment hydration for /api/* handlers (NEVER injected into Vite define / client bundle)
   if (!process.env.SUPABASE_SERVICE_ROLE_KEY && (env.SUPABASE_SERVICE_ROLE_KEY || localServiceRoleKey)) {
     process.env.SUPABASE_SERVICE_ROLE_KEY = (env.SUPABASE_SERVICE_ROLE_KEY || localServiceRoleKey).trim();
@@ -65,7 +97,11 @@ export default defineConfig(({ mode }) => {
       ? rawKey.trim()
       : '';
 
-  const supabaseEnv = (process.env.VITE_SUPABASE_ENV || env.VITE_SUPABASE_ENV || localEnv || '').trim();
+  const supabaseEnv = (
+    isStaging
+      ? 'staging'
+      : (process.env.VITE_SUPABASE_ENV || env.VITE_SUPABASE_ENV || localEnv || '')
+  ).trim();
 
   const resolveTenantApiPlugin = {
     name: 'goamaas-resolve-tenant-api',
@@ -159,6 +195,22 @@ export default defineConfig(({ mode }) => {
                 success: false,
                 code: 'INTERNAL_ADMIN_ACTION_ERROR',
                 error: 'Server error handling administrative website action.',
+              })
+            );
+          }
+          return;
+        }
+        if (pathname === '/api/admin-diagnostic') {
+          try {
+            await adminDiagnosticHandler(req, res);
+          } catch {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(
+              JSON.stringify({
+                ok: false,
+                code: 'INTERNAL_DIAGNOSTIC_ERROR',
+                error: 'Server error handling admin diagnostic.',
               })
             );
           }

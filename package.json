@@ -5,8 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:staging": "vite --mode staging",
     "build": "vite build",
+    "build:staging": "vite build --mode staging",
     "preview": "vite preview",
+    "preview:staging": "vite preview --mode staging",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
   },

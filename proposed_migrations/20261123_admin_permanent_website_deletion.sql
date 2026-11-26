@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS public.website_deletion_storage_cleanups (
   website_id UUID NOT NULL UNIQUE,
   audit_log_id UUID REFERENCES public.website_lifecycle_audit_logs(id) ON DELETE RESTRICT,
   admin_id UUID NOT NULL,
-  owner_user_id UUID NOT NULL,
+  owner_user_id UUID,
   deleted_store_id UUID,
   preserved_store_id UUID,
   is_shared_store BOOLEAN NOT NULL DEFAULT false,
@@ -128,6 +128,7 @@ CREATE TABLE IF NOT EXISTS public.website_deletion_storage_cleanups (
 );
 
 ALTER TABLE public.website_deletion_storage_cleanups
+  ALTER COLUMN owner_user_id DROP NOT NULL,
   ADD COLUMN IF NOT EXISTS preserved_store_id UUID,
   ADD COLUMN IF NOT EXISTS store_preserved BOOLEAN NOT NULL DEFAULT false,
   ADD COLUMN IF NOT EXISTS store_preservation_reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -209,7 +210,7 @@ CREATE TABLE IF NOT EXISTS public.storage_deletion_reservations (
   object_path TEXT NOT NULL,
   object_path_lower TEXT NOT NULL UNIQUE,
   website_id UUID NOT NULL,
-  owner_user_id UUID NOT NULL,
+  owner_user_id UUID,
   store_id UUID,
   store_preserved BOOLEAN NOT NULL DEFAULT true,
   verification_token UUID,
@@ -2014,11 +2015,16 @@ BEGIN
     RETURNING id INTO v_audit_id;
 
     -- Persist durable storage cleanup scope so post-commit Storage cleanup can be
-    -- retried safely even if the browser/API fails or times out after DB commit.
-    IF v_site.user_id IS NOT NULL THEN
-      v_scope_prefixes := jsonb_build_array(v_site.user_id::TEXT || '/' || p_website_id::TEXT);
-      IF v_exclusive_store_id IS NOT NULL AND NOT v_is_shared_store AND NOT v_store_preserved THEN
-        v_scope_prefixes := v_scope_prefixes || jsonb_build_array(v_site.user_id::TEXT || '/' || v_exclusive_store_id::TEXT);
+    -- retried safely even if the browser/API fails or times out after DB commit,
+    -- and ensure unowned legacy websites still persist uncertain paths for manual review.
+    IF v_site.user_id IS NOT NULL OR v_manual_review_required THEN
+      IF v_site.user_id IS NOT NULL THEN
+        v_scope_prefixes := jsonb_build_array(v_site.user_id::TEXT || '/' || p_website_id::TEXT);
+        IF v_exclusive_store_id IS NOT NULL AND NOT v_is_shared_store AND NOT v_store_preserved THEN
+          v_scope_prefixes := v_scope_prefixes || jsonb_build_array(v_site.user_id::TEXT || '/' || v_exclusive_store_id::TEXT);
+        END IF;
+      ELSE
+        v_scope_prefixes := '[]'::jsonb;
       END IF;
 
       INSERT INTO public.website_deletion_storage_cleanups (
@@ -2065,7 +2071,7 @@ BEGIN
       -- Immediately reserve candidate Storage paths in the exact same atomic transaction
       -- as website deletion so any concurrent writer referencing a path afterwards triggers
       -- referenced_aborted BEFORE Storage DELETE executes.
-      IF pg_catalog.jsonb_array_length(v_cleanup_object_paths) > 0 THEN
+      IF v_site.user_id IS NOT NULL AND pg_catalog.jsonb_array_length(v_cleanup_object_paths) > 0 THEN
         INSERT INTO public.storage_deletion_reservations (
           object_path,
           object_path_lower,
@@ -2157,6 +2163,28 @@ $$;
 REVOKE ALL ON FUNCTION public.admin_permanently_delete_website(UUID, UUID, TEXT, TEXT) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.admin_permanently_delete_website(UUID, UUID, TEXT, TEXT) FROM anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.admin_permanently_delete_website(UUID, UUID, TEXT, TEXT) TO service_role;
+
+-- ------------------------------------------------------------------------------
+-- 7b. Disable Legacy Non-Atomic admin_delete_subscribed_website(UUID)
+--     Fail-closed stub ensures no stale client or privileged caller can invoke
+--     the legacy non-atomic single-table delete path.
+-- ------------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.admin_delete_subscribed_website(
+  p_website_id UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+  RAISE EXCEPTION 'Legacy non-atomic admin_delete_subscribed_website is disabled. Use /api/admin-website-action and public.admin_permanently_delete_website instead.';
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.admin_delete_subscribed_website(UUID) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.admin_delete_subscribed_website(UUID) FROM anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.admin_delete_subscribed_website(UUID) TO service_role;
 
 -- ------------------------------------------------------------------------------
 -- 8. Service-Role RPCs for Verifying, Retrying & Recording Post-Commit Cleanup
@@ -2881,6 +2909,7 @@ BEGIN
       'public.protect_service_trial_invariants()'::pg_catalog.regprocedure,
       'public.guard_reserved_storage_paths()'::pg_catalog.regprocedure,
       'public.find_surviving_website_asset_references(text[], uuid, uuid[], uuid)'::pg_catalog.regprocedure,
+      'public.admin_delete_subscribed_website(uuid)'::pg_catalog.regprocedure,
       'public.admin_permanently_delete_website(uuid, uuid, text, text)'::pg_catalog.regprocedure,
       'public.admin_verify_storage_paths_for_deletion(uuid, jsonb, uuid, uuid)'::pg_catalog.regprocedure,
       'public.admin_record_website_storage_cleanup_result(uuid, uuid, text, integer, jsonb, text, jsonb, jsonb, uuid)'::pg_catalog.regprocedure,
@@ -2900,7 +2929,9 @@ BEGIN
     END IF;
   END LOOP;
 
-  IF has_function_privilege('anon', 'public.admin_permanently_delete_website(uuid, uuid, text, text)', 'EXECUTE')
+  IF has_function_privilege('anon', 'public.admin_delete_subscribed_website(uuid)', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'public.admin_delete_subscribed_website(uuid)', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.admin_permanently_delete_website(uuid, uuid, text, text)', 'EXECUTE')
      OR has_function_privilege('authenticated', 'public.admin_permanently_delete_website(uuid, uuid, text, text)', 'EXECUTE')
      OR has_function_privilege('anon', 'public.guard_reserved_storage_paths()', 'EXECUTE')
      OR has_function_privilege('authenticated', 'public.guard_reserved_storage_paths()', 'EXECUTE')

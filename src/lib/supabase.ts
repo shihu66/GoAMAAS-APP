@@ -4286,7 +4286,13 @@ async function callServerAdminWebsiteActionApi(payload: {
 
     const contentType = String(resp.headers.get('content-type') || '').toLowerCase();
     if (!contentType.includes('application/json')) {
-      return { handled: false, success: false, message: '' };
+      return {
+        handled: false,
+        success: false,
+        code: 'ADMIN_API_UNREACHABLE',
+        message:
+          'Server-side administrative action endpoint returned a non-JSON response or is unreachable.',
+      };
     }
 
     const body = (await resp.json()) as {
@@ -4367,8 +4373,17 @@ async function callServerAdminWebsiteActionApi(payload: {
       storageCleanupSkipped: body?.storageCleanupSkipped,
       storageCleanupWarning: body?.storageCleanupWarning,
     };
-  } catch {
-    return { handled: false, success: false, message: '' };
+  } catch (err: unknown) {
+    const diag =
+      err instanceof Error && err.message
+        ? err.message
+        : 'Network error calling server-side administrative action endpoint.';
+    return {
+      handled: false,
+      success: false,
+      code: 'API_NETWORK_ERROR',
+      message: diag,
+    };
   }
 }
 
@@ -4383,11 +4398,13 @@ export async function adminDeleteSubscribedWebsiteInDb(
   }
 
   if (!isSupabaseConfigured || !supabase) {
+    const msg =
+      'Supabase is not configured. Permanent website deletion cannot proceed without a live database connection.';
     return {
-      success: true,
-      deletedWebsiteId: cleanId,
-      message: 'Website and exclusively associated store data deleted locally.',
-      error: null,
+      success: false,
+      code: 'SUPABASE_NOT_CONFIGURED',
+      message: msg,
+      error: new Error(msg),
     };
   }
 
@@ -4527,14 +4544,13 @@ export async function adminRetryWebsiteStorageCleanupInDb(
     return { success: false, message: err.message, error: err };
   }
   if (!isSupabaseConfigured || !supabase) {
+    const msg =
+      'Supabase is not configured. Storage cleanup retry requires a live server connection.';
     return {
-      success: true,
-      code: 'STORAGE_CLEANUP_COMPLETED',
-      websiteId: cleanId,
-      cleanupStatus: 'completed',
-      deletedStorageObjects: 0,
-      message: 'Local storage cleanup completed.',
-      error: null,
+      success: false,
+      code: 'SUPABASE_NOT_CONFIGURED',
+      message: msg,
+      error: new Error(msg),
     };
   }
   try {
@@ -4599,7 +4615,7 @@ export async function fetchPendingWebsiteStorageCleanupsFromDb(): Promise<{
     const mapped: WebsiteStorageCleanupJob[] = (Array.isArray(data) ? data : []).map((row: any) => ({
       id: String(row.id),
       websiteId: String(row.website_id),
-      ownerUserId: String(row.owner_user_id),
+      ownerUserId: row.owner_user_id ? String(row.owner_user_id) : '',
       deletedStoreId: row.deleted_store_id || null,
       preservedStoreId: row.preserved_store_id || null,
       isSharedStore: Boolean(row.is_shared_store),

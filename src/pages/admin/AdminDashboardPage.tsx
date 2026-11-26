@@ -224,6 +224,7 @@ export const AdminDashboardPage: React.FC = () => {
     detail: string;
     cleanupStatus?: string;
     canRetryStorageCleanup?: boolean;
+    manualReviewAssetPaths?: string[];
   } | null>(null);
 
   // Plan Settings Modal State
@@ -843,6 +844,9 @@ export const AdminDashboardPage: React.FC = () => {
         const needsStorageRetry =
           res.storageCleanupStatus === 'partial_failed' ||
           res.storageCleanupStatus === 'skipped';
+        const needsManualReview =
+          res.manualReviewRequired === true ||
+          res.storageCleanupStatus === 'manual_review_required';
         const storeSummary = res.deletedStoreId
           ? 'Exclusive store and all associated store records were deleted.'
           : res.isSharedStore || res.storePreserved
@@ -852,16 +856,23 @@ export const AdminDashboardPage: React.FC = () => {
           typeof res.deletedStorageObjects === 'number' && res.deletedStorageObjects > 0
             ? ` Removed ${res.deletedStorageObjects} exclusive storage file(s).`
             : '';
+        const warningNote =
+          res.storageCleanupWarning && !(res.message || '').includes(res.storageCleanupWarning)
+            ? ` ${res.storageCleanupWarning}`
+            : '';
 
         setWebsiteWorkflowFeedback({
           websiteId: site.id,
-          tone: needsStorageRetry || res.manualReviewRequired ? 'warning' : 'success',
+          tone: needsStorageRetry || needsManualReview ? 'warning' : 'success',
           title: needsStorageRetry
             ? `Website Deleted — Storage Cleanup Needs Retry (${site.fullDomainUrl})`
+            : needsManualReview
+            ? `Website Deleted — Uncertain Storage Assets Held for Manual Review (${site.fullDomainUrl})`
             : `Permanently Deleted: ${site.businessName} (${site.fullDomainUrl})`,
-          detail: `${res.message || storeSummary}${storageSummary}`,
+          detail: `${res.message || storeSummary}${storageSummary}${warningNote}`,
           cleanupStatus: res.storageCleanupStatus,
-          canRetryStorageCleanup: needsStorageRetry,
+          canRetryStorageCleanup: needsStorageRetry || needsManualReview,
+          manualReviewAssetPaths: res.manualReviewAssetPaths,
         });
         setDeleteWebsiteModal(null);
         setDeleteWebsiteError(null);
@@ -917,18 +928,26 @@ export const AdminDashboardPage: React.FC = () => {
         !res.success ||
         res.cleanupStatus === 'partial_failed' ||
         res.cleanupStatus === 'skipped';
+      const needsManualReview =
+        res.manualReviewRequired === true ||
+        res.cleanupStatus === 'manual_review_required';
 
       setWebsiteWorkflowFeedback({
         websiteId,
-        tone: !res.success ? 'error' : stillNeedsRetry ? 'warning' : 'success',
+        tone: !res.success ? 'error' : stillNeedsRetry || needsManualReview ? 'warning' : 'success',
         title: !res.success
           ? `Storage Cleanup Retry Failed${label ? ` (${label})` : ''}`
           : stillNeedsRetry
           ? `Storage Cleanup Partially Pending${label ? ` (${label})` : ''}`
+          : needsManualReview
+          ? `Manual Storage Review Required${label ? ` (${label})` : ''}`
           : `Storage Cleanup Completed${label ? ` (${label})` : ''}`,
-        detail: res.storageCleanupWarning ? `${res.message} (${res.storageCleanupWarning})` : res.message,
+        detail: res.storageCleanupWarning && !(res.message || '').includes(res.storageCleanupWarning)
+          ? `${res.message} (${res.storageCleanupWarning})`
+          : res.message,
         cleanupStatus: res.cleanupStatus,
-        canRetryStorageCleanup: stillNeedsRetry,
+        canRetryStorageCleanup: stillNeedsRetry || needsManualReview,
+        manualReviewAssetPaths: res.manualReviewAssetPaths,
       });
     } finally {
       inFlightWebsiteActionIdsRef.current.delete(websiteId);
@@ -2027,6 +2046,20 @@ export const AdminDashboardPage: React.FC = () => {
                     {websiteWorkflowFeedback.title}
                   </strong>
                   <p className="text-[11px] mt-0.5 leading-relaxed">{websiteWorkflowFeedback.detail}</p>
+                  {Array.isArray(websiteWorkflowFeedback.manualReviewAssetPaths) &&
+                    websiteWorkflowFeedback.manualReviewAssetPaths.length > 0 && (
+                      <div className="mt-1.5 text-[11px] text-amber-800 dark:text-amber-200">
+                        <span className="font-semibold">
+                          Preserved for manual review ({websiteWorkflowFeedback.manualReviewAssetPaths.length}):
+                        </span>{' '}
+                        <span className="font-mono break-all">
+                          {websiteWorkflowFeedback.manualReviewAssetPaths.slice(0, 4).join(', ')}
+                          {websiteWorkflowFeedback.manualReviewAssetPaths.length > 4
+                            ? ` (+${websiteWorkflowFeedback.manualReviewAssetPaths.length - 4} more)`
+                            : ''}
+                        </span>
+                      </div>
+                    )}
                 </div>
               </div>
 
@@ -2108,6 +2141,12 @@ export const AdminDashboardPage: React.FC = () => {
                           {manualCount > 0 ? ` · Manual review paths: ${manualCount}` : ''}
                           {job.attemptCount > 0 ? ` · Attempts: ${job.attemptCount}` : ''}
                         </p>
+                        {manualCount > 0 && (
+                          <p className="text-[11px] text-amber-700 dark:text-amber-300 font-mono break-all">
+                            Held (uncertain ownership): {job.manualReviewPaths.slice(0, 3).join(', ')}
+                            {manualCount > 3 ? ` (+${manualCount - 3} more)` : ''}
+                          </p>
+                        )}
                         {job.lastError && (
                           <p className="text-[11px] text-rose-600 dark:text-rose-400 break-words">
                             Last error: {job.lastError}
@@ -2131,7 +2170,13 @@ export const AdminDashboardPage: React.FC = () => {
                         ) : (
                           <RefreshCw className="w-3.5 h-3.5" />
                         )}
-                        <span>{isRetrying ? 'Retrying...' : 'Retry Cleanup'}</span>
+                        <span>
+                          {isRetrying
+                            ? 'Retrying...'
+                            : pendingCount === 0 && manualCount > 0
+                            ? 'Re-verify Cleanup'
+                            : 'Retry Cleanup'}
+                        </span>
                       </button>
                     </div>
                   );

@@ -4006,14 +4006,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: msg };
     }
     if (!isSupabaseConfigured) {
-      const msg = 'No remote storage cleanup queue exists in offline demo mode.';
-      showToast(msg, 'info');
+      const msg =
+        'Supabase is not configured. Storage cleanup retry requires a live server connection.';
+      showToast(msg, 'error');
       return {
-        success: true,
+        success: false,
+        code: 'SUPABASE_NOT_CONFIGURED',
         message: msg,
-        websiteId,
-        cleanupStatus: 'not_applicable',
-        deletedStorageObjects: 0,
       };
     }
 
@@ -4141,105 +4140,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
       }
 
-      if (!targetSite) {
-        const msg = 'Website record not found or already deleted.';
-        showToast(msg, 'error');
-        return { success: false, message: msg };
-      }
-
-      if (
-        !effectiveConfirm.explicitConfirmed ||
-        !effectiveConfirm.confirmSubdomain.trim() ||
-        (effectiveConfirm.confirmSubdomain.trim().toLowerCase() !== targetSite.subdomain.toLowerCase() &&
-          effectiveConfirm.confirmSubdomain.trim().toLowerCase() !== targetSite.fullDomainUrl.toLowerCase())
-      ) {
-        const msg = 'Subdomain confirmation mismatch or missing explicit confirmation.';
-        showToast(msg, 'error');
-        return { success: false, message: msg };
-      }
-
-      const otherSites = subscribedWebsites.filter((w) => w.id !== id);
-      let exclusiveStoreId: string | null = null;
-      let isSharedStore = false;
-      if (targetSite.storeId) {
-        const sharedBySibling = otherSites.some((w) => w.storeId === targetSite.storeId);
-        if (!sharedBySibling) {
-          exclusiveStoreId = targetSite.storeId;
-        } else {
-          isSharedStore = true;
-        }
-      } else if (
-        otherSites.filter((w) => w.userId === targetSite.userId).length === 0 &&
-        stores.length === 1
-      ) {
-        exclusiveStoreId = stores[0].id;
-      }
-
-      const deletedProdIds = new Set(
-        products
-          .filter(
-            (p) =>
-              p.websiteId === id ||
-              (exclusiveStoreId !== null && p.storeId === exclusiveStoreId)
-          )
-          .map((p) => p.id)
-      );
-
-      setSubscribedWebsites((prev) => prev.filter((w) => w.id !== id));
-      setProducts((prev) => prev.filter((p) => !deletedProdIds.has(p.id)));
-      if (exclusiveStoreId) {
-        setStores((prev) => prev.filter((s) => s.id !== exclusiveStoreId));
-        setOrders((prev) => prev.filter((o) => o.storeId !== exclusiveStoreId));
-        setCustomers((prev) => prev.filter((c) => c.storeId !== exclusiveStoreId));
-        setInventoryLogs((prev) =>
-          prev.filter((l) => l.storeId !== exclusiveStoreId && !deletedProdIds.has(l.productId))
-        );
-        if (activeStoreId === exclusiveStoreId) {
-          setTeamMembers([]);
-          setActiveStoreIdState('');
-        }
-      } else if (deletedProdIds.size > 0) {
-        setInventoryLogs((prev) => prev.filter((l) => !deletedProdIds.has(l.productId)));
-      }
-
-      setWebsiteLifecycleAuditLogs((prev) => [
-        {
-          id: `audit-${Date.now()}`,
-          websiteId: id,
-          adminId: user?.id || 'admin',
-          action: 'delete',
-          reason:
-            effectiveConfirm.reason ||
-            'Permanent admin deletion of website and exclusively associated store data',
-          previousStatus: targetSite.subscriptionStatus,
-          newStatus: 'deleted',
-          previousDeploymentStatus: targetSite.deploymentStatus,
-          newDeploymentStatus: 'deleted',
-          paymentStatusSnapshot: targetSite.paymentStatus,
-          previousPeriodEnd: targetSite.currentPeriodEnd || null,
-          newPeriodEnd: null,
-          createdAt: new Date().toISOString(),
-        },
-        ...prev,
-      ]);
-
-      showToast(
-        'Website and all exclusively associated store, product, inventory, customer, and order data deleted permanently.',
-        'info'
-      );
+      const offlineMsg =
+        'Supabase is not configured. Permanent website deletion requires a live database connection and cannot succeed offline.';
+      showToast(offlineMsg, 'error');
       return {
-        success: true,
-        message: 'Website and exclusively associated store data permanently deleted.',
-        deletedStoreId: exclusiveStoreId,
-        preservedStoreId: isSharedStore ? targetSite.storeId || null : null,
-        isSharedStore,
-        storePreserved: isSharedStore,
-        deletedStorageObjects: 0,
-        storageCleanupStatus: 'not_applicable',
-        deletedProductIds: Array.from(deletedProdIds),
-        deletedCounts: {
-          products: deletedProdIds.size,
-        },
+        success: false,
+        code: 'SUPABASE_NOT_CONFIGURED',
+        message: offlineMsg,
       };
     } finally {
       inFlightWebsiteDeletionIdsRef.current.delete(id);

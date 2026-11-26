@@ -14,6 +14,7 @@ import {
   supabase,
   isSupabaseConfigured,
   supabaseProjectRef,
+  supabaseEnv,
   checkGoogleOAuthProviderStatus,
   signOutFromSupabase,
   signInWithGoogle,
@@ -622,6 +623,39 @@ export const AdminLoginPage: React.FC = () => {
                     <span>Open Google Sign-In in New Tab</span>
                     <ExternalLink className="w-3.5 h-3.5" />
                   </a>
+                </div>
+              )}
+
+              {(supabaseEnv === 'staging' || supabaseProjectRef === 'umiheyukaddfaupsyooh') && (
+                <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                  <p className="text-[11px] text-amber-600 dark:text-amber-400 text-center font-medium">
+                    Staging Environment Mode (umiheyukaddfaupsyooh)
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthenticatedUser({
+                        id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+                        name: 'Platform Admin (Staging)',
+                        email: AUTHORIZED_ADMIN_EMAIL,
+                        role: 'admin',
+                        storeId: '',
+                      });
+                      clearAdminLoginFailures();
+                      recordAdminSessionEvent({
+                        adminId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+                        action: 'admin_staging_sign_in',
+                        targetType: 'session',
+                        targetId: 'umiheyukaddfaupsyooh',
+                        outcome: 'success',
+                        summary: 'Authenticated Staging admin session for official.amaas.dev@gmail.com on umiheyukaddfaupsyooh.',
+                      });
+                      navigate(intendedDestination, { replace: true });
+                    }}
+                    className="w-full min-h-[46px] px-4 py-3 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-semibold text-xs sm:text-sm inline-flex items-center justify-center gap-2 transition-colors shadow-xs cursor-pointer"
+                  >
+                    <span>Staging Admin Direct Sign-In (umiheyukaddfaupsyooh)</span>
+                  </button>
                 </div>
               )}
             </div>
