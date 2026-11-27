@@ -252,7 +252,7 @@ export const AdminTotpSetupAndVerifyPanel: React.FC<AdminTotpSetupAndVerifyPanel
           !res.secret
         ) {
           setMfaActionFeedback({
-            tone: 'warning',
+            tone: 'error',
             text: res.error || 'Unable to start authenticator enrollment.',
           });
           return;
@@ -268,6 +268,14 @@ export const AdminTotpSetupAndVerifyPanel: React.FC<AdminTotpSetupAndVerifyPanel
         });
         setMfaEnrollCode('');
         await onRefreshVerification();
+      } catch (err: unknown) {
+        setMfaActionFeedback({
+          tone: 'error',
+          text:
+            err instanceof Error && err.message
+              ? err.message
+              : 'Unable to communicate with Supabase MFA service.',
+        });
       } finally {
         setMfaActionBusy(false);
       }
@@ -334,6 +342,14 @@ export const AdminTotpSetupAndVerifyPanel: React.FC<AdminTotpSetupAndVerifyPanel
       if (onAal2Confirmed) {
         await onAal2Confirmed();
       }
+    } catch (err: unknown) {
+      setMfaActionFeedback({
+        tone: 'error',
+        text:
+          err instanceof Error && err.message
+            ? err.message
+            : 'Unable to verify authenticator code.',
+      });
     } finally {
       setMfaActionBusy(false);
     }
@@ -379,6 +395,14 @@ export const AdminTotpSetupAndVerifyPanel: React.FC<AdminTotpSetupAndVerifyPanel
       if (onAal2Confirmed) {
         await onAal2Confirmed();
       }
+    } catch (err: unknown) {
+      setMfaActionFeedback({
+        tone: 'error',
+        text:
+          err instanceof Error && err.message
+            ? err.message
+            : 'Unable to verify authenticator code.',
+      });
     } finally {
       setMfaActionBusy(false);
     }
@@ -415,6 +439,14 @@ export const AdminTotpSetupAndVerifyPanel: React.FC<AdminTotpSetupAndVerifyPanel
       });
       setMfaEnrollCode('');
       await onRefreshVerification();
+    } catch (err: unknown) {
+      setMfaActionFeedback({
+        tone: 'error',
+        text:
+          err instanceof Error && err.message
+            ? err.message
+            : 'Could not replace existing authenticator factor.',
+      });
     } finally {
       setMfaActionBusy(false);
     }
@@ -847,6 +879,10 @@ export const AdminTotpSetupAndVerifyPanel: React.FC<AdminTotpSetupAndVerifyPanel
                 setEnrollingMfa(null);
                 setMfaEnrollCode('');
                 setSecretCopied(false);
+                setMfaActionFeedback({
+                  tone: 'warning',
+                  text: 'Authenticator enrollment was cancelled before verification. Generate a new QR code or complete the pending setup below.',
+                });
                 void onRefreshVerification();
               }}
               className="min-h-[44px] px-4 py-2 rounded-xl bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-semibold text-xs cursor-pointer"
