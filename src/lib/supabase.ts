@@ -142,17 +142,54 @@ const getEnvVar = (key: string): string => {
   return '';
 };
 
+const readStaticViteEnv = (): {
+  url: string;
+  anonKey: string;
+  env: string;
+} => {
+  let url = '';
+  let anonKey = '';
+  let env = '';
+  try {
+    // @ts-ignore - static property accesses are inlined by Vite `define`
+    const rawUrl = import.meta.env.VITE_SUPABASE_URL;
+    if (typeof rawUrl === 'string' && rawUrl.trim().startsWith('https://')) {
+      url = rawUrl.trim();
+    }
+  } catch {}
+  try {
+    // @ts-ignore - static property accesses are inlined by Vite `define`
+    const rawKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+    if (typeof rawKey === 'string' && rawKey.trim()) {
+      anonKey = rawKey.trim();
+    }
+  } catch {}
+  try {
+    // @ts-ignore - static property accesses are inlined by Vite `define`
+    const rawEnv = import.meta.env.VITE_SUPABASE_ENV;
+    if (typeof rawEnv === 'string' && rawEnv.trim()) {
+      env = rawEnv.trim();
+    }
+  } catch {}
+  return { url, anonKey, env };
+};
+
+const staticViteEnv = readStaticViteEnv();
+
 export const supabaseUrl =
+  staticViteEnv.url ||
   getEnvVar('VITE_SUPABASE_URL') ||
   getEnvVar('NEXT_PUBLIC_SUPABASE_URL') ||
   getEnvVar('SUPABASE_URL');
 const supabaseAnonKey =
+  staticViteEnv.anonKey ||
   getEnvVar('VITE_SUPABASE_ANON_KEY') ||
   getEnvVar('VITE_SUPABASE_PUBLISHABLE_KEY') ||
   getEnvVar('NEXT_PUBLIC_SUPABASE_ANON_KEY') ||
   getEnvVar('SUPABASE_ANON_KEY') ||
   getEnvVar('SUPABASE_PUBLISHABLE_KEY');
-export const supabaseEnv = getEnvVar('VITE_SUPABASE_ENV') || getEnvVar('SUPABASE_ENV');
+export const supabaseEnv =
+  staticViteEnv.env || getEnvVar('VITE_SUPABASE_ENV') || getEnvVar('SUPABASE_ENV');
 
 export const STAGING_SUPABASE_PROJECT_REF = 'umiheyukaddfaupsyooh';
 export const STAGING_SUPABASE_URL = `https://${STAGING_SUPABASE_PROJECT_REF}.supabase.co`;

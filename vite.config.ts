@@ -47,7 +47,10 @@ export default defineConfig(({ mode }) => {
   const vercelEnv = (process.env.VERCEL_ENV || '').trim().toLowerCase();
   const explicitEnv = (process.env.VITE_SUPABASE_ENV || '').trim().toLowerCase();
   const isVercelBuild = process.env.VERCEL === '1' || Boolean(process.env.VERCEL_URL);
-  const hasStagingEnvFile = fs.existsSync(path.resolve(process.cwd(), '.env.staging'));
+  const stagingEnvPath = path.resolve(process.cwd(), '.env.staging');
+  const stagingConfigJsonPath = path.resolve(process.cwd(), 'staging.config.json');
+  const hasStagingEnvFile = fs.existsSync(stagingEnvPath);
+  const hasStagingConfigJson = fs.existsSync(stagingConfigJsonPath);
 
   const isMainOrProduction = vercelEnv === 'production' || detectedGitBranch === 'main';
 
@@ -55,7 +58,7 @@ export default defineConfig(({ mode }) => {
   // 1. Vite mode is explicitly 'staging' (e.g. npm run build:staging / npm run dev:staging / scripts/vercel-build.mjs)
   // 2. VITE_SUPABASE_ENV is set to 'staging'
   // 3. Git branch (via VERCEL_GIT_COMMIT_REF, GIT_BRANCH, or git metadata) is 'staging' (or starts with staging/stage)
-  // 4. Vercel preview/non-production build where .env.staging is tracked on the staging branch
+  // 4. Vercel preview/non-production build where .env.staging or staging.config.json is present on the staging branch
   const isStaging =
     !isMainOrProduction &&
     (mode === 'staging' ||
@@ -63,7 +66,7 @@ export default defineConfig(({ mode }) => {
       detectedGitBranch === 'staging' ||
       detectedGitBranch.startsWith('staging') ||
       detectedGitBranch.startsWith('stage') ||
-      (isVercelBuild && hasStagingEnvFile));
+      (isVercelBuild && (hasStagingEnvFile || hasStagingConfigJson)));
 
   const effectiveMode = isStaging ? 'staging' : mode;
   const env = loadEnv(effectiveMode, process.cwd(), '');
@@ -106,6 +109,24 @@ export default defineConfig(({ mode }) => {
     if (localUrl && localKey) break;
   }
 
+  // Non-dotfile fallback for staging branch if .env.staging was omitted during Git sync
+  if (isStaging && (!localUrl || !localKey) && hasStagingConfigJson) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(stagingConfigJsonPath, 'utf8')) as Record<string, string>;
+      if (!localUrl && typeof parsed.VITE_SUPABASE_URL === 'string' && parsed.VITE_SUPABASE_URL.startsWith('https://')) {
+        localUrl = parsed.VITE_SUPABASE_URL.trim();
+      }
+      if (!localKey && typeof parsed.VITE_SUPABASE_ANON_KEY === 'string' && parsed.VITE_SUPABASE_ANON_KEY.trim()) {
+        localKey = parsed.VITE_SUPABASE_ANON_KEY.trim();
+      }
+      if (!localEnv && typeof parsed.VITE_SUPABASE_ENV === 'string' && parsed.VITE_SUPABASE_ENV.trim()) {
+        localEnv = parsed.VITE_SUPABASE_ENV.trim();
+      }
+    } catch {
+      // Ignore malformed staging.config.json
+    }
+  }
+
   // Server-only environment hydration for /api/* handlers (NEVER injected into Vite define / client bundle)
   if (!process.env.SUPABASE_SERVICE_ROLE_KEY && (env.SUPABASE_SERVICE_ROLE_KEY || localServiceRoleKey)) {
     process.env.SUPABASE_SERVICE_ROLE_KEY = (env.SUPABASE_SERVICE_ROLE_KEY || localServiceRoleKey).trim();
@@ -139,6 +160,11 @@ export default defineConfig(({ mode }) => {
       ? 'staging'
       : (process.env.VITE_SUPABASE_ENV || env.VITE_SUPABASE_ENV || localEnv || '')
   ).trim();
+
+  const resolvedProjectRef = supabaseUrl.match(/^https:\/\/([a-z0-9-]+)\.supabase\.co/i)?.[1] || 'none';
+  console.log(
+    `[vite-config] mode=${mode}, effectiveMode=${effectiveMode}, isStaging=${isStaging}, gitBranch=${detectedGitBranch || 'unset'}, vercelEnv=${vercelEnv || 'unset'}, hasStagingEnvFile=${hasStagingEnvFile}, hasStagingConfigJson=${hasStagingConfigJson}, supabaseProjectRef=${resolvedProjectRef}, supabaseEnv=${supabaseEnv || 'unset'}`
+  );
 
   const resolveTenantApiPlugin = {
     name: 'goamaas-resolve-tenant-api',
