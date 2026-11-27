@@ -1,3 +1,4 @@
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import {
   ADMIN_DB_ROLE_MISSING_ERROR,
@@ -5,11 +6,14 @@ import {
   AdminMfaClientAdapter,
   DEFAULT_MFA_STATE,
   UNIFORM_ADMIN_AUTH_ERROR,
+  checkAdminLoginRateLimit,
+  clearAdminLoginFailures,
   inspectAdminMfaState,
   isAuthUserEmailVerified,
   isAuthorizedAdminEmail,
   normalizeAdminEmail,
   normalizeTotpQrCodeDataUri,
+  recordAdminLoginFailure,
   refreshAndInspectAdminMfaState,
   replaceVerifiedAdminTotpFactor,
   startAdminTotpEnrollment,
@@ -19,15 +23,27 @@ import {
 import {
   ADMIN_OAUTH_INTENT_KEY,
   OAUTH_FLOW_SOURCE_KEY,
+  STAGING_SUPABASE_PROJECT_REF,
+  STAGING_SUPABASE_URL,
+  buildGoogleOAuthRedirectTo,
   checkGoogleOAuthProviderStatus,
   consumeAdminOAuthIntent,
   consumeOAuthFlowSource,
   getInitialOAuthUrlSnapshot,
+  isStagingSupabaseRuntime,
   peekAdminOAuthIntent,
   setAdminOAuthIntent,
 } from '../src/lib/supabase';
-import { classifyAdminOAuthFailureReason } from '../src/pages/auth/AuthCallbackPage';
-import { resolveOAuthErrorMessage } from '../src/pages/admin/AdminLoginPage';
+import {
+  classifyAdminOAuthFailureReason,
+  resolveAdminCallbackDecision,
+} from '../src/pages/auth/AuthCallbackPage';
+import {
+  executeAdminGoogleSignIn,
+  resolveAdminLoginSessionDecision,
+  resolveOAuthErrorMessage,
+} from '../src/pages/admin/AdminLoginPage';
+import { isAdminProtectedAccessGranted } from '../src/components/auth/AdminProtectedRoute';
 import {
   ADMIN_PWA_DISMISS_COOLDOWN_MS,
   detectAdminPlatform,
@@ -466,9 +482,9 @@ async function run() {
       callbackSrc.includes('exchangedAuthCodes') &&
       callbackSrc.includes('window.location.hash') &&
       callbackSrc.includes('verifyServerAdminSession()') &&
-      callbackSrc.includes("navigate('/admin/login?authz_error=missing_admin_role', { replace: true })") &&
-      callbackSrc.includes("navigate('/admin/login?oauth_error=1&reason=session_not_established'") &&
-      callbackSrc.includes("navigate('/admin/login?denied=1', { replace: true })"),
+      callbackSrc.includes("'/admin/login?authz_error=missing_admin_role'") &&
+      callbackSrc.includes("'/admin/login?oauth_error=1&reason=session_not_established'") &&
+      callbackSrc.includes("'/admin/login?denied=1'"),
     'AuthCallbackPage captures GoTrue initialize() errors, prevents duplicate PKCE code exchange, separates session_not_established and missing_admin_role, and redirects unauthorized accounts to ?denied=1'
   );
 
@@ -1202,10 +1218,607 @@ async function run() {
     );
   }
 
-  console.log('\n✅ ALL 13/13 ADMIN GOOGLE AUTH, SINGLE-EMAIL RESTRICTION, TOTP ENROLLMENT & PWA SUITES PASSED!');
+  // ---------------------------------------------------------------------------
+  // 14. Staging Admin Direct Sign-In Button & Google OAuth Flow Regression Suite
+  // ---------------------------------------------------------------------------
+  console.log('\n[14] Verifying Staging Admin Direct Sign-In button uses real Supabase Google OAuth and handles errors visibly...');
+  {
+    // 14.1 Ensure AdminLoginPage has zero client-side admin auth bypass and wires Staging button to Google OAuth
+    const stagingBlockIdx = adminLoginSrc.lastIndexOf('{isStagingSupabaseRuntime() &&');
+    const stagingButtonSection = stagingBlockIdx >= 0 ? adminLoginSrc.slice(stagingBlockIdx) : '';
+    assert(
+      stagingBlockIdx >= 0 &&
+        !adminLoginSrc.includes('admin_staging_sign_in') &&
+        !adminLoginSrc.includes('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa') &&
+        !stagingButtonSection.includes('setAuthenticatedUser') &&
+        !stagingButtonSection.includes('navigate(') &&
+        adminLoginSrc.includes('data-testid="staging-admin-direct-signin-btn"') &&
+        adminLoginSrc.includes('handleAdminGoogleSignIn({ requireStagingRuntime: true })') &&
+        adminLoginSrc.includes('role="alert"'),
+      'AdminLoginPage removes client-only auth bypass, wires Staging Admin Direct Sign-In button to executeAdminGoogleSignIn({ requireStagingRuntime: true }), and renders role="alert" error banner'
+    );
+
+    // 14.2 Staging runtime detection strictly matches umiheyukaddfaupsyooh & builds active staging callback URL
+    assert(
+      isStagingSupabaseRuntime(STAGING_SUPABASE_URL, true) === true &&
+        isStagingSupabaseRuntime('https://rqmgnewipgqgmvzpbrfn.supabase.co', true) === false &&
+        isStagingSupabaseRuntime(STAGING_SUPABASE_URL, false) === false &&
+        buildGoogleOAuthRedirectTo('https://goamaas-git-staging.vercel.app') ===
+          'https://goamaas-git-staging.vercel.app/auth/callback',
+      'isStagingSupabaseRuntime returns true strictly for configured Staging project umiheyukaddfaupsyooh and builds active Staging callback URL'
+    );
+
+    // 14.3 Staging button initiates Google OAuth with active Staging origin callback URL
+    clearAdminLoginFailures();
+    let capturedRedirectTo = '';
+    let capturedOptions: Record<string, unknown> | undefined;
+    const stagingSuccessOutcome = await executeAdminGoogleSignIn({
+      isOnline: true,
+      isEmbeddedIframe: false,
+      isConfigured: true,
+      hasClient: true,
+      origin: 'https://goamaas-git-staging.vercel.app',
+      intendedDestination: '/admin/websites',
+      requireStagingRuntime: true,
+      isStagingRuntime: true,
+      projectRef: STAGING_SUPABASE_PROJECT_REF,
+      checkRateLimit: checkAdminLoginRateLimit,
+      checkProviderStatus: async () => ({ enabled: true, checked: true }),
+      signInWithGoogleFn: async (redirectTo, opts) => {
+        capturedRedirectTo = redirectTo || '';
+        capturedOptions = opts as Record<string, unknown> | undefined;
+        return {
+          data: {
+            provider: 'google',
+            url: `https://${STAGING_SUPABASE_PROJECT_REF}.supabase.co/auth/v1/authorize?provider=google&redirect_to=${encodeURIComponent(capturedRedirectTo)}`,
+          },
+          error: null,
+        };
+      },
+    });
+    assert(
+      stagingSuccessOutcome.status === 'redirecting' &&
+        stagingSuccessOutcome.redirectTo === 'https://goamaas-git-staging.vercel.app/auth/callback' &&
+        capturedRedirectTo === 'https://goamaas-git-staging.vercel.app/auth/callback' &&
+        capturedOptions?.isAdminFlow === true &&
+        capturedOptions?.nextPath === '/admin/websites',
+      'Staging Admin Direct Sign-In initiates Supabase Google OAuth with exact active Staging /auth/callback URL and isAdminFlow=true'
+    );
+
+    // 14.4 Fail-closed when requireStagingRuntime=true runs against non-staging project
+    let nonStagingCallCount = 0;
+    const wrongRuntimeOutcome = await executeAdminGoogleSignIn({
+      isOnline: true,
+      isEmbeddedIframe: false,
+      isConfigured: true,
+      hasClient: true,
+      origin: 'https://app.amaas.xyz',
+      intendedDestination: '/admin',
+      requireStagingRuntime: true,
+      isStagingRuntime: false,
+      projectRef: 'rqmgnewipgqgmvzpbrfn',
+      checkRateLimit: checkAdminLoginRateLimit,
+      checkProviderStatus: async () => ({ enabled: true, checked: true }),
+      signInWithGoogleFn: async () => {
+        nonStagingCallCount += 1;
+        return { data: null, error: null };
+      },
+    });
+    assert(
+      wrongRuntimeOutcome.status === 'error' &&
+        wrongRuntimeOutcome.message.includes(STAGING_SUPABASE_PROJECT_REF) &&
+        nonStagingCallCount === 0,
+      'Staging sign-in fails closed with visible error if runtime is not Staging project umiheyukaddfaupsyooh'
+    );
+
+    // 14.5 Visible error handling: disabled provider (iframe & direct), missing OAuth URL, thrown error, offline, and rate-limit lockout
+    const disabledProviderOutcome = await executeAdminGoogleSignIn({
+      isOnline: true,
+      isEmbeddedIframe: false,
+      isConfigured: true,
+      hasClient: true,
+      origin: 'https://staging.amaas.xyz',
+      intendedDestination: '/admin',
+      requireStagingRuntime: true,
+      isStagingRuntime: true,
+      projectRef: STAGING_SUPABASE_PROJECT_REF,
+      checkRateLimit: checkAdminLoginRateLimit,
+      checkProviderStatus: async () => ({ enabled: true, checked: true }),
+      signInWithGoogleFn: async () => ({
+        data: null,
+        error: new Error(
+          `Google Sign-In is disabled in the connected Supabase project (project: ${STAGING_SUPABASE_PROJECT_REF}).`
+        ),
+      }),
+    });
+    assert(
+      disabledProviderOutcome.status === 'error' &&
+        disabledProviderOutcome.message.includes('disabled') &&
+        disabledProviderOutcome.message.includes(STAGING_SUPABASE_PROJECT_REF),
+      'Visible error is surfaced when Google OAuth provider is disabled in Staging Supabase'
+    );
+
+    const iframeDisabledOutcome = await executeAdminGoogleSignIn({
+      isOnline: true,
+      isEmbeddedIframe: true,
+      isConfigured: true,
+      hasClient: true,
+      origin: 'https://staging.amaas.xyz',
+      intendedDestination: '/admin',
+      requireStagingRuntime: true,
+      isStagingRuntime: true,
+      projectRef: STAGING_SUPABASE_PROJECT_REF,
+      checkRateLimit: checkAdminLoginRateLimit,
+      checkProviderStatus: async () => ({
+        enabled: false,
+        checked: true,
+        errorMessage: 'Google Sign-In is disabled in umiheyukaddfaupsyooh.',
+      }),
+      signInWithGoogleFn: async () => ({ data: null, error: null }),
+    });
+    assert(
+      iframeDisabledOutcome.status === 'error' &&
+        iframeDisabledOutcome.message.includes('umiheyukaddfaupsyooh'),
+      'Embedded iframe Staging sign-in surfaces disabled Google OAuth provider error visibly'
+    );
+
+    const iframeExternalTabOutcome = await executeAdminGoogleSignIn({
+      isOnline: true,
+      isEmbeddedIframe: true,
+      isConfigured: true,
+      hasClient: true,
+      origin: 'https://staging.amaas.xyz',
+      intendedDestination: '/admin/payments',
+      requireStagingRuntime: true,
+      isStagingRuntime: true,
+      projectRef: STAGING_SUPABASE_PROJECT_REF,
+      checkRateLimit: checkAdminLoginRateLimit,
+      checkProviderStatus: async () => ({ enabled: true, checked: true }),
+      signInWithGoogleFn: async () => ({ data: null, error: null }),
+    });
+    assert(
+      iframeExternalTabOutcome.status === 'external_tab_required' &&
+        iframeExternalTabOutcome.url === 'https://staging.amaas.xyz/admin/login?start_google=1&next=%2Fadmin%2Fpayments',
+      'Embedded iframe Staging sign-in exposes top-level Staging launch URL when provider is enabled'
+    );
+
+    const missingUrlOutcome = await executeAdminGoogleSignIn({
+      isOnline: true,
+      isEmbeddedIframe: false,
+      isConfigured: true,
+      hasClient: true,
+      origin: 'https://staging.amaas.xyz',
+      intendedDestination: '/admin',
+      requireStagingRuntime: true,
+      isStagingRuntime: true,
+      projectRef: STAGING_SUPABASE_PROJECT_REF,
+      checkRateLimit: checkAdminLoginRateLimit,
+      checkProviderStatus: async () => ({ enabled: true, checked: true }),
+      signInWithGoogleFn: async () => ({ data: { provider: 'google', url: '' }, error: null }),
+    });
+    assert(
+      missingUrlOutcome.status === 'error' && missingUrlOutcome.message.includes('Unable to start Google sign-in'),
+      'Missing OAuth authorization URL never leaves button stuck spinning and returns a visible error'
+    );
+
+    const thrownOutcome = await executeAdminGoogleSignIn({
+      isOnline: true,
+      isEmbeddedIframe: false,
+      isConfigured: true,
+      hasClient: true,
+      origin: 'https://staging.amaas.xyz',
+      intendedDestination: '/admin',
+      requireStagingRuntime: true,
+      isStagingRuntime: true,
+      projectRef: STAGING_SUPABASE_PROJECT_REF,
+      checkRateLimit: checkAdminLoginRateLimit,
+      checkProviderStatus: async () => ({ enabled: true, checked: true }),
+      signInWithGoogleFn: async () => {
+        throw new Error('Simulated OAuth network failure');
+      },
+    });
+    assert(
+      thrownOutcome.status === 'error' && thrownOutcome.message === 'Simulated OAuth network failure',
+      'Thrown OAuth initiation errors are caught and returned visibly'
+    );
+
+    const offlineOutcome = await executeAdminGoogleSignIn({
+      isOnline: false,
+      isEmbeddedIframe: false,
+      isConfigured: true,
+      hasClient: true,
+      origin: 'https://staging.amaas.xyz',
+      intendedDestination: '/admin',
+      requireStagingRuntime: true,
+      isStagingRuntime: true,
+      projectRef: STAGING_SUPABASE_PROJECT_REF,
+      checkRateLimit: checkAdminLoginRateLimit,
+      checkProviderStatus: async () => ({ enabled: true, checked: true }),
+      signInWithGoogleFn: async () => ({ data: null, error: null }),
+    });
+    assert(
+      offlineOutcome.status === 'error' && offlineOutcome.message.toLowerCase().includes('offline'),
+      'Offline guard surfaces visible error without initiating OAuth'
+    );
+
+    for (let i = 0; i < 5; i++) recordAdminLoginFailure();
+    const lockedOutcome = await executeAdminGoogleSignIn({
+      isOnline: true,
+      isEmbeddedIframe: false,
+      isConfigured: true,
+      hasClient: true,
+      origin: 'https://staging.amaas.xyz',
+      intendedDestination: '/admin',
+      requireStagingRuntime: true,
+      isStagingRuntime: true,
+      projectRef: STAGING_SUPABASE_PROJECT_REF,
+      checkRateLimit: checkAdminLoginRateLimit,
+      checkProviderStatus: async () => ({ enabled: true, checked: true }),
+      signInWithGoogleFn: async () => ({ data: null, error: null }),
+    });
+    clearAdminLoginFailures();
+    assert(
+      lockedOutcome.status === 'error' && (lockedOutcome.lockoutSeconds || 0) > 0,
+      'Rate-limit lockout blocks Staging sign-in attempts with visible retry countdown'
+    );
+
+    // 14.6 End-to-end signInWithGoogle verification in isolated Staging runtime subprocess
+    const stagingProbeScript = `
+      import assert from 'node:assert/strict';
+      import {
+        ADMIN_OAUTH_INTENT_KEY,
+        OAUTH_FLOW_SOURCE_KEY,
+        STAGING_SUPABASE_PROJECT_REF,
+        isStagingSupabaseRuntime,
+        signInWithGoogle,
+      } from './src/lib/supabase';
+
+      assert.equal(isStagingSupabaseRuntime(), true);
+
+      const mem = () => {
+        const m = new Map();
+        return {
+          getItem: (k) => (m.has(k) ? m.get(k) : null),
+          setItem: (k, v) => { m.set(k, String(v)); },
+          removeItem: (k) => { m.delete(k); },
+          clear: () => { m.clear(); },
+          key: (i) => Array.from(m.keys())[i] ?? null,
+          get length() { return m.size; },
+        };
+      };
+      const assignedUrls = [];
+      const winObj = {
+        location: {
+          origin: 'https://goamaas-git-staging.vercel.app',
+          hostname: 'goamaas-git-staging.vercel.app',
+          pathname: '/admin/login',
+          href: 'https://goamaas-git-staging.vercel.app/admin/login',
+          assign: (u) => { assignedUrls.push(String(u)); },
+        },
+        localStorage: mem(),
+        sessionStorage: mem(),
+      };
+      winObj.self = winObj;
+      winObj.top = winObj;
+      globalThis.window = winObj;
+
+      let googleEnabled = false;
+      globalThis.fetch = async (input) => {
+        const url = String(input);
+        if (url === 'https://umiheyukaddfaupsyooh.supabase.co/auth/v1/settings') {
+          return new Response(JSON.stringify({ external: { email: true, google: googleEnabled } }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        throw new Error('Unexpected fetch: ' + url);
+      };
+
+      const disabledRes = await signInWithGoogle('https://goamaas-git-staging.vercel.app/auth/callback', {
+        isAdminFlow: true,
+        nextPath: '/admin/websites',
+      });
+      assert.equal(disabledRes.data, null);
+      assert.ok(disabledRes.error?.message.includes(STAGING_SUPABASE_PROJECT_REF));
+      assert.equal(assignedUrls.length, 0);
+
+      googleEnabled = true;
+      const enabledRes = await signInWithGoogle('https://goamaas-git-staging.vercel.app/auth/callback', {
+        isAdminFlow: true,
+        nextPath: '/admin/websites',
+      });
+      assert.equal(enabledRes.error, null);
+      assert.equal(assignedUrls.length, 1);
+      const authUrl = new URL(assignedUrls[0]);
+      assert.equal(authUrl.origin, 'https://umiheyukaddfaupsyooh.supabase.co');
+      assert.equal(authUrl.pathname, '/auth/v1/authorize');
+      assert.equal(authUrl.searchParams.get('provider'), 'google');
+      assert.equal(authUrl.searchParams.get('redirect_to'), 'https://goamaas-git-staging.vercel.app/auth/callback');
+      assert.equal(authUrl.searchParams.get('prompt'), 'select_account');
+      assert.ok(authUrl.searchParams.get('code_challenge'));
+      assert.ok(winObj.localStorage.getItem(ADMIN_OAUTH_INTENT_KEY)?.includes('/admin/websites'));
+      assert.ok(winObj.localStorage.getItem(OAUTH_FLOW_SOURCE_KEY)?.includes('admin'));
+    `;
+    execFileSync(
+      'npx',
+      ['tsx', '--input-type=module', '-e', stagingProbeScript],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          VITE_SUPABASE_URL: STAGING_SUPABASE_URL,
+          VITE_SUPABASE_ANON_KEY: 'sb_publishable_7TtAiiuodpRVh1YxxNyZTQ_tVjv4VL_',
+          VITE_SUPABASE_ENV: 'staging',
+        },
+        stdio: 'inherit',
+      }
+    );
+    assert(
+      true,
+      'Live-shaped Staging runtime initiates PKCE Google OAuth strictly against umiheyukaddfaupsyooh with active Staging /auth/callback and handles disabled provider visibly'
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // 15. Staging Admin First-Time TOTP Enrollment State Machine & AAL2 Gate Suite
+  // ---------------------------------------------------------------------------
+  console.log('\n[15] Verifying Staging Admin first-time TOTP enrollment state machine, AAL2 gates & error handling...');
+  {
+    const baseAdmin = {
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      email: AUTHORIZED_ADMIN_EMAIL,
+      name: 'AMAAS Official Admin',
+      role: 'admin' as const,
+    };
+
+    // 15.1 Authorized admin with NO TOTP factor -> mfa_setup_required opens enrollment flow (never ?denied=1, never grants /admin)
+    const noFactorVerification = await verifyServerAdminSession({
+      isConfigured: true,
+      getAuthUser: async () => ({
+        user: {
+          id: baseAdmin.id,
+          email: AUTHORIZED_ADMIN_EMAIL,
+          email_confirmed_at: '2026-10-01T00:00:00Z',
+          user_metadata: { email_verified: true, full_name: baseAdmin.name },
+        },
+        error: null,
+      }),
+      checkIsAdminRpc: async () => ({ data: true, error: null }),
+      fetchProfile: async () => ({
+        profile: {
+          id: baseAdmin.id,
+          email: AUTHORIZED_ADMIN_EMAIL,
+          full_name: baseAdmin.name,
+          role: 'admin',
+          onboarding_completed: true,
+        },
+        error: null,
+      }),
+      fetchMfaState: async () => ({
+        ...DEFAULT_MFA_STATE,
+        currentLevel: 'aal1',
+        nextLevel: 'aal1',
+      }),
+    });
+    const noFactorCbDecision = resolveAdminCallbackDecision(noFactorVerification, '/admin/websites');
+    const noFactorLoginDecision = resolveAdminLoginSessionDecision(noFactorVerification);
+    assert(
+      noFactorVerification.status === 'mfa_setup_required' &&
+        noFactorCbDecision.action === 'mfa_step' &&
+        noFactorCbDecision.mode === 'mfa_setup_required' &&
+        noFactorCbDecision.targetPath === '/admin/websites' &&
+        noFactorLoginDecision.action === 'show_totp_enrollment' &&
+        isAdminProtectedAccessGranted(noFactorVerification) === false,
+      'Authorized admin without TOTP factor routes from callback to TOTP enrollment UI without ?denied=1 and blocks /admin access'
+    );
+
+    // 15.2 Authorized admin WITH verified TOTP factor (Production-compatible behavior) -> mfa_required challenge
+    const verifiedFactorAtAal1 = {
+      status: 'mfa_required' as const,
+      admin: baseAdmin,
+      mfa: {
+        currentLevel: 'aal1' as const,
+        nextLevel: 'aal2' as const,
+        verifiedTotpFactors: [
+          {
+            id: 'prod-factor-1',
+            friendlyName: 'GoAMAAS Admin Authenticator',
+            factorType: 'totp',
+            status: 'verified',
+          },
+        ],
+        unverifiedTotpFactors: [],
+        isMfaEnrolled: true,
+        isMfaVerifiedForSession: false,
+      },
+    };
+    const existingFactorCb = resolveAdminCallbackDecision(verifiedFactorAtAal1, '/admin');
+    const existingFactorLogin = resolveAdminLoginSessionDecision(verifiedFactorAtAal1);
+    assert(
+      existingFactorCb.action === 'mfa_step' &&
+        existingFactorCb.mode === 'mfa_required' &&
+        existingFactorLogin.action === 'show_totp_challenge' &&
+        existingFactorLogin.factor.id === 'prod-factor-1' &&
+        isAdminProtectedAccessGranted(verifiedFactorAtAal1) === false,
+      'Production-compatible verified TOTP factor at AAL1 routes strictly to 6-digit TOTP challenge'
+    );
+
+    // 15.3 Unauthorized user or missing DB role attempting enrollment -> strictly denied & signed out
+    const unauthCb = resolveAdminCallbackDecision(otherGoogleRes, '/admin');
+    const unauthLogin = resolveAdminLoginSessionDecision(otherGoogleRes);
+    const missingRoleCb = resolveAdminCallbackDecision(missingDbRoleRes, '/admin');
+    const missingRoleLogin = resolveAdminLoginSessionDecision(missingDbRoleRes);
+    assert(
+      unauthCb.action === 'signout_redirect' &&
+        unauthCb.to === '/admin/login?denied=1' &&
+        unauthLogin.action === 'purge_forbidden' &&
+        missingRoleCb.action === 'signout_redirect' &&
+        missingRoleCb.to === '/admin/login?authz_error=missing_admin_role' &&
+        missingRoleLogin.action === 'purge_forbidden' &&
+        isAdminProtectedAccessGranted(otherGoogleRes) === false &&
+        isAdminProtectedAccessGranted(missingDbRoleRes) === false,
+      'Unauthorized Google user and non-admin DB role are strictly denied from TOTP enrollment and Admin Panel'
+    );
+
+    // 15.4 Admin access denied fail-closed if AAL2 is NOT achieved even on nominal authorized status
+    const spoofedAuthorizedWithoutAal2 = {
+      status: 'authorized' as const,
+      admin: baseAdmin,
+      mfa: {
+        currentLevel: 'aal1' as const,
+        nextLevel: 'aal2' as const,
+        verifiedTotpFactors: [
+          {
+            id: 'prod-factor-1',
+            friendlyName: 'GoAMAAS Admin Authenticator',
+            factorType: 'totp',
+            status: 'verified',
+          },
+        ],
+        unverifiedTotpFactors: [],
+        isMfaEnrolled: true,
+        isMfaVerifiedForSession: false,
+      },
+    };
+    assert(
+      resolveAdminCallbackDecision(spoofedAuthorizedWithoutAal2, '/admin').action === 'signout_redirect' &&
+        resolveAdminLoginSessionDecision(spoofedAuthorizedWithoutAal2).action === 'purge_forbidden' &&
+        isAdminProtectedAccessGranted(spoofedAuthorizedWithoutAal2) === false,
+      'Admin Panel access is strictly denied across callback, login, and protected route if AAL2 is not achieved'
+    );
+
+    // 15.5 Full end-to-end enrollment -> invalid code blocked -> valid code -> refresh -> AAL2 -> access granted
+    const statefulMfa = createStatefulMockMfaAdapter({
+      currentLevel: 'aal1',
+      factors: [],
+      validOtpCode: '519204',
+    });
+    const enrolled = await startAdminTotpEnrollment('GoAMAAS Admin Authenticator', {
+      adapter: statefulMfa.adapter,
+    });
+    assert(
+      enrolled.status === 'enrolled' && Boolean(enrolled.factorId) && Boolean(enrolled.qrCodeSvgDataUri) && Boolean(enrolled.secret),
+      'First-time enrollment generates QR SVG and manual secret cleanly'
+    );
+
+    const badOtp = await verifyAdminTotpChallenge(enrolled.factorId!, '111111', statefulMfa.adapter);
+    const midVerification = await verifyServerAdminSession({
+      isConfigured: true,
+      getAuthUser: async () => ({
+        user: {
+          id: baseAdmin.id,
+          email: AUTHORIZED_ADMIN_EMAIL,
+          email_confirmed_at: '2026-10-01T00:00:00Z',
+          user_metadata: { email_verified: true, full_name: baseAdmin.name },
+        },
+        error: null,
+      }),
+      checkIsAdminRpc: async () => ({ data: true, error: null }),
+      fetchProfile: async () => ({
+        profile: {
+          id: baseAdmin.id,
+          email: AUTHORIZED_ADMIN_EMAIL,
+          full_name: baseAdmin.name,
+          role: 'admin',
+          onboarding_completed: true,
+        },
+        error: null,
+      }),
+      fetchMfaState: () => inspectAdminMfaState(statefulMfa.adapter),
+    });
+    assert(
+      badOtp.success === false &&
+        midVerification.status === 'mfa_setup_required' &&
+        isAdminProtectedAccessGranted(midVerification) === false,
+      'Invalid 6-digit TOTP code keeps factor unverified, keeps status at mfa_setup_required, and denies Admin Panel'
+    );
+
+    const goodOtp = await verifyAdminTotpChallenge(enrolled.factorId!, '519204', statefulMfa.adapter);
+    const finalVerification = await verifyServerAdminSession({
+      isConfigured: true,
+      getAuthUser: async () => ({
+        user: {
+          id: baseAdmin.id,
+          email: AUTHORIZED_ADMIN_EMAIL,
+          email_confirmed_at: '2026-10-01T00:00:00Z',
+          user_metadata: { email_verified: true, full_name: baseAdmin.name },
+        },
+        error: null,
+      }),
+      checkIsAdminRpc: async () => ({ data: true, error: null }),
+      fetchProfile: async () => ({
+        profile: {
+          id: baseAdmin.id,
+          email: AUTHORIZED_ADMIN_EMAIL,
+          full_name: baseAdmin.name,
+          role: 'admin',
+          onboarding_completed: true,
+        },
+        error: null,
+      }),
+      fetchMfaState: () => inspectAdminMfaState(statefulMfa.adapter),
+    });
+    assert(
+      goodOtp.success === true &&
+        goodOtp.currentLevel === 'aal2' &&
+        finalVerification.status === 'authorized' &&
+        resolveAdminCallbackDecision(finalVerification, '/admin/websites').action === 'grant_admin_access' &&
+        resolveAdminLoginSessionDecision(finalVerification).action === 'navigate_admin' &&
+        isAdminProtectedAccessGranted(finalVerification) === true,
+      'Valid 6-digit TOTP code promotes factor to verified, refreshes session to AAL2, and unlocks Admin Panel'
+    );
+
+    // 15.6 Thrown Supabase MFA API errors fail safely without unhandled exceptions
+    const throwingAdapter: AdminMfaClientAdapter = {
+      isConfigured: true,
+      getAuthenticatorAssuranceLevel: async () => ({
+        data: { currentLevel: 'aal1', nextLevel: 'aal1' },
+        error: null,
+      }),
+      listFactors: async () => ({ data: { all: [], totp: [] }, error: null }),
+      enroll: async () => {
+        throw new Error('MFA service temporarily unavailable');
+      },
+      challengeAndVerify: async () => {
+        throw new Error('MFA verification endpoint error');
+      },
+      unenroll: async () => {
+        throw new Error('MFA unenroll endpoint error');
+      },
+      refreshSession: async () => ({ data: null, error: null }),
+    };
+    const thrownEnroll = await startAdminTotpEnrollment('GoAMAAS Admin Authenticator', {
+      adapter: throwingAdapter,
+    });
+    const thrownVerify = await verifyAdminTotpChallenge('factor-x', '123456', throwingAdapter);
+    assert(
+      thrownEnroll.status === 'error' &&
+        thrownEnroll.error === 'MFA service temporarily unavailable' &&
+        thrownVerify.success === false &&
+        thrownVerify.error === 'MFA verification endpoint error',
+      'Thrown Supabase MFA API exceptions are caught cleanly and returned as structured errors'
+    );
+
+    // 15.7 UI source invariants: no Set Up Later AAL2 bypass in AdminLoginPage & full mfa_setup_required handling across guards
+    const latestLoginSrc = fs.readFileSync('src/pages/admin/AdminLoginPage.tsx', 'utf8');
+    const latestCallbackSrc = fs.readFileSync('src/pages/auth/AuthCallbackPage.tsx', 'utf8');
+    const latestGuardSrc = fs.readFileSync('src/components/auth/AdminProtectedRoute.tsx', 'utf8');
+    assert(
+      !latestLoginSrc.includes('Set Up Later') &&
+        latestLoginSrc.includes('mfa_setup_required') &&
+        latestLoginSrc.includes('AdminTotpSetupAndVerifyPanel') &&
+        latestCallbackSrc.includes('mfa_setup_required') &&
+        latestGuardSrc.includes('mfa_setup_required') &&
+        latestGuardSrc.includes('AdminTotpSetupAndVerifyPanel'),
+      'Zero AAL2 bypasses exist in AdminLoginPage and mfa_setup_required opens AdminTotpSetupAndVerifyPanel across AuthCallbackPage, AdminLoginPage, and AdminProtectedRoute'
+    );
+  }
+
+  console.log('\n✅ ALL 15/15 ADMIN GOOGLE AUTH, STAGING SIGN-IN, TOTP ENROLLMENT & PWA SUITES PASSED!');
 }
 
 run().catch((err) => {
   console.error('\n❌ TEST SUITE FAILED:', err);
   process.exit(1);
 });
+
