@@ -25,6 +25,7 @@ import {
 import { fetchCustomerProfileFromPortal } from '../../lib/customerPortal';
 import {
   AUTHORIZED_ADMIN_EMAIL,
+  AdminVerificationResult,
   clearAdminLoginFailures,
   clearAdminSessionEvents,
   isAuthorizedAdminEmail,
@@ -91,6 +92,103 @@ export function classifyAdminOAuthFailureReason(
     return 'oauth_server_error';
   }
   return 'session_failed';
+}
+
+export type AdminCallbackDecision =
+  | { action: 'signout_redirect'; to: string; recordFailure: boolean }
+  | { action: 'redirect_only'; to: string }
+  | { action: 'mfa_step'; mode: 'mfa_setup_required' | 'mfa_required'; targetPath: string }
+  | { action: 'grant_admin_access'; targetPath: string };
+
+export function resolveAdminCallbackDecision(
+  adminVerification: AdminVerificationResult,
+  targetAdminPath: string
+): AdminCallbackDecision {
+  if (adminVerification.status === 'unauthenticated') {
+    return {
+      action: 'signout_redirect',
+      to: '/admin/login?oauth_error=1&reason=session_not_established',
+      recordFailure: false,
+    };
+  }
+
+  if (adminVerification.status === 'forbidden') {
+    if (adminVerification.forbiddenReason === 'missing_admin_role') {
+      return {
+        action: 'signout_redirect',
+        to: '/admin/login?authz_error=missing_admin_role',
+        recordFailure: false,
+      };
+    }
+    return {
+      action: 'signout_redirect',
+      to: '/admin/login?denied=1',
+      recordFailure: true,
+    };
+  }
+
+  if (adminVerification.status === 'network_error') {
+    return {
+      action: 'redirect_only',
+      to: '/admin/login?oauth_error=1&reason=network_error',
+    };
+  }
+
+  if (adminVerification.status === 'unconfigured') {
+    return {
+      action: 'redirect_only',
+      to: '/admin/login?oauth_error=1&reason=unconfigured',
+    };
+  }
+
+  const safeAdminTarget =
+    targetAdminPath.startsWith('/admin') && targetAdminPath !== '/admin/login'
+      ? targetAdminPath
+      : '/admin';
+
+  if (
+    adminVerification.status === 'mfa_setup_required' &&
+    adminVerification.admin &&
+    isAuthorizedAdminEmail(adminVerification.admin.email)
+  ) {
+    return {
+      action: 'mfa_step',
+      mode: 'mfa_setup_required',
+      targetPath: safeAdminTarget,
+    };
+  }
+
+  if (
+    adminVerification.status === 'mfa_required' &&
+    adminVerification.admin &&
+    isAuthorizedAdminEmail(adminVerification.admin.email)
+  ) {
+    return {
+      action: 'mfa_step',
+      mode: 'mfa_required',
+      targetPath: safeAdminTarget,
+    };
+  }
+
+  if (
+    adminVerification.status === 'authorized' &&
+    adminVerification.admin &&
+    isAuthorizedAdminEmail(adminVerification.admin.email) &&
+    adminVerification.mfa.isMfaEnrolled &&
+    adminVerification.mfa.isMfaVerifiedForSession &&
+    adminVerification.mfa.currentLevel === 'aal2'
+  ) {
+    return {
+      action: 'grant_admin_access',
+      targetPath: safeAdminTarget,
+    };
+  }
+
+  return {
+    action: 'signout_redirect',
+    to: '/admin/login?denied=1',
+    recordFailure: false,
+  };
 }
 
 export const AuthCallbackPage: React.FC = () => {
@@ -274,57 +372,37 @@ export const AuthCallbackPage: React.FC = () => {
 
     const handleVerifiedAdminFlow = async (targetAdminPath: string) => {
       const adminVerification = await verifyServerAdminSession();
+      const decision = resolveAdminCallbackDecision(adminVerification, targetAdminPath);
 
-      if (adminVerification.status === 'unauthenticated') {
-        clearAdminSessionEvents();
-        notifyAdminServiceWorkerSignOut();
-        await signOutFromSupabase();
-        await logout({ silent: true });
-        navigate('/admin/login?oauth_error=1&reason=session_not_established', {
-          replace: true,
-        });
+      if (decision.action === 'redirect_only') {
+        navigate(decision.to, { replace: true });
         return;
       }
 
-      if (adminVerification.status === 'forbidden') {
-        clearAdminSessionEvents();
-        notifyAdminServiceWorkerSignOut();
-        await signOutFromSupabase();
-        await logout({ silent: true });
-
-        // Separate issue: Google login succeeded for the authorized Google account,
-        // but server-side database authorization (is_admin() / profiles.role === 'admin') failed.
-        if (adminVerification.forbiddenReason === 'missing_admin_role') {
-          navigate('/admin/login?authz_error=missing_admin_role', { replace: true });
-          return;
-        }
-
-        recordAdminLoginFailure();
-        navigate('/admin/login?denied=1', { replace: true });
-        return;
-      }
-
-      if (adminVerification.status === 'network_error') {
-        navigate('/admin/login?oauth_error=1&reason=network_error', { replace: true });
-        return;
-      }
-
-      const safeAdminTarget =
-        targetAdminPath.startsWith('/admin') && targetAdminPath !== '/admin/login'
-          ? targetAdminPath
-          : '/admin';
-
-      if (adminVerification.status === 'mfa_required') {
+      if (decision.action === 'mfa_step') {
         clearAdminLoginFailures();
+        if (decision.mode === 'mfa_setup_required') {
+          recordAdminSessionEvent({
+            adminId: adminVerification.admin?.id || 'admin',
+            action: 'mfa_setup_prompted',
+            targetType: 'mfa',
+            targetId: 'totp_enrollment',
+            outcome: 'success',
+            summary: 'Verified Google OAuth admin identity; directing to mandatory TOTP enrollment.',
+          });
+        }
         navigate('/admin/login', {
-          state: { from: safeAdminTarget },
+          state: {
+            from: decision.targetPath,
+            ...(decision.mode === 'mfa_setup_required' ? { mfaSetupRequired: true } : {}),
+          },
           replace: true,
         });
         return;
       }
 
       if (
-        adminVerification.status === 'authorized' &&
+        decision.action === 'grant_admin_access' &&
         adminVerification.admin &&
         isAuthorizedAdminEmail(adminVerification.admin.email)
       ) {
@@ -345,7 +423,7 @@ export const AuthCallbackPage: React.FC = () => {
           summary: 'Verified Google OAuth administrator session established.',
         });
         setStatus('success');
-        navigate(safeAdminTarget, { replace: true });
+        navigate(decision.targetPath, { replace: true });
         return;
       }
 
@@ -353,6 +431,15 @@ export const AuthCallbackPage: React.FC = () => {
       notifyAdminServiceWorkerSignOut();
       await signOutFromSupabase();
       await logout({ silent: true });
+
+      if (decision.action === 'signout_redirect') {
+        if (decision.recordFailure) {
+          recordAdminLoginFailure();
+        }
+        navigate(decision.to, { replace: true });
+        return;
+      }
+
       navigate('/admin/login?denied=1', { replace: true });
     };
 
