@@ -11,10 +11,12 @@ type AdminWebsiteAction = 'suspend' | 'reactivate' | 'renew' | 'delete' | 'retry
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const AUTHORIZED_ADMIN_EMAIL = 'official.amaas.dev@gmail.com';
 const ALLOWED_ADMIN_EXACT_ORIGINS = new Set([
-  'https://app.amaas.xyz',
   'https://amaas.xyz',
+  'https://app.amaas.xyz',
   'https://www.amaas.xyz',
+  'https://staging.amaas.xyz',
 ]);
+const SINGLE_LABEL_SUBDOMAIN_REGEX = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 const ADMIN_ACTION_RATE_BUCKETS = new Map<string, { count: number; resetAt: number }>();
 
@@ -34,13 +36,27 @@ function sendJson(res: ServerResponse, statusCode: number, payload: Record<strin
   res.end(JSON.stringify(normalized));
 }
 
-function isAllowedAdminOrigin(originRaw: string): boolean {
+export function isAllowedAdminOrigin(originRaw: string): boolean {
   const origin = String(originRaw || '').trim();
-  if (!origin) return false;
+  if (!origin || origin === '*') return false;
   if (ALLOWED_ADMIN_EXACT_ORIGINS.has(origin)) return true;
   try {
     const parsed = new URL(origin);
+    if (parsed.username || parsed.password || parsed.origin !== origin) {
+      return false;
+    }
     const host = parsed.hostname.toLowerCase();
+    if (parsed.protocol === 'https:' && parsed.port === '' && host.endsWith('.amaas.xyz')) {
+      const sub = host.slice(0, -'.amaas.xyz'.length);
+      if (
+        sub.length > 0 &&
+        !sub.includes('.') &&
+        !sub.startsWith('xn--') &&
+        SINGLE_LABEL_SUBDOMAIN_REGEX.test(sub)
+      ) {
+        return true;
+      }
+    }
     const envAppUrl = String(process.env.APP_URL || '').trim();
     if (envAppUrl) {
       try {
