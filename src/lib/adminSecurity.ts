@@ -933,53 +933,80 @@ export async function verifyAdminTotpChallenge(
     };
   }
 
-  const { error } = await adapter.challengeAndVerify({
-    factorId: cleanFactorId,
-    code: cleanCode,
-  });
+  try {
+    const { error } = await adapter.challengeAndVerify({
+      factorId: cleanFactorId,
+      code: cleanCode,
+    });
 
-  if (error) {
+    if (error) {
+      const rawErrMsg = (error.message || '').trim();
+      const lowerErrMsg = rawErrMsg.toLowerCase();
+      const isCodeMismatch =
+        lowerErrMsg.includes('invalid') ||
+        lowerErrMsg.includes('expired') ||
+        lowerErrMsg.includes('otp') ||
+        lowerErrMsg.includes('totp') ||
+        lowerErrMsg.includes('code') ||
+        lowerErrMsg.includes('mismatch') ||
+        lowerErrMsg.includes('verification');
+
+      return {
+        success: false,
+        currentLevel: null,
+        error: isLikelyNetworkFailure(error)
+          ? 'Network interruption while verifying authenticator code. Please retry.'
+          : isCodeMismatch || !rawErrMsg
+            ? 'Invalid or expired verification code. Please try again.'
+            : rawErrMsg,
+      };
+    }
+
+    const refreshRes = await adapter.refreshSession();
+    const [aalRes, refreshedMfa] = await Promise.all([
+      adapter.getAuthenticatorAssuranceLevel(),
+      inspectAdminMfaState(adapter),
+    ]);
+    const confirmedLevel: 'aal1' | 'aal2' | null =
+      aalRes.data?.currentLevel === 'aal2'
+        ? 'aal2'
+        : aalRes.data?.currentLevel === 'aal1'
+          ? 'aal1'
+          : null;
+    const factorConfirmedVerified = refreshedMfa.verifiedTotpFactors.some(
+      (f) => f.id === cleanFactorId && f.status === 'verified'
+    );
+
+    if (
+      refreshRes.error ||
+      aalRes.error ||
+      refreshedMfa.inspectionError ||
+      confirmedLevel !== 'aal2' ||
+      !factorConfirmedVerified
+    ) {
+      return {
+        success: false,
+        currentLevel: confirmedLevel,
+        error:
+          refreshRes.error?.message ||
+          aalRes.error?.message ||
+          refreshedMfa.inspectionError ||
+          'Authenticator code verified, but verified TOTP status and AAL2 session assurance could not be confirmed after refreshing the session. Please try again.',
+      };
+    }
+
+    return { success: true, currentLevel: 'aal2', error: null };
+  } catch (err: unknown) {
     return {
       success: false,
       currentLevel: null,
-      error: 'Invalid or expired verification code. Please try again.',
+      error: isLikelyNetworkFailure(err)
+        ? 'Network interruption while verifying authenticator code. Please retry.'
+        : err instanceof Error && err.message
+          ? err.message
+          : 'Unable to verify authenticator code due to an unexpected MFA service error.',
     };
   }
-
-  const refreshRes = await adapter.refreshSession();
-  const [aalRes, refreshedMfa] = await Promise.all([
-    adapter.getAuthenticatorAssuranceLevel(),
-    inspectAdminMfaState(adapter),
-  ]);
-  const confirmedLevel: 'aal1' | 'aal2' | null =
-    aalRes.data?.currentLevel === 'aal2'
-      ? 'aal2'
-      : aalRes.data?.currentLevel === 'aal1'
-        ? 'aal1'
-        : null;
-  const factorConfirmedVerified = refreshedMfa.verifiedTotpFactors.some(
-    (f) => f.id === cleanFactorId && f.status === 'verified'
-  );
-
-  if (
-    refreshRes.error ||
-    aalRes.error ||
-    refreshedMfa.inspectionError ||
-    confirmedLevel !== 'aal2' ||
-    !factorConfirmedVerified
-  ) {
-    return {
-      success: false,
-      currentLevel: confirmedLevel,
-      error:
-        refreshRes.error?.message ||
-        aalRes.error?.message ||
-        refreshedMfa.inspectionError ||
-        'Authenticator code verified, but verified TOTP status and AAL2 session assurance could not be confirmed after refreshing the session. Please try again.',
-    };
-  }
-
-  return { success: true, currentLevel: 'aal2', error: null };
 }
 
 function normalizeFactorFriendlyName(name: string | null | undefined): string {
@@ -1089,7 +1116,18 @@ export async function startAdminTotpEnrollment(
     }
 
     for (const stale of pendingFactors) {
-      const { error: unenrollError } = await adapter.unenroll({ factorId: stale.id });
+      let unenrollError: { message?: string } | null = null;
+      try {
+        const res = await adapter.unenroll({ factorId: stale.id });
+        unenrollError = res.error;
+      } catch (err: unknown) {
+        unenrollError = {
+          message:
+            err instanceof Error && err.message
+              ? err.message
+              : 'Could not remove the pending unverified authenticator factor.',
+        };
+      }
       if (unenrollError) {
         return {
           status: 'error',
@@ -1145,10 +1183,25 @@ export async function startAdminTotpEnrollment(
   }
 
   // Step 4: Enroll cleanly when no duplicate or verified TOTP factor exists
-  const { data, error } = await adapter.enroll({
-    factorType: 'totp',
-    friendlyName: cleanFriendlyName,
-  });
+  let data: {
+    id: string;
+    type: string;
+    totp?: { qr_code: string; secret: string };
+  } | null = null;
+  let error: { message?: string; code?: string } | null = null;
+  try {
+    const enrollRes = await adapter.enroll({
+      factorType: 'totp',
+      friendlyName: cleanFriendlyName,
+    });
+    data = enrollRes.data;
+    error = enrollRes.error;
+  } catch (err: unknown) {
+    error = {
+      message:
+        err instanceof Error && err.message ? err.message : 'Could not start TOTP enrollment.',
+    };
+  }
 
   if (error || !data || data.type !== 'totp' || !data.totp) {
     const rawMsg = error?.message || '';
@@ -1192,11 +1245,23 @@ export async function startAdminTotpEnrollment(
     };
   }
 
+  const normalizedQr = normalizeTotpQrCodeDataUri(data.totp.qr_code);
+  const cleanSecret = (data.totp.secret || '').trim();
+  if (!data.id || !normalizedQr || !cleanSecret) {
+    return {
+      status: 'error',
+      factorId: null,
+      qrCodeSvgDataUri: null,
+      secret: null,
+      error: 'Supabase Auth did not return a valid TOTP QR code or setup secret. Please try again.',
+    };
+  }
+
   return {
     status: 'enrolled',
     factorId: data.id,
-    qrCodeSvgDataUri: normalizeTotpQrCodeDataUri(data.totp.qr_code),
-    secret: data.totp.secret,
+    qrCodeSvgDataUri: normalizedQr,
+    secret: cleanSecret,
     error: null,
   };
 }
@@ -1234,11 +1299,18 @@ export async function unenrollAdminTotpFactor(
     };
   }
 
-  const { error } = await adapter.unenroll({ factorId: cleanFactorId });
-  if (error) {
-    return { success: false, error: error.message || 'Failed to remove authenticator factor.' };
+  try {
+    const { error } = await adapter.unenroll({ factorId: cleanFactorId });
+    if (error) {
+      return { success: false, error: error.message || 'Failed to remove authenticator factor.' };
+    }
+    return { success: true, error: null };
+  } catch (err: unknown) {
+    return {
+      success: false,
+      error: err instanceof Error && err.message ? err.message : 'Failed to remove authenticator factor.',
+    };
   }
-  return { success: true, error: null };
 }
 
 /**
@@ -1283,7 +1355,18 @@ export async function replaceVerifiedAdminTotpFactor(
     };
   }
 
-  const { error: unenrollError } = await adapter.unenroll({ factorId: oldFactorId });
+  let unenrollError: { message?: string } | null = null;
+  try {
+    const res = await adapter.unenroll({ factorId: oldFactorId });
+    unenrollError = res.error;
+  } catch (err: unknown) {
+    unenrollError = {
+      message:
+        err instanceof Error && err.message
+          ? err.message
+          : 'Unable to remove existing verified authenticator factor.',
+    };
+  }
   if (unenrollError) {
     return {
       status: 'error',
