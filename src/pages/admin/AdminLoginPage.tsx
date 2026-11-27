@@ -14,8 +14,9 @@ import {
   supabase,
   isSupabaseConfigured,
   supabaseProjectRef,
-  supabaseEnv,
+  STAGING_SUPABASE_PROJECT_REF,
   isStagingSupabaseRuntime,
+  buildGoogleOAuthRedirectTo,
   checkGoogleOAuthProviderStatus,
   signOutFromSupabase,
   signInWithGoogle,
@@ -24,6 +25,7 @@ import {
   ADMIN_DB_ROLE_MISSING_ERROR,
   AUTHORIZED_ADMIN_EMAIL,
   AdminMfaState,
+  AdminVerificationResult,
   UNIFORM_ADMIN_AUTH_ERROR,
   VerifiedAdminFactor,
   checkAdminLoginRateLimit,
@@ -75,6 +77,186 @@ export function resolveOAuthErrorMessage(reason: string | null): string {
   }
 }
 
+export interface AdminGoogleSignInExecutionDeps {
+  isOnline: boolean;
+  isEmbeddedIframe: boolean;
+  isConfigured: boolean;
+  hasClient: boolean;
+  origin: string;
+  intendedDestination: string;
+  requireStagingRuntime?: boolean;
+  isStagingRuntime?: boolean;
+  projectRef?: string;
+  checkRateLimit: typeof checkAdminLoginRateLimit;
+  checkProviderStatus: typeof checkGoogleOAuthProviderStatus;
+  signInWithGoogleFn: typeof signInWithGoogle;
+}
+
+export type AdminGoogleSignInOutcome =
+  | { status: 'redirecting'; redirectTo: string }
+  | { status: 'external_tab_required'; url: string }
+  | { status: 'error'; message: string; lockoutSeconds?: number };
+
+export async function executeAdminGoogleSignIn(
+  deps: AdminGoogleSignInExecutionDeps
+): Promise<AdminGoogleSignInOutcome> {
+  if (!deps.isOnline) {
+    return {
+      status: 'error',
+      message: 'Your device is offline. Reconnect to the internet to authenticate.',
+    };
+  }
+
+  const rate = deps.checkRateLimit();
+  if (!rate.allowed) {
+    return {
+      status: 'error',
+      lockoutSeconds: rate.retryAfterSeconds,
+      message: `Too many unsuccessful sign-in attempts. Please wait ${rate.retryAfterSeconds}s.`,
+    };
+  }
+
+  if (!deps.isConfigured || !deps.hasClient) {
+    return {
+      status: 'error',
+      message: 'Administrative authentication service is not configured.',
+    };
+  }
+
+  if (deps.requireStagingRuntime) {
+    const projectRef = (deps.projectRef || '').trim().toLowerCase();
+    if (!deps.isStagingRuntime || projectRef !== STAGING_SUPABASE_PROJECT_REF) {
+      return {
+        status: 'error',
+        message: `Staging sign-in requires the Staging Supabase project (${STAGING_SUPABASE_PROJECT_REF}).`,
+      };
+    }
+  }
+
+  const cleanOrigin = (deps.origin || '').trim().replace(/\/+$/, '');
+  if (!cleanOrigin) {
+    return {
+      status: 'error',
+      message: 'Unable to determine active application origin for OAuth callback.',
+    };
+  }
+
+  try {
+    // Embedded cross-origin iframes partition localStorage and Google blocks framed OAuth (X-Frame-Options: DENY).
+    // Verify provider status first, then provide a top-level tab launch URL so PKCE code_verifier runs unpartitioned.
+    if (deps.isEmbeddedIframe) {
+      const providerCheck = await deps.checkProviderStatus();
+      if (!providerCheck.enabled) {
+        return {
+          status: 'error',
+          message:
+            providerCheck.errorMessage ||
+            'Google Sign-In is disabled in the connected Supabase project.',
+        };
+      }
+      const nextParam =
+        deps.intendedDestination !== '/admin'
+          ? `&next=${encodeURIComponent(deps.intendedDestination)}`
+          : '';
+      return {
+        status: 'external_tab_required',
+        url: `${cleanOrigin}/admin/login?start_google=1${nextParam}`,
+      };
+    }
+
+    // Clean callback URL without query string guarantees exact allowlist match in Supabase GoTrue
+    const callbackUrl = buildGoogleOAuthRedirectTo(cleanOrigin);
+    const { data, error } = await deps.signInWithGoogleFn(callbackUrl, {
+      isAdminFlow: true,
+      nextPath: deps.intendedDestination,
+    });
+
+    if (error || !data?.url) {
+      return {
+        status: 'error',
+        message:
+          error?.message || 'Unable to start Google sign-in. Please retry.',
+      };
+    }
+
+    return { status: 'redirecting', redirectTo: callbackUrl };
+  } catch (err: unknown) {
+    return {
+      status: 'error',
+      message:
+        err instanceof Error && err.message
+          ? err.message
+          : 'Unable to start Google sign-in. Please retry.',
+    };
+  }
+}
+
+export type AdminLoginSessionDecision =
+  | { action: 'navigate_admin' }
+  | { action: 'show_totp_enrollment'; adminId: string; adminName: string; mfa: AdminMfaState }
+  | { action: 'show_totp_challenge'; factor: VerifiedAdminFactor }
+  | { action: 'purge_forbidden'; forbiddenReason?: AdminVerificationResult['forbiddenReason'] }
+  | { action: 'show_network_error'; message: string }
+  | { action: 'show_google_login' };
+
+export function resolveAdminLoginSessionDecision(
+  res: AdminVerificationResult
+): AdminLoginSessionDecision {
+  if (
+    res.status === 'authorized' &&
+    res.admin &&
+    isAuthorizedAdminEmail(res.admin.email) &&
+    res.mfa.isMfaEnrolled &&
+    res.mfa.isMfaVerifiedForSession &&
+    res.mfa.currentLevel === 'aal2'
+  ) {
+    return { action: 'navigate_admin' };
+  }
+
+  if (
+    res.status === 'mfa_setup_required' &&
+    res.admin &&
+    isAuthorizedAdminEmail(res.admin.email)
+  ) {
+    return {
+      action: 'show_totp_enrollment',
+      adminId: res.admin.id,
+      adminName: res.admin.name,
+      mfa: res.mfa,
+    };
+  }
+
+  if (
+    res.status === 'mfa_required' &&
+    res.admin &&
+    isAuthorizedAdminEmail(res.admin.email) &&
+    res.mfa.verifiedTotpFactors[0]
+  ) {
+    return {
+      action: 'show_totp_challenge',
+      factor: res.mfa.verifiedTotpFactors[0],
+    };
+  }
+
+  if (res.status === 'forbidden' || res.status === 'authorized') {
+    return {
+      action: 'purge_forbidden',
+      forbiddenReason: res.forbiddenReason,
+    };
+  }
+
+  if (res.status === 'network_error') {
+    return {
+      action: 'show_network_error',
+      message:
+        res.message ||
+        'Unable to verify administrator access due to a network error. Please try again.',
+    };
+  }
+
+  return { action: 'show_google_login' };
+}
+
 export const AdminLoginPage: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -119,14 +301,25 @@ export const AdminLoginPage: React.FC = () => {
   });
   const [lockoutSeconds, setLockoutSeconds] = useState<number>(0);
 
-  // MFA step-up challenge when enrolled on the verified admin account
+  // MFA step-up challenge when enrolled on the verified admin account, or first-time/recovery TOTP enrollment
   const [mfaChallengeFactor, setMfaChallengeFactor] = useState<VerifiedAdminFactor | null>(null);
   const [totpCode, setTotpCode] = useState('');
-  const [recoveredSetupSession, setRecoveredSetupSession] = useState<{
+  const [mfaSetupSession, setMfaSetupSession] = useState<{
     adminId: string;
     adminName: string;
     mfa: AdminMfaState;
   } | null>(null);
+
+  const handleCancelAndSignOut = async () => {
+    clearAdminSessionEvents();
+    notifyAdminServiceWorkerSignOut();
+    await signOutFromSupabase();
+    await logout({ silent: true });
+    setMfaSetupSession(null);
+    setMfaChallengeFactor(null);
+    setTotpCode('');
+    setErrorBanner(null);
+  };
 
   // Sync query-string error banners when redirected back to /admin/login
   useEffect(() => {
@@ -139,7 +332,7 @@ export const AdminLoginPage: React.FC = () => {
     }
   }, [isDeniedQuery, isMissingAdminRoleQuery, isOauthErrorQuery, oauthReason]);
 
-  // Check once on mount whether user already holds a valid server-verified admin session, or purge any unauthorized session
+  // Check once on mount whether user already holds a valid server-verified admin session, needs MFA, or must be purged
   useEffect(() => {
     if (checkedInitialRef.current) return;
     checkedInitialRef.current = true;
@@ -160,11 +353,9 @@ export const AdminLoginPage: React.FC = () => {
       const res = await verifyServerAdminSession();
       if (!active) return;
 
-      if (
-        res.status === 'authorized' &&
-        res.admin &&
-        isAuthorizedAdminEmail(res.admin.email)
-      ) {
+      const decision = resolveAdminLoginSessionDecision(res);
+
+      if (decision.action === 'navigate_admin' && res.admin) {
         clearAdminLoginFailures();
         setAuthenticatedUser({
           id: res.admin.id,
@@ -177,25 +368,34 @@ export const AdminLoginPage: React.FC = () => {
         return;
       }
 
-      if (
-        res.status === 'mfa_required' &&
-        res.admin &&
-        isAuthorizedAdminEmail(res.admin.email) &&
-        res.mfa.verifiedTotpFactors[0]
-      ) {
-        setMfaChallengeFactor(res.mfa.verifiedTotpFactors[0]);
+      if (decision.action === 'show_totp_enrollment') {
+        clearAdminLoginFailures();
+        setErrorBanner(null);
+        setMfaChallengeFactor(null);
+        setMfaSetupSession({
+          adminId: decision.adminId,
+          adminName: decision.adminName,
+          mfa: decision.mfa,
+        });
+        setIsCheckingExisting(false);
+        return;
+      }
+
+      if (decision.action === 'show_totp_challenge') {
+        setMfaSetupSession(null);
+        setMfaChallengeFactor(decision.factor);
         setIsCheckingExisting(false);
         return;
       }
 
       // Immediately purge any unauthorized Google or merchant session
-      if (res.status === 'forbidden') {
+      if (decision.action === 'purge_forbidden') {
         await enforceMinimumAuthFloor(startedAt, 350);
         clearAdminSessionEvents();
         notifyAdminServiceWorkerSignOut();
         await signOutFromSupabase();
         await logout({ silent: true });
-        const isMissingDbRole = res.forbiddenReason === 'missing_admin_role';
+        const isMissingDbRole = decision.forbiddenReason === 'missing_admin_role';
         const failure = isMissingDbRole ? null : recordAdminLoginFailure();
         if (!active) return;
         if (isMissingDbRole) {
@@ -208,6 +408,8 @@ export const AdminLoginPage: React.FC = () => {
         } else {
           setErrorBanner(UNIFORM_ADMIN_AUTH_ERROR);
         }
+      } else if (decision.action === 'show_network_error') {
+        setErrorBanner(decision.message);
       }
 
       if (active) {
@@ -247,7 +449,10 @@ export const AdminLoginPage: React.FC = () => {
       if (
         finalCheck.status === 'authorized' &&
         finalCheck.admin &&
-        isAuthorizedAdminEmail(finalCheck.admin.email)
+        isAuthorizedAdminEmail(finalCheck.admin.email) &&
+        finalCheck.mfa.isMfaEnrolled &&
+        finalCheck.mfa.isMfaVerifiedForSession &&
+        finalCheck.mfa.currentLevel === 'aal2'
       ) {
         clearAdminLoginFailures();
         setAuthenticatedUser({
@@ -266,6 +471,27 @@ export const AdminLoginPage: React.FC = () => {
           summary: 'Verified administrator Google session with AAL2 TOTP MFA.',
         });
         navigate(intendedDestination, { replace: true });
+      } else if (
+        finalCheck.status === 'mfa_setup_required' &&
+        finalCheck.admin &&
+        isAuthorizedAdminEmail(finalCheck.admin.email)
+      ) {
+        setMfaChallengeFactor(null);
+        setTotpCode('');
+        setMfaSetupSession({
+          adminId: finalCheck.admin.id,
+          adminName: finalCheck.admin.name,
+          mfa: finalCheck.mfa,
+        });
+      } else if (finalCheck.status === 'mfa_required') {
+        setErrorBanner(
+          finalCheck.message ||
+            'Two-factor verification could not be confirmed at AAL2. Please enter a fresh 6-digit code.'
+        );
+      } else if (finalCheck.status === 'network_error') {
+        setErrorBanner(
+          finalCheck.message || 'Network interruption while verifying session. Please retry.'
+        );
       } else {
         clearAdminSessionEvents();
         notifyAdminServiceWorkerSignOut();
@@ -284,68 +510,47 @@ export const AdminLoginPage: React.FC = () => {
     }
   };
 
-  const handleAdminGoogleSignIn = async () => {
+  const handleAdminGoogleSignIn = async (options?: { requireStagingRuntime?: boolean }) => {
     if (isSubmittingMfa || isGoogleRedirecting) return;
-    if (!isOnline) {
-      setErrorBanner('Your device is offline. Reconnect to the internet to authenticate.');
-      return;
-    }
-
-    const rate = checkAdminLoginRateLimit();
-    if (!rate.allowed) {
-      setLockoutSeconds(rate.retryAfterSeconds);
-      setErrorBanner(
-        `Too many unsuccessful sign-in attempts. Please wait ${rate.retryAfterSeconds}s.`
-      );
-      return;
-    }
-
-    if (!isSupabaseConfigured || !supabase) {
-      setErrorBanner('Administrative authentication service is not configured.');
-      return;
-    }
 
     setIsGoogleRedirecting(true);
     setErrorBanner(null);
     setExternalTabOAuthUrl(null);
 
-    // Embedded cross-origin iframes partition localStorage and Google blocks framed OAuth (X-Frame-Options: DENY).
-    // Verify provider status first, then provide a top-level tab launch URL so PKCE code_verifier runs unpartitioned.
-    if (isEmbeddedIframe) {
-      const providerCheck = await checkGoogleOAuthProviderStatus();
+    const outcome = await executeAdminGoogleSignIn({
+      isOnline,
+      isEmbeddedIframe,
+      isConfigured: isSupabaseConfigured,
+      hasClient: Boolean(supabase),
+      origin: typeof window !== 'undefined' ? window.location.origin : '',
+      intendedDestination,
+      requireStagingRuntime: options?.requireStagingRuntime,
+      isStagingRuntime: isStagingSupabaseRuntime(),
+      projectRef: supabaseProjectRef,
+      checkRateLimit: checkAdminLoginRateLimit,
+      checkProviderStatus: checkGoogleOAuthProviderStatus,
+      signInWithGoogleFn: signInWithGoogle,
+    });
+
+    if (outcome.status === 'external_tab_required') {
       setIsGoogleRedirecting(false);
-      if (!providerCheck.enabled) {
-        setErrorBanner(
-          providerCheck.errorMessage ||
-            'Google Sign-In is disabled in the connected Supabase project.'
-        );
-        return;
-      }
-      const nextParam =
-        intendedDestination !== '/admin'
-          ? `&next=${encodeURIComponent(intendedDestination)}`
-          : '';
-      setExternalTabOAuthUrl(`${window.location.origin}/admin/login?start_google=1${nextParam}`);
+      setExternalTabOAuthUrl(outcome.url);
       return;
     }
 
-    // Clean callback URL without query string guarantees exact allowlist match in Supabase GoTrue
-    const callbackUrl = `${window.location.origin}/auth/callback`;
-    const { error } = await signInWithGoogle(callbackUrl, {
-      isAdminFlow: true,
-      nextPath: intendedDestination,
-    });
-
-    if (error) {
+    if (outcome.status === 'error') {
       setIsGoogleRedirecting(false);
-      setErrorBanner(error.message || 'Unable to start Google sign-in. Please retry.');
+      if (outcome.lockoutSeconds) {
+        setLockoutSeconds(outcome.lockoutSeconds);
+      }
+      setErrorBanner(outcome.message);
     }
   };
 
   // Auto-start Google OAuth once when launched in a top-level tab from an embedded preview iframe
   useEffect(() => {
     if (isCheckingExisting || !shouldAutoStartInTopTab || autoStartedTopTabRef.current) return;
-    if (mfaChallengeFactor || errorBanner || lockoutSeconds > 0 || !isOnline) return;
+    if (mfaChallengeFactor || mfaSetupSession || errorBanner || lockoutSeconds > 0 || !isOnline) return;
     autoStartedTopTabRef.current = true;
     if (typeof window !== 'undefined' && window.history?.replaceState) {
       try {
@@ -393,7 +598,7 @@ export const AdminLoginPage: React.FC = () => {
       </header>
 
       {/* Main Dedicated Sign-In Card */}
-      <main className={`w-full ${recoveredSetupSession ? 'max-w-lg' : 'max-w-sm'} mx-auto my-8 space-y-4`}>
+      <main className={`w-full ${mfaSetupSession ? 'max-w-lg' : 'max-w-sm'} mx-auto my-8 space-y-4`}>
         {!isOnline && (
           <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-200 text-xs flex items-center gap-2.5">
             <WifiOff className="w-4 h-4 shrink-0" />
@@ -410,22 +615,22 @@ export const AdminLoginPage: React.FC = () => {
         <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 sm:p-8 shadow-sm space-y-6">
           <div className="space-y-1.5 text-center">
             <div className="w-11 h-11 rounded-2xl bg-blue-600 text-white flex items-center justify-center mx-auto mb-3">
-              {mfaChallengeFactor || recoveredSetupSession ? (
+              {mfaChallengeFactor || mfaSetupSession ? (
                 <KeyRound className="w-5 h-5" />
               ) : (
                 <ShieldCheck className="w-5 h-5" />
               )}
             </div>
             <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-white">
-              {recoveredSetupSession
+              {mfaSetupSession
                 ? 'Set Up Authenticator'
                 : mfaChallengeFactor
                 ? 'Two-Factor Verification'
                 : 'Admin Sign In'}
             </h1>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              {recoveredSetupSession
-                ? 'Scan the QR code in Google Authenticator or Microsoft Authenticator to restore AAL2 protection.'
+              {mfaSetupSession
+                ? 'Scan the QR code in Google Authenticator or Microsoft Authenticator and verify a 6-digit code to enable AAL2 protection.'
                 : mfaChallengeFactor
                 ? `Enter the 6-digit code from ${mfaChallengeFactor.friendlyName}.`
                 : 'Authorized administrators only.'}
@@ -442,20 +647,40 @@ export const AdminLoginPage: React.FC = () => {
             </div>
           )}
 
-          {recoveredSetupSession ? (
+          {mfaSetupSession ? (
             <div className="space-y-4">
               <AdminTotpSetupAndVerifyPanel
-                mfa={recoveredSetupSession.mfa}
-                adminId={recoveredSetupSession.adminId}
-                adminName={recoveredSetupSession.adminName}
+                mfa={mfaSetupSession.mfa}
+                adminId={mfaSetupSession.adminId}
+                adminName={mfaSetupSession.adminName}
                 isOnline={isOnline}
                 autoStartEnroll
                 compact
                 onRefreshVerification={async () => {
                   const res = await verifyServerAdminSession();
-                  if (res.admin) {
-                    setRecoveredSetupSession((prev) =>
-                      prev ? { ...prev, mfa: res.mfa } : null
+                  if (res.status === 'forbidden') {
+                    await handleCancelAndSignOut();
+                    setErrorBanner(
+                      res.forbiddenReason === 'missing_admin_role'
+                        ? ADMIN_DB_ROLE_MISSING_ERROR
+                        : UNIFORM_ADMIN_AUTH_ERROR
+                    );
+                    return res;
+                  }
+                  if (res.status === 'unauthenticated') {
+                    await handleCancelAndSignOut();
+                    setErrorBanner('Your session expired. Please sign in again.');
+                    return res;
+                  }
+                  if (res.admin && isAuthorizedAdminEmail(res.admin.email)) {
+                    setMfaSetupSession((prev) =>
+                      prev
+                        ? {
+                            adminId: res.admin!.id,
+                            adminName: res.admin!.name,
+                            mfa: res.mfa,
+                          }
+                        : null
                     );
                   }
                   return res;
@@ -465,7 +690,11 @@ export const AdminLoginPage: React.FC = () => {
                   if (
                     finalCheck.status === 'authorized' &&
                     finalCheck.admin &&
-                    isAuthorizedAdminEmail(finalCheck.admin.email)
+                    isAuthorizedAdminEmail(finalCheck.admin.email) &&
+                    finalCheck.mfa.isMfaEnrolled &&
+                    finalCheck.mfa.verifiedTotpFactors.length > 0 &&
+                    finalCheck.mfa.isMfaVerifiedForSession &&
+                    finalCheck.mfa.currentLevel === 'aal2'
                   ) {
                     clearAdminLoginFailures();
                     setAuthenticatedUser({
@@ -475,16 +704,53 @@ export const AdminLoginPage: React.FC = () => {
                       role: 'admin',
                       storeId: '',
                     });
+                    recordAdminSessionEvent({
+                      adminId: finalCheck.admin.id,
+                      action: 'admin_sign_in_mfa',
+                      targetType: 'session',
+                      targetId: finalCheck.mfa.verifiedTotpFactors[0].id,
+                      outcome: 'success',
+                      summary: 'Administrator verified TOTP authenticator and confirmed AAL2 session.',
+                    });
                     navigate(intendedDestination, { replace: true });
+                    return;
+                  }
+
+                  if (finalCheck.status === 'forbidden') {
+                    await handleCancelAndSignOut();
+                    setErrorBanner(
+                      finalCheck.forbiddenReason === 'missing_admin_role'
+                        ? ADMIN_DB_ROLE_MISSING_ERROR
+                        : UNIFORM_ADMIN_AUTH_ERROR
+                    );
+                    return;
+                  }
+
+                  if (finalCheck.status === 'unauthenticated') {
+                    await handleCancelAndSignOut();
+                    setErrorBanner('Your session expired. Please sign in again.');
+                    return;
+                  }
+
+                  setErrorBanner(
+                    finalCheck.message ||
+                      'Two-factor verification could not be confirmed at AAL2. Complete authenticator verification before accessing GoAMAAS Admin.'
+                  );
+                  if (finalCheck.admin && isAuthorizedAdminEmail(finalCheck.admin.email)) {
+                    setMfaSetupSession({
+                      adminId: finalCheck.admin.id,
+                      adminName: finalCheck.admin.name,
+                      mfa: finalCheck.mfa,
+                    });
                   }
                 }}
               />
               <button
                 type="button"
-                onClick={() => navigate(intendedDestination, { replace: true })}
-                className="w-full min-h-[42px] rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-semibold text-xs cursor-pointer"
+                onClick={() => void handleCancelAndSignOut()}
+                className="w-full min-h-[44px] rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-semibold text-xs cursor-pointer"
               >
-                Continue to Admin Dashboard (Set Up Later)
+                Cancel &amp; Sign Out
               </button>
             </div>
           ) : mfaChallengeFactor ? (
@@ -525,15 +791,7 @@ export const AdminLoginPage: React.FC = () => {
 
                 <button
                   type="button"
-                  onClick={async () => {
-                    clearAdminSessionEvents();
-                    notifyAdminServiceWorkerSignOut();
-                    await signOutFromSupabase();
-                    await logout({ silent: true });
-                    setMfaChallengeFactor(null);
-                    setTotpCode('');
-                    setErrorBanner(null);
-                  }}
+                  onClick={() => void handleCancelAndSignOut()}
                   className="w-full min-h-[44px] rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-semibold text-xs cursor-pointer"
                 >
                   Cancel &amp; Sign Out
@@ -547,14 +805,14 @@ export const AdminLoginPage: React.FC = () => {
                   await refreshAndInspectAdminMfaState();
                   const recheck = await verifyServerAdminSession();
                   if (
-                    recheck.status === 'authorized' &&
+                    (recheck.status === 'mfa_setup_required' || recheck.status === 'authorized') &&
                     recheck.admin &&
                     isAuthorizedAdminEmail(recheck.admin.email) &&
                     !recheck.mfa.isMfaEnrolled
                   ) {
                     setErrorBanner(null);
                     setMfaChallengeFactor(null);
-                    setRecoveredSetupSession({
+                    setMfaSetupSession({
                       adminId: recheck.admin.id,
                       adminName: recheck.admin.name,
                       mfa: recheck.mfa,
@@ -630,32 +888,23 @@ export const AdminLoginPage: React.FC = () => {
               {isStagingSupabaseRuntime() && (
                 <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
                   <p className="text-[11px] text-amber-600 dark:text-amber-400 text-center font-medium">
-                    Staging Environment Mode (umiheyukaddfaupsyooh)
+                    Staging Environment Mode ({STAGING_SUPABASE_PROJECT_REF})
                   </p>
                   <button
                     type="button"
-                    onClick={() => {
-                      setAuthenticatedUser({
-                        id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-                        name: 'Platform Admin (Staging)',
-                        email: AUTHORIZED_ADMIN_EMAIL,
-                        role: 'admin',
-                        storeId: '',
-                      });
-                      clearAdminLoginFailures();
-                      recordAdminSessionEvent({
-                        adminId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-                        action: 'admin_staging_sign_in',
-                        targetType: 'session',
-                        targetId: 'umiheyukaddfaupsyooh',
-                        outcome: 'success',
-                        summary: 'Authenticated Staging admin session for official.amaas.dev@gmail.com on umiheyukaddfaupsyooh.',
-                      });
-                      navigate(intendedDestination, { replace: true });
-                    }}
-                    className="w-full min-h-[46px] px-4 py-3 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-semibold text-xs sm:text-sm inline-flex items-center justify-center gap-2 transition-colors shadow-xs cursor-pointer"
+                    data-testid="staging-admin-direct-signin-btn"
+                    disabled={isGoogleRedirecting || lockoutSeconds > 0 || !isOnline}
+                    onClick={() => void handleAdminGoogleSignIn({ requireStagingRuntime: true })}
+                    className="w-full min-h-[46px] px-4 py-3 rounded-xl bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-semibold text-xs sm:text-sm inline-flex items-center justify-center gap-2 transition-colors shadow-xs cursor-pointer"
                   >
-                    <span>Staging Admin Direct Sign-In (umiheyukaddfaupsyooh)</span>
+                    {isGoogleRedirecting ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                        <span>Connecting to Staging Google Sign-In...</span>
+                      </>
+                    ) : (
+                      <span>Staging Admin Direct Sign-In ({STAGING_SUPABASE_PROJECT_REF})</span>
+                    )}
                   </button>
                 </div>
               )}
