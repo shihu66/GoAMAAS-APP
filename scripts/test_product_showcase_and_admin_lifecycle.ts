@@ -25,6 +25,7 @@ import type {
 interface MockDbCall {
   method: string;
   url: string;
+  headers?: Record<string, string>;
   body?: unknown;
 }
 
@@ -358,6 +359,7 @@ async function runTests() {
   let forceGlobalVerifyFail = false;
   let forceBatchConfirmVerifyFail = false;
   let adminFactorsOverride: Array<{ factor_type: string; status: string }> | null = null;
+  let adminProfileRoleOverride: string | null = null;
   let verifyCallCount = 0;
   let onBeforeBatchConfirmVerify: ((candidatePaths: string[], callNum: number) => void) | null = null;
   let simulateMissingLogoColumn = false;
@@ -492,7 +494,22 @@ async function runTests() {
         return new Response(JSON.stringify({ message: 'Invalid JWT' }), { status: 401 });
       }
 
-      dbCalls.push({ method, url, body: parsedBody });
+      const normalizedHeaders: Record<string, string> = {};
+      if (init?.headers instanceof Headers) {
+        init.headers.forEach((value, key) => {
+          normalizedHeaders[key.toLowerCase()] = value;
+        });
+      } else if (Array.isArray(init?.headers)) {
+        for (const [key, value] of init.headers) {
+          normalizedHeaders[String(key).toLowerCase()] = String(value);
+        }
+      } else if (init?.headers && typeof init.headers === 'object') {
+        for (const [key, value] of Object.entries(init.headers as Record<string, string>)) {
+          normalizedHeaders[key.toLowerCase()] = String(value);
+        }
+      }
+
+      dbCalls.push({ method, url, headers: normalizedHeaders, body: parsedBody });
 
       if (url.includes('/rest/v1/profiles')) {
         if (url.includes(`id=eq.${ADMIN_UUID}`)) {
@@ -501,7 +518,7 @@ async function runTests() {
               {
                 id: ADMIN_UUID,
                 email: 'official.amaas.dev@gmail.com',
-                role: 'admin',
+                role: adminProfileRoleOverride ?? 'admin',
                 avatar_url: null,
               },
             ]),
@@ -2296,6 +2313,297 @@ async function runTests() {
       );
       assert.ok(adminUiSrc.includes('manualReviewAssetPaths'));
       assert.ok(adminUiSrc.includes('Uncertain Storage Assets Held for Manual Review'));
+    });
+
+    await check('2.32 DELETE uses secure service-role Supabase client (sb_secret_ & JWT keys), rejects sb_publishable_, never passes caller JWT, and matches exact 4 RPC arguments', async () => {
+      const savedSiteState = { ...currentSiteState };
+      const origServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+      try {
+        // Case A: Reject sb_publishable_ mistakenly configured as SUPABASE_SERVICE_ROLE_KEY
+        dbCalls = [];
+        process.env.SUPABASE_SERVICE_ROLE_KEY = 'sb_publishable_wrong_key_for_server';
+        const pubKeyReq = makeMockReqRes({
+          origin: 'https://app.amaas.xyz',
+          authorization: `Bearer ${adminToken}`,
+          ip: '203.0.113.87',
+          body: {
+            action: 'delete',
+            websiteId: WEBSITE_UUID,
+            confirmSubdomain: 'fortyninee',
+            explicitConfirmed: true,
+          },
+        });
+        await adminWebsiteActionHandler(pubKeyReq.req, pubKeyReq.res);
+        assert.equal(pubKeyReq.getResult().statusCode, 503);
+        assert.equal(pubKeyReq.getResult().json?.code, 'ADMIN_API_NOT_CONFIGURED');
+        assert.equal(
+          dbCalls.filter((c) => c.url.includes('/rest/v1/rpc/admin_permanently_delete_website')).length,
+          0
+        );
+
+        // Case B: Staging-style sb_secret_ key sends apikey without Authorization: Bearer sb_secret_ and never forwards caller JWT
+        dbCalls = [];
+        currentSiteState = { ...savedSiteState };
+        const fakeSecretKey = 'sb_secret_staging_test_key_do_not_use_in_prod';
+        process.env.SUPABASE_SERVICE_ROLE_KEY = fakeSecretKey;
+        const secretKeyReq = makeMockReqRes({
+          origin: 'https://app.amaas.xyz',
+          authorization: `Bearer ${adminToken}`,
+          ip: '203.0.113.87',
+          body: {
+            action: 'delete',
+            websiteId: WEBSITE_UUID,
+            confirmSubdomain: 'fortyninee',
+            explicitConfirmed: true,
+            reason: 'Verify sb_secret_ service-role client RPC call',
+          },
+        });
+        await adminWebsiteActionHandler(secretKeyReq.req, secretKeyReq.res);
+        assert.equal(secretKeyReq.getResult().statusCode, 200);
+        assert.equal(secretKeyReq.getResult().json?.success, true);
+        const secretRpcCalls = dbCalls.filter((c) =>
+          c.url.endsWith('/rest/v1/rpc/admin_permanently_delete_website')
+        );
+        assert.equal(secretRpcCalls.length, 1);
+        assert.equal(secretRpcCalls[0].headers?.['apikey'], fakeSecretKey);
+        assert.equal(secretRpcCalls[0].headers?.['authorization'], undefined);
+        assert.equal(secretRpcCalls[0].headers?.['content-profile'], 'public');
+        assert.deepEqual(Object.keys(secretRpcCalls[0].body as Record<string, unknown>).sort(), [
+          'p_admin_id',
+          'p_confirm_subdomain',
+          'p_reason',
+          'p_website_id',
+        ]);
+        assert.deepEqual(secretRpcCalls[0].body, {
+          p_website_id: WEBSITE_UUID,
+          p_admin_id: ADMIN_UUID,
+          p_confirm_subdomain: 'fortyninee',
+          p_reason: 'Verify sb_secret_ service-role client RPC call',
+        });
+
+        // Case C: Legacy service_role JWT sends both apikey and Authorization: Bearer <service_role_jwt>, never caller's adminToken
+        dbCalls = [];
+        currentSiteState = { ...savedSiteState };
+        const fakeServiceRoleJwt = buildFakeJwt({ role: 'service_role', ref: 'example-project' });
+        process.env.SUPABASE_SERVICE_ROLE_KEY = fakeServiceRoleJwt;
+        const jwtKeyReq = makeMockReqRes({
+          origin: 'https://app.amaas.xyz',
+          authorization: `Bearer ${adminToken}`,
+          ip: '203.0.113.87',
+          body: {
+            action: 'delete',
+            websiteId: WEBSITE_UUID,
+            confirmSubdomain: 'fortyninee',
+            explicitConfirmed: true,
+          },
+        });
+        await adminWebsiteActionHandler(jwtKeyReq.req, jwtKeyReq.res);
+        assert.equal(jwtKeyReq.getResult().statusCode, 200);
+        const jwtRpcCalls = dbCalls.filter((c) =>
+          c.url.endsWith('/rest/v1/rpc/admin_permanently_delete_website')
+        );
+        assert.equal(jwtRpcCalls.length, 1);
+        assert.equal(jwtRpcCalls[0].headers?.['apikey'], fakeServiceRoleJwt);
+        assert.equal(jwtRpcCalls[0].headers?.['authorization'], `Bearer ${fakeServiceRoleJwt}`);
+        assert.notEqual(jwtRpcCalls[0].headers?.['authorization'], `Bearer ${adminToken}`);
+      } finally {
+        currentSiteState = { ...savedSiteState };
+        process.env.SUPABASE_SERVICE_ROLE_KEY = origServiceKey;
+      }
+    });
+
+    await check('2.33 DELETE blocks unauthorized callers (missing JWT, sub mismatch, non-allowlisted email, missing AAL2, non-admin profile, subdomain mismatch) before invoking RPC', async () => {
+      const mismatchedSubToken = buildFakeJwt({
+        sub: '11111111-1111-4111-8111-999999999999',
+        aal: 'aal2',
+      });
+      const savedFetch = globalThis.fetch;
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (
+          url.endsWith('/auth/v1/user') &&
+          String((init?.headers as Record<string, string> | undefined)?.Authorization || '').includes(
+            mismatchedSubToken
+          )
+        ) {
+          return new Response(
+            JSON.stringify({
+              id: ADMIN_UUID,
+              email: 'official.amaas.dev@gmail.com',
+              email_confirmed_at: '2026-01-01T00:00:00Z',
+              factors: [{ factor_type: 'totp', status: 'verified' }],
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        return savedFetch(input, init);
+      }) as typeof globalThis.fetch;
+
+      try {
+        const cases: Array<{
+          label: string;
+          auth?: string;
+          confirmSubdomain?: string;
+          profileRole?: string | null;
+          expectedStatus: number;
+          expectedCode: string;
+        }> = [
+          { label: 'missing auth', expectedStatus: 401, expectedCode: 'UNAUTHORIZED' },
+          {
+            label: 'jwt sub mismatch',
+            auth: `Bearer ${mismatchedSubToken}`,
+            expectedStatus: 401,
+            expectedCode: 'INVALID_SESSION',
+          },
+          {
+            label: 'non-allowlisted email',
+            auth: `Bearer ${merchantToken}`,
+            expectedStatus: 403,
+            expectedCode: 'FORBIDDEN_ADMIN_REQUIRED',
+          },
+          {
+            label: 'aal1 without aal2',
+            auth: `Bearer ${adminAal1Token}`,
+            expectedStatus: 403,
+            expectedCode: 'MFA_REQUIRED',
+          },
+          {
+            label: 'profile role not admin',
+            auth: `Bearer ${adminToken}`,
+            profileRole: 'merchant',
+            expectedStatus: 403,
+            expectedCode: 'FORBIDDEN_ADMIN_REQUIRED',
+          },
+          {
+            label: 'subdomain mismatch',
+            auth: `Bearer ${adminToken}`,
+            confirmSubdomain: 'wrong-subdomain',
+            expectedStatus: 409,
+            expectedCode: 'SUBDOMAIN_CONFIRMATION_MISMATCH',
+          },
+        ];
+
+        for (const c of cases) {
+          dbCalls = [];
+          adminProfileRoleOverride = c.profileRole ?? null;
+          const pair = makeMockReqRes({
+            origin: 'https://app.amaas.xyz',
+            ...(c.auth ? { authorization: c.auth } : {}),
+            ip: '203.0.113.88',
+            body: {
+              action: 'delete',
+              websiteId: WEBSITE_UUID,
+              confirmSubdomain: c.confirmSubdomain ?? 'fortyninee',
+              explicitConfirmed: true,
+            },
+          });
+          await adminWebsiteActionHandler(pair.req, pair.res);
+          const out = pair.getResult();
+          assert.equal(out.statusCode, c.expectedStatus, `Expected ${c.expectedStatus} for ${c.label}`);
+          assert.equal(out.json?.code, c.expectedCode, `Expected ${c.expectedCode} for ${c.label}`);
+          assert.equal(
+            dbCalls.filter((call) => call.url.includes('/rest/v1/rpc/admin_permanently_delete_website')).length,
+            0,
+            `RPC must not be called for ${c.label}`
+          );
+        }
+      } finally {
+        adminProfileRoleOverride = null;
+        globalThis.fetch = savedFetch;
+      }
+    });
+
+    await check('2.34 DELETE does not misreport 401/403 PostgREST auth/permission errors or PGRST106/PGRST205 as missing schema-cache function', async () => {
+      try {
+        const permCases: Array<{ status: number; body: Record<string, unknown> }> = [
+          {
+            status: 401,
+            body: {
+              code: '42501',
+              details: null,
+              hint: null,
+              message: 'permission denied for function admin_permanently_delete_website',
+            },
+          },
+          {
+            status: 401,
+            body: {
+              code: 'PGRST301',
+              message: 'JWSError (CompactDecodeError)',
+            },
+          },
+          {
+            status: 401,
+            body: {
+              code: 'PGRST302',
+              message: 'Anonymous access is disabled',
+            },
+          },
+          {
+            status: 401,
+            body: {
+              message: 'Invalid API key',
+            },
+          },
+        ];
+
+        for (const pc of permCases) {
+          rpcHttpErrorOverride = pc;
+          const pair = makeMockReqRes({
+            origin: 'https://app.amaas.xyz',
+            authorization: `Bearer ${adminToken}`,
+            ip: '203.0.113.89',
+            body: {
+              action: 'delete',
+              websiteId: WEBSITE_UUID,
+              confirmSubdomain: 'fortyninee',
+              explicitConfirmed: true,
+            },
+          });
+          await adminWebsiteActionHandler(pair.req, pair.res);
+          const out = pair.getResult();
+          assert.equal(out.statusCode, 403);
+          assert.equal(out.json?.code, 'RPC_PERMISSION_DENIED');
+          assert.ok(!String(out.json?.error || '').includes('was not found'));
+          assert.ok(!String(out.json?.error || '').includes('not yet installed'));
+        }
+
+        for (const schemaErr of [
+          {
+            status: 406,
+            body: {
+              code: 'PGRST106',
+              message: 'The schema must be one of the following: public, graphql_public',
+            },
+          },
+          {
+            status: 404,
+            body: {
+              code: 'PGRST205',
+              message: "Could not find the table 'public.website_lifecycle_audit_logs' in the schema cache",
+            },
+          },
+        ]) {
+          rpcHttpErrorOverride = schemaErr;
+          const pair = makeMockReqRes({
+            origin: 'https://app.amaas.xyz',
+            authorization: `Bearer ${adminToken}`,
+            ip: '203.0.113.89',
+            body: {
+              action: 'delete',
+              websiteId: WEBSITE_UUID,
+              confirmSubdomain: 'fortyninee',
+              explicitConfirmed: true,
+            },
+          });
+          await adminWebsiteActionHandler(pair.req, pair.res);
+          const out = pair.getResult();
+          assert.equal(out.statusCode, 503);
+          assert.equal(out.json?.code, 'SCHEMA_CACHE_MISMATCH');
+        }
+      } finally {
+        rpcHttpErrorOverride = null;
+      }
     });
   } finally {
     globalThis.fetch = originalFetch;

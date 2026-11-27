@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'http';
+import { createClient } from '@supabase/supabase-js';
 
 interface RequestWithBody extends IncomingMessage {
   body?: unknown;
@@ -266,6 +267,14 @@ function resolveSupabaseServerEnv(): ResolvedSupabaseServerEnv {
     };
   }
 
+  if (serviceRoleKey.startsWith('sb_publishable_')) {
+    return {
+      ok: false,
+      code: 'ADMIN_API_NOT_CONFIGURED',
+      error: 'Server-side SUPABASE_SERVICE_ROLE_KEY must not be a publishable or anon key.',
+    };
+  }
+
   const urlProjectRef = extractSupabaseProjectRef(supabaseUrl);
   const serviceKeyClaims = decodeJwtClaims(serviceRoleKey);
   if (serviceKeyClaims) {
@@ -312,6 +321,72 @@ function resolveSupabaseServerEnv(): ResolvedSupabaseServerEnv {
     anonKey,
     projectRef: urlProjectRef,
   };
+}
+
+export function buildServiceRoleHeaders(serviceRoleKey: string): Record<string, string> {
+  const cleanKey = String(serviceRoleKey || '').trim();
+  const headers: Record<string, string> = {
+    apikey: cleanKey,
+    'Content-Type': 'application/json',
+    'Content-Profile': 'public',
+    'Accept-Profile': 'public',
+  };
+  // New-format Supabase secret keys (`sb_secret_...`) are not JWTs and must be passed in `apikey`
+  // rather than as a Bearer token; legacy service_role JWTs require `Authorization: Bearer`.
+  if (!cleanKey.startsWith('sb_secret_') && !cleanKey.startsWith('sb_publishable_')) {
+    headers.Authorization = `Bearer ${cleanKey}`;
+  }
+  return headers;
+}
+
+function createServiceRoleSupabaseClient(
+  supabaseUrl: string,
+  serviceRoleKey: string,
+  options?: {
+    timeoutMs?: number;
+    onThrownError?: (err: unknown) => void;
+  }
+) {
+  const cleanKey = String(serviceRoleKey || '').trim();
+  const isNewSecretKey = cleanKey.startsWith('sb_secret_');
+  const timeoutMs = options?.timeoutMs ?? 25_000;
+  return createClient(supabaseUrl, cleanKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+    db: {
+      schema: 'public',
+    },
+    global: {
+      fetch: async (input, init) => {
+        const headers = new Headers(init?.headers);
+        headers.set('apikey', cleanKey);
+        if (isNewSecretKey) {
+          headers.delete('Authorization');
+          headers.delete('authorization');
+        } else if (!headers.has('Authorization')) {
+          headers.set('Authorization', `Bearer ${cleanKey}`);
+        }
+        const controller =
+          !init?.signal && typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+        try {
+          return await fetch(input, {
+            ...init,
+            headers,
+            ...(controller ? { signal: controller.signal } : {}),
+          });
+        } catch (err: unknown) {
+          options?.onThrownError?.(err);
+          throw err;
+        } finally {
+          if (timeoutId) clearTimeout(timeoutId);
+        }
+      },
+    },
+  });
 }
 
 function sanitizeDiagnosticText(raw: unknown, maxLen = 280): string {
@@ -378,20 +453,31 @@ export function classifyDeleteRpcFailure(params: {
     };
   }
 
-  // 2. Database Permission Denied (42501 / EXECUTE or role privilege errors)
+  // 2. Database Permission Denied / PostgREST Auth & Role Failures (42501, PGRST301-303, 401/403)
   if (
     pgCodeUpper === '42501' ||
+    pgCodeUpper === 'PGRST301' ||
+    pgCodeUpper === 'PGRST302' ||
+    pgCodeUpper === 'PGRST303' ||
+    httpStatus === 401 ||
+    httpStatus === 403 ||
     msgLower.includes('permission denied') ||
     msgLower.includes('insufficient privilege') ||
     msgLower.includes('must be owner of') ||
     msgLower.includes('cannot execute under client roles') ||
-    msgLower.includes('requires verified service_role execution')
+    msgLower.includes('requires verified service_role execution') ||
+    msgLower.includes('invalid api key') ||
+    msgLower.includes('no api key found') ||
+    msgLower.includes('jwserror') ||
+    msgLower.includes('jwt expired') ||
+    msgLower.includes('no suitable key') ||
+    msgLower.includes('anonymous access')
   ) {
     return {
       httpStatus: 403,
       code: 'RPC_PERMISSION_DENIED',
       error:
-        'Database permission denied while executing public.admin_permanently_delete_website. Verify service_role EXECUTE privileges and object ownership in Supabase. No records were deleted.',
+        'Database permission or service-role authentication was denied while executing public.admin_permanently_delete_website. Verify SUPABASE_SERVICE_ROLE_KEY and service_role EXECUTE privileges in Supabase. No records were deleted.',
     };
   }
 
@@ -412,10 +498,12 @@ export function classifyDeleteRpcFailure(params: {
     };
   }
 
-  // 4. Schema-Cache Mismatch (PostgREST PGRST002 / PGRST204 / explicit stale-cache diagnostics)
+  // 4. Schema-Cache Mismatch / Unexposed Schema (PostgREST PGRST002 / PGRST106 / PGRST204 / PGRST205 / explicit stale-cache diagnostics)
   if (
     pgCodeUpper === 'PGRST002' ||
+    pgCodeUpper === 'PGRST106' ||
     pgCodeUpper === 'PGRST204' ||
+    pgCodeUpper === 'PGRST205' ||
     pgCodeUpper === '42703' ||
     pgCodeUpper === '42P01' ||
     (pgCodeUpper === 'PGRST202' &&
@@ -1483,13 +1571,7 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       return;
     }
 
-    const serviceHeaders = {
-      apikey: env.serviceRoleKey,
-      Authorization: `Bearer ${env.serviceRoleKey}`,
-      'Content-Type': 'application/json',
-      'Content-Profile': 'public',
-      'Accept-Profile': 'public',
-    };
+    const serviceHeaders = buildServiceRoleHeaders(env.serviceRoleKey);
 
     // 3. Authoritative server-side profile role check
     const profileResp = await fetchWithTimeout(
@@ -2434,91 +2516,42 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
     const deleteReason =
       reason || 'Permanent admin deletion of website and exclusively associated store data';
 
-    // Execute SINGLE ATOMIC PostgreSQL transaction via RPC.
-    // Never silently fall back to non-atomic partial deletes if RPC fails or is absent.
-    const rpcController = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const rpcTimeoutId = rpcController ? setTimeout(() => rpcController.abort(), 25_000) : null;
-    let rpcResp: Response;
-    try {
-      rpcResp = await fetch(
-        `${env.supabaseUrl}/rest/v1/rpc/admin_permanently_delete_website`,
-        {
-          method: 'POST',
-          headers: serviceHeaders,
-          body: JSON.stringify({
-            p_website_id: websiteId,
-            p_admin_id: callerId,
-            p_confirm_subdomain: confirmSubdomain,
-            p_reason: deleteReason,
-          }),
-          ...(rpcController ? { signal: rpcController.signal } : {}),
-        }
-      );
-    } catch (rpcErr: unknown) {
-      const classified = classifyDeleteRpcFailure({
-        thrownError: rpcErr,
-        message: rpcErr instanceof Error ? rpcErr.message : String(rpcErr || ''),
-      });
-      logSafeAdminDeleteRpcError({
-        websiteId,
-        projectRef: env.projectRef,
-        pgCode:
-          rpcErr && typeof rpcErr === 'object' && 'code' in rpcErr
-            ? String((rpcErr as { code?: unknown }).code || '')
-            : null,
-        classifiedCode: classified.code,
-        rawMessage: rpcErr instanceof Error ? rpcErr.message : String(rpcErr || ''),
-      });
-      sendJson(res, classified.httpStatus, {
-        code: classified.code,
-        error: classified.error,
-      });
-      return;
-    } finally {
-      if (rpcTimeoutId) clearTimeout(rpcTimeoutId);
-    }
+    // Execute SINGLE ATOMIC PostgreSQL transaction via dedicated server-side service-role Supabase client.
+    // Never uses the caller's user JWT for RPC execution and never falls back to non-atomic partial deletes.
+    let capturedRpcThrownError: unknown = null;
+    const supabaseAdmin = createServiceRoleSupabaseClient(env.supabaseUrl, env.serviceRoleKey, {
+      timeoutMs: 25_000,
+      onThrownError: (err) => {
+        capturedRpcThrownError = err;
+      },
+    });
 
-    if (!rpcResp.ok) {
-      const rawErrText = await rpcResp.text().catch(() => '');
-      let errBody: {
-        code?: string;
-        message?: string;
-        details?: string | null;
-        hint?: string | null;
-      } | null = null;
-      if (rawErrText) {
-        try {
-          const parsedErr = JSON.parse(rawErrText);
-          if (parsedErr && typeof parsedErr === 'object' && !Array.isArray(parsedErr)) {
-            errBody = parsedErr as {
-              code?: string;
-              message?: string;
-              details?: string | null;
-              hint?: string | null;
-            };
-          }
-        } catch {
-          errBody = { message: rawErrText };
-        }
-      }
+    const rpcCallRes = await supabaseAdmin.schema('public').rpc('admin_permanently_delete_website', {
+      p_website_id: websiteId,
+      p_admin_id: callerId,
+      p_confirm_subdomain: confirmSubdomain,
+      p_reason: deleteReason,
+    });
 
-      const pgCode = errBody?.code ? String(errBody.code) : '';
-      const rawMessage = errBody?.message ? String(errBody.message) : rawErrText;
-      const rawDetails = errBody?.details ? String(errBody.details) : '';
-      const rawHint = errBody?.hint ? String(errBody.hint) : '';
+    if (rpcCallRes.error) {
+      const pgCode = rpcCallRes.error.code ? String(rpcCallRes.error.code) : '';
+      const rawMessage = rpcCallRes.error.message ? String(rpcCallRes.error.message) : '';
+      const rawDetails = rpcCallRes.error.details ? String(rpcCallRes.error.details) : '';
+      const rawHint = rpcCallRes.error.hint ? String(rpcCallRes.error.hint) : '';
 
       const classified = classifyDeleteRpcFailure({
-        httpStatus: rpcResp.status,
+        httpStatus: rpcCallRes.status,
         code: pgCode,
         message: rawMessage,
         details: rawDetails,
         hint: rawHint,
+        ...(capturedRpcThrownError ? { thrownError: capturedRpcThrownError } : {}),
       });
 
       logSafeAdminDeleteRpcError({
         websiteId,
         projectRef: env.projectRef,
-        httpStatus: rpcResp.status,
+        httpStatus: rpcCallRes.status,
         pgCode: pgCode || null,
         classifiedCode: classified.code,
         rawMessage,
@@ -2533,7 +2566,7 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
       return;
     }
 
-    const rpcResult = (await rpcResp.json().catch(() => null)) as {
+    const rpcResult = (rpcCallRes.data ?? null) as {
       success?: unknown;
       code?: unknown;
       message?: unknown;
