@@ -4,7 +4,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { PGlite } from '@electric-sql/pglite';
-import adminWebsiteActionHandler from '../api/admin-website-action';
+import adminWebsiteActionHandler, { isAllowedAdminOrigin } from '../api/admin-website-action';
 import {
   buildWebsiteProductItemFromProduct,
   mergeStoreProductsWithWebsites,
@@ -870,16 +870,84 @@ async function runTests() {
       return new Response(JSON.stringify([]), { status: 200 });
     }) as typeof fetch;
 
-    await check('2.2 /api/admin-website-action blocks storefront wildcard origin with 403', async () => {
-      const { req, res, getResult } = makeMockReqRes({
-        origin: 'https://fortyninee.amaas.xyz',
-        authorization: `Bearer ${adminToken}`,
-        body: { action: 'suspend', websiteId: WEBSITE_UUID, reason: 'test' },
-      });
-      await adminWebsiteActionHandler(req, res);
-      const out = getResult();
-      assert.equal(out.statusCode, 403);
-      assert.equal(out.json?.code, 'CORS_ORIGIN_FORBIDDEN');
+    await check('2.2 /api/admin-website-action allows amaas.xyz, app, staging, and valid single-label subdomains while strictly rejecting invalid origins on both OPTIONS and POST', async () => {
+      const allowedOrigins = [
+        'https://amaas.xyz',
+        'https://app.amaas.xyz',
+        'https://www.amaas.xyz',
+        'https://staging.amaas.xyz',
+        'https://admin.amaas.xyz',
+        'https://fortyninee.amaas.xyz',
+        'https://preview-1.amaas.xyz',
+      ];
+      for (const allowedOrigin of allowedOrigins) {
+        assert.equal(isAllowedAdminOrigin(allowedOrigin), true, `Expected allowed origin: ${allowedOrigin}`);
+        const optRes = makeMockReqRes({
+          method: 'OPTIONS',
+          origin: allowedOrigin,
+          ip: '203.0.113.199',
+        });
+        await adminWebsiteActionHandler(optRes.req, optRes.res);
+        const optOut = optRes.getResult();
+        assert.equal(optOut.statusCode, 204, `Expected 204 OPTIONS for ${allowedOrigin}`);
+        assert.equal(optOut.headers['access-control-allow-origin'], allowedOrigin);
+        assert.notEqual(optOut.headers['access-control-allow-origin'], '*');
+        assert.equal(optOut.headers.vary, 'Origin');
+
+        dbCalls = [];
+        const postRes = makeMockReqRes({
+          method: 'POST',
+          origin: allowedOrigin,
+          ip: '203.0.113.199',
+          authorization: `Bearer ${adminToken}`,
+          body: { action: 'suspend', websiteId: WEBSITE_UUID, reason: `CORS origin check ${allowedOrigin}` },
+        });
+        await adminWebsiteActionHandler(postRes.req, postRes.res);
+        const postOut = postRes.getResult();
+        assert.equal(postOut.statusCode, 200, `Expected 200 POST for ${allowedOrigin}`);
+        assert.equal(postOut.headers['access-control-allow-origin'], allowedOrigin);
+        assert.notEqual(postOut.headers['access-control-allow-origin'], '*');
+        assert.equal(postOut.headers.vary, 'Origin');
+      }
+
+      const rejectedOrigins = [
+        'https://evil.com',
+        'https://amaas.xyz.attacker.com',
+        'https://evilamaas.xyz',
+        'https://sub.staging.amaas.xyz',
+        'https://a.b.amaas.xyz',
+        'https://xn--bcher-kva.amaas.xyz',
+        'https://-bad.amaas.xyz',
+        'https://bad-.amaas.xyz',
+        'https://.amaas.xyz',
+        'http://staging.amaas.xyz',
+        'http://amaas.xyz',
+        'https://staging.amaas.xyz:8443',
+        'https://user:pass@staging.amaas.xyz',
+        'https://staging.amaas.xyz/evil',
+        'null',
+        '*',
+      ];
+      for (const badOrigin of rejectedOrigins) {
+        assert.equal(isAllowedAdminOrigin(badOrigin), false, `Expected rejected origin: ${badOrigin}`);
+        for (const method of ['OPTIONS', 'POST'] as const) {
+          dbCalls = [];
+          const { req, res, getResult } = makeMockReqRes({
+            method,
+            origin: badOrigin,
+            ip: '203.0.113.199',
+            authorization: `Bearer ${adminToken}`,
+            body: { action: 'delete', websiteId: WEBSITE_UUID, confirmSubdomain: 'fortyninee', explicitConfirmed: true },
+          });
+          await adminWebsiteActionHandler(req, res);
+          const out = getResult();
+          assert.equal(out.statusCode, 403, `Expected 403 ${method} for ${badOrigin}`);
+          assert.equal(out.json?.code, 'CORS_ORIGIN_FORBIDDEN');
+          assert.equal(out.json?.error, 'Origin not allowed.');
+          assert.equal(out.headers['access-control-allow-origin'], undefined);
+          assert.equal(dbCalls.length, 0);
+        }
+      }
     });
 
     await check('2.3 /api/admin-website-action rejects unauthenticated request with 401', async () => {
