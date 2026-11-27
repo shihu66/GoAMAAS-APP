@@ -23,9 +23,27 @@ import {
   verifyAdminTotpChallenge,
   verifyServerAdminSession,
 } from '../../lib/adminSecurity';
-import { AdminMfaRecoveryGuide } from '../admin/AdminTotpSetupFlow';
+import {
+  AdminMfaRecoveryGuide,
+  AdminTotpSetupAndVerifyPanel,
+} from '../admin/AdminTotpSetupFlow';
 import { notifyAdminServiceWorkerSignOut, useAdminPWA } from '../../hooks/useAdminPWA';
 import { useApp } from '../../context/AppContext';
+
+export function isAdminProtectedAccessGranted(
+  verification: AdminVerificationResult | null
+): boolean {
+  return Boolean(
+    verification &&
+      verification.status === 'authorized' &&
+      verification.admin &&
+      isAuthorizedAdminEmail(verification.admin.email) &&
+      verification.mfa.isMfaEnrolled &&
+      verification.mfa.verifiedTotpFactors.length > 0 &&
+      verification.mfa.isMfaVerifiedForSession &&
+      verification.mfa.currentLevel === 'aal2'
+  );
+}
 
 interface AdminSecurityContextValue {
   verifiedAdmin: VerifiedAdminIdentity;
@@ -357,7 +375,40 @@ export const AdminProtectedRoute: React.FC<AdminProtectedRouteProps> = ({ childr
     );
   }
 
-  // 6. Mandatory Step-Up TOTP MFA Gate (when verified TOTP factor is enrolled, require AAL2)
+  // 6A. Mandatory First-Time TOTP Enrollment Gate (zero AAL1 admin panel access)
+  if (currentStatus === 'mfa_setup_required' && verification) {
+    if (!verification.admin || !isAuthorizedAdminEmail(verification.admin.email)) {
+      return <Navigate to="/admin/login?denied=1" replace />;
+    }
+
+    return (
+      <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex items-center justify-center p-6">
+        <div className="w-full max-w-lg rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-7 space-y-5 shadow-sm">
+          <AdminTotpSetupAndVerifyPanel
+            mfa={verification.mfa}
+            adminId={verification.admin.id}
+            adminName={verification.admin.name}
+            isOnline={isOnline}
+            autoStartEnroll
+            compact
+            onRefreshVerification={() => runVerification({ silent: true })}
+            onAal2Confirmed={async () => {
+              await runVerification();
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => void secureSignOut()}
+            className="w-full min-h-[44px] rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-semibold text-xs cursor-pointer"
+          >
+            Cancel &amp; Sign Out
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // 6B. Mandatory Step-Up TOTP MFA Gate (when verified TOTP factor is enrolled, require AAL2)
   if (currentStatus === 'mfa_required' && verification) {
     const primaryFactor = verification.mfa.verifiedTotpFactors[0];
 
@@ -464,7 +515,7 @@ export const AdminProtectedRoute: React.FC<AdminProtectedRouteProps> = ({ childr
                 await refreshAndInspectAdminMfaState();
                 const refreshed = await runVerification({ silent: true });
                 if (
-                  refreshed.status === 'authorized' &&
+                  (refreshed.status === 'mfa_setup_required' || refreshed.status === 'authorized') &&
                   !refreshed.mfa.isMfaEnrolled
                 ) {
                   return { removed: true };
@@ -478,8 +529,8 @@ export const AdminProtectedRoute: React.FC<AdminProtectedRouteProps> = ({ childr
     );
   }
 
-  // 7. Verified Platform Admin (authorized + email match)
-  if (!verification?.admin || !isAuthorizedAdminEmail(verification.admin.email)) {
+  // 7. Verified Platform Admin (authorized + email match + AAL2 strictly enforced)
+  if (!isAdminProtectedAccessGranted(verification) || !verification?.admin) {
     return <Navigate to="/admin/login?denied=1" replace />;
   }
 
