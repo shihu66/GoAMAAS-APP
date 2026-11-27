@@ -15,6 +15,7 @@ import {
   isSupabaseConfigured,
   supabaseProjectRef,
   supabaseEnv,
+  isStagingSupabaseRuntime,
   checkGoogleOAuthProviderStatus,
   signOutFromSupabase,
   signInWithGoogle,
@@ -626,7 +627,7 @@ export const AdminLoginPage: React.FC = () => {
                 </div>
               )}
 
-              {(supabaseEnv === 'staging' || supabaseProjectRef === 'umiheyukaddfaupsyooh') && (
+              {isStagingSupabaseRuntime() && (
                 <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
                   <p className="text-[11px] text-amber-600 dark:text-amber-400 text-center font-medium">
                     Staging Environment Mode (umiheyukaddfaupsyooh)

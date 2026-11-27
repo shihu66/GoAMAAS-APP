@@ -142,7 +142,7 @@ const getEnvVar = (key: string): string => {
   return '';
 };
 
-const supabaseUrl =
+export const supabaseUrl =
   getEnvVar('VITE_SUPABASE_URL') ||
   getEnvVar('NEXT_PUBLIC_SUPABASE_URL') ||
   getEnvVar('SUPABASE_URL');
@@ -153,6 +153,9 @@ const supabaseAnonKey =
   getEnvVar('SUPABASE_ANON_KEY') ||
   getEnvVar('SUPABASE_PUBLISHABLE_KEY');
 export const supabaseEnv = getEnvVar('VITE_SUPABASE_ENV') || getEnvVar('SUPABASE_ENV');
+
+export const STAGING_SUPABASE_PROJECT_REF = 'umiheyukaddfaupsyooh';
+export const STAGING_SUPABASE_URL = `https://${STAGING_SUPABASE_PROJECT_REF}.supabase.co`;
 
 function decodeBase64UrlJson(segment: string): Record<string, unknown> | null {
   try {
@@ -241,6 +244,22 @@ const credentialCheck = validateSupabaseClientCredentials(supabaseUrl, supabaseA
 
 // Check if credentials exist, are non-secret public values, and belong to the same Supabase project
 export const isSupabaseConfigured: boolean = credentialCheck.valid;
+
+export function isStagingSupabaseRuntime(
+  url: string = supabaseUrl,
+  configured: boolean = isSupabaseConfigured
+): boolean {
+  if (!configured) return false;
+  try {
+    const parsed = new URL((url || '').trim());
+    return (
+      parsed.protocol === 'https:' &&
+      parsed.hostname.toLowerCase() === `${STAGING_SUPABASE_PROJECT_REF}.supabase.co`
+    );
+  } catch {
+    return false;
+  }
+}
 
 export interface SupabaseConfigStatus {
   isConfigured: boolean;
