@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-route
 import { AppProvider } from './context/AppContext';
 import { LanguageProvider } from './context/LanguageContext';
 import { validateSubdomainFormat, consumeRootOAuthBridgeRedirect } from './lib/supabase';
+import { StagingBanner } from './components/common/StagingBanner';
 
 // Layouts
 import { PublicLayout } from './components/layout/PublicLayout';
@@ -101,6 +102,7 @@ export default function App() {
     <LanguageProvider>
       <AppProvider>
         <BrowserRouter>
+          <StagingBanner />
           {isTenantSubdomain && (
           <OAuthCallbackRedirectBridge>
           <Routes>

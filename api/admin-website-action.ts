@@ -659,12 +659,29 @@ function isSafeOwnedScopePath(candidate: string, ownerUserId: string, scopeId: s
   return candidate.toLowerCase().startsWith(expectedPrefix);
 }
 
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs = 15_000
+): Promise<Response> {
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    return await fetch(url, {
+      ...init,
+      ...(controller && !init.signal ? { signal: controller.signal } : {}),
+    });
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
 async function fetchJsonAllowingMissingColumn(
   url: string,
   headers: Record<string, string>
 ): Promise<{ ok: boolean; missingColumn: boolean; rows: Array<Record<string, unknown>> }> {
   try {
-    const resp = await fetch(url, { method: 'GET', headers });
+    const resp = await fetchWithTimeout(url, { method: 'GET', headers }, 12_000);
     if (resp.ok) {
       const data = await resp.json().catch(() => null);
       return {
@@ -705,16 +722,20 @@ async function listStorageObjectsRecursively(
   const pageLimit = 1000;
   try {
     while (outPaths.size < 5000) {
-      const resp = await fetch(`${supabaseUrl}/storage/v1/object/list/${WEBSITE_ASSETS_BUCKET}`, {
-        method: 'POST',
-        headers: serviceHeaders,
-        body: JSON.stringify({
-          prefix: cleanPrefix,
-          limit: pageLimit,
-          offset,
-          sortBy: { column: 'name', order: 'asc' },
-        }),
-      });
+      const resp = await fetchWithTimeout(
+        `${supabaseUrl}/storage/v1/object/list/${WEBSITE_ASSETS_BUCKET}`,
+        {
+          method: 'POST',
+          headers: serviceHeaders,
+          body: JSON.stringify({
+            prefix: cleanPrefix,
+            limit: pageLimit,
+            offset,
+            sortBy: { column: 'name', order: 'asc' },
+          }),
+        },
+        15_000
+      );
       if (!resp.ok) return { hadError: true };
       const entries = (await resp.json()) as Array<{ id?: string | null; name?: string | null }>;
       if (!Array.isArray(entries) || entries.length === 0) break;
@@ -777,7 +798,7 @@ async function verifyStoragePathsGloballyViaRpc(
     };
   }
   try {
-    const resp = await fetch(
+    const resp = await fetchWithTimeout(
       `${supabaseUrl}/rest/v1/rpc/admin_verify_storage_paths_for_deletion`,
       {
         method: 'POST',
@@ -788,7 +809,8 @@ async function verifyStoragePathsGloballyViaRpc(
           p_exclude_website_id: params.excludeWebsiteId,
           ...(fallbackToken ? { p_verification_token: fallbackToken } : {}),
         }),
-      }
+      },
+      15_000
     );
     if (!resp.ok) {
       return {
@@ -948,11 +970,15 @@ async function removeStorageObjectsBatch(
     if (safeChunk.length === 0) continue;
 
     try {
-      const resp = await fetch(`${supabaseUrl}/storage/v1/object/${WEBSITE_ASSETS_BUCKET}`, {
-        method: 'DELETE',
-        headers: serviceHeaders,
-        body: JSON.stringify({ prefixes: safeChunk }),
-      });
+      const resp = await fetchWithTimeout(
+        `${supabaseUrl}/storage/v1/object/${WEBSITE_ASSETS_BUCKET}`,
+        {
+          method: 'DELETE',
+          headers: serviceHeaders,
+          body: JSON.stringify({ prefixes: safeChunk }),
+        },
+        20_000
+      );
       if (resp.ok) {
         const respJson = await resp.json().catch(() => null);
         let batchDeleted: string[] = [];
@@ -960,15 +986,28 @@ async function removeStorageObjectsBatch(
           const safeMap = new Map<string, string>();
           for (const sp of safeChunk) safeMap.set(sp.trim().toLowerCase(), sp);
           for (const item of respJson) {
-            const rawName =
+            let rawName =
               item && typeof item === 'object' && typeof (item as { name?: unknown }).name === 'string'
                 ? String((item as { name: string }).name).trim()
                 : typeof item === 'string'
                 ? item.trim()
                 : '';
+            rawName = rawName.replace(/^\/+/, '');
+            if (rawName.toLowerCase().startsWith(`${WEBSITE_ASSETS_BUCKET}/`)) {
+              rawName = rawName.slice(WEBSITE_ASSETS_BUCKET.length + 1);
+            }
             if (!rawName) continue;
             const matched = safeMap.get(rawName.toLowerCase());
             if (matched) batchDeleted.push(matched);
+          }
+          const confirmedLower = new Set(batchDeleted.map((p) => p.trim().toLowerCase()));
+          const unconfirmed = safeChunk.filter(
+            (sp) => !confirmedLower.has(sp.trim().toLowerCase())
+          );
+          if (unconfirmed.length > 0) {
+            failedPaths.push(...unconfirmed);
+            warning =
+              'Some storage files could not be confirmed deleted after database deletion and remain queued for retry.';
           }
         } else {
           batchDeleted = safeChunk;
@@ -1183,29 +1222,33 @@ async function recordStorageCleanupResultBestEffort(
   deletedObjectsCount?: number;
 }> {
   try {
-    const resp = await fetch(`${supabaseUrl}/rest/v1/rpc/admin_record_website_storage_cleanup_result`, {
-      method: 'POST',
-      headers: serviceHeaders,
-      body: JSON.stringify({
-        p_website_id: params.websiteId,
-        p_admin_id: params.adminId,
-        p_status: params.status,
-        p_deleted_count: params.deletedCount,
-        p_failed_paths: params.failedPaths.slice(0, 500),
-        p_error: params.error || null,
-        p_manual_review_paths: params.manualReviewPaths
-          ? params.manualReviewPaths.slice(0, 500)
-          : null,
-        p_deleted_paths: Array.isArray(params.deletedPaths)
-          ? params.deletedPaths.slice(0, 1000)
-          : [],
-        p_verification_token:
-          typeof params.verificationToken === 'string' &&
-          UUID_REGEX.test(params.verificationToken.trim())
-            ? params.verificationToken.trim()
+    const resp = await fetchWithTimeout(
+      `${supabaseUrl}/rest/v1/rpc/admin_record_website_storage_cleanup_result`,
+      {
+        method: 'POST',
+        headers: serviceHeaders,
+        body: JSON.stringify({
+          p_website_id: params.websiteId,
+          p_admin_id: params.adminId,
+          p_status: params.status,
+          p_deleted_count: params.deletedCount,
+          p_failed_paths: params.failedPaths.slice(0, 500),
+          p_error: params.error || null,
+          p_manual_review_paths: params.manualReviewPaths
+            ? params.manualReviewPaths.slice(0, 500)
             : null,
-      }),
-    });
+          p_deleted_paths: Array.isArray(params.deletedPaths)
+            ? params.deletedPaths.slice(0, 1000)
+            : [],
+          p_verification_token:
+            typeof params.verificationToken === 'string' &&
+            UUID_REGEX.test(params.verificationToken.trim())
+              ? params.verificationToken.trim()
+              : null,
+        }),
+      },
+      12_000
+    );
     if (!resp.ok) {
       return { recorded: false, lateConcurrentReferencePaths: [] };
     }
@@ -1362,13 +1405,17 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
 
   try {
     // 1. Validate caller JWT directly with Supabase Auth
-    const authResp = await fetch(`${env.supabaseUrl}/auth/v1/user`, {
-      method: 'GET',
-      headers: {
-        apikey: env.anonKey || env.serviceRoleKey,
-        Authorization: `Bearer ${accessToken}`,
+    const authResp = await fetchWithTimeout(
+      `${env.supabaseUrl}/auth/v1/user`,
+      {
+        method: 'GET',
+        headers: {
+          apikey: env.anonKey || env.serviceRoleKey,
+          Authorization: `Bearer ${accessToken}`,
+        },
       },
-    });
+      12_000
+    );
 
     if (!authResp.ok) {
       sendJson(res, 401, {
@@ -1386,6 +1433,16 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
         authUser?.confirmed_at ||
         authUser?.user_metadata?.email_verified === true
     );
+    const jwtClaims = decodeJwtClaims(accessToken);
+    const jwtSub = typeof jwtClaims?.sub === 'string' ? jwtClaims.sub.trim() : '';
+
+    if (jwtSub && callerId && jwtSub.toLowerCase() !== callerId.toLowerCase()) {
+      sendJson(res, 401, {
+        code: 'INVALID_SESSION',
+        error: 'Administrator token subject mismatch. Please sign in again.',
+      });
+      return;
+    }
 
     if (!UUID_REGEX.test(callerId) || !callerEmail || !isEmailVerified) {
       sendJson(res, 403, {
@@ -1408,7 +1465,6 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
     const hasVerifiedTotp = Array.isArray(authUser?.factors)
       ? authUser.factors.some((f) => f?.factor_type === 'totp' && f?.status === 'verified')
       : false;
-    const jwtClaims = decodeJwtClaims(accessToken);
     const isAal2 = jwtClaims?.aal === 'aal2';
     if (action === 'delete' || action === 'retry_storage_cleanup') {
       if (!hasVerifiedTotp || !isAal2) {
@@ -1436,9 +1492,10 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
     };
 
     // 3. Authoritative server-side profile role check
-    const profileResp = await fetch(
+    const profileResp = await fetchWithTimeout(
       `${env.supabaseUrl}/rest/v1/profiles?id=eq.${encodeURIComponent(callerId)}&select=id,email,role&limit=1`,
-      { method: 'GET', headers: serviceHeaders }
+      { method: 'GET', headers: serviceHeaders },
+      12_000
     );
     if (!profileResp.ok) {
       sendJson(res, 502, {
@@ -1591,6 +1648,37 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
           : '';
       const jobIsSharedStore = targetJob.isSharedStore === true;
       const jobStorePreserved = targetJob.storePreserved === true || jobDeletedStoreId === null;
+
+      if (!jobOwnerId) {
+        const hasPendingObjects =
+          (Array.isArray(targetJob.cleanupObjectPaths) && targetJob.cleanupObjectPaths.length > 0) ||
+          (Array.isArray(targetJob.failedObjectPaths) && targetJob.failedObjectPaths.length > 0);
+        if (!hasPendingObjects && existingManualPaths.length > 0) {
+          sendJson(res, 200, {
+            ok: true,
+            success: true,
+            idempotent: false,
+            code: 'STORAGE_CLEANUP_MANUAL_REVIEW_REQUIRED',
+            message:
+              'Deleted website had no registered owner; unverified storage assets were preserved for manual review.',
+            websiteId,
+            cleanupStatus: 'manual_review_required',
+            deletedStorageObjects: 0,
+            failedStoragePaths: [],
+            manualReviewRequired: true,
+            manualReviewAssetPaths: existingManualPaths,
+            preservedReferencedAssetPaths: existingPreservedRefPaths,
+            storageCleanupWarning:
+              'Owner ID is absent for this legacy record; referenced storage paths require manual inspection before any removal.',
+          });
+          return;
+        }
+        sendJson(res, 409, {
+          code: 'AMBIGUOUS_CLEANUP_SCOPE',
+          error: 'Storage cleanup job owner metadata is missing or ambiguous; refusing to delete objects.',
+        });
+        return;
+      }
 
       if (
         !UUID_REGEX.test(jobOwnerId) ||
@@ -1889,11 +1977,12 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
     }
 
     // 4. Fetch exact target subscribed_websites record
-    const siteResp = await fetch(
+    const siteResp = await fetchWithTimeout(
       `${env.supabaseUrl}/rest/v1/subscribed_websites?id=eq.${encodeURIComponent(
         websiteId
       )}&select=id,user_id,store_id,business_name,subdomain,full_domain,status,deployment_status,payment_status,current_period_end,grace_period_end,config&limit=1`,
-      { method: 'GET', headers: serviceHeaders }
+      { method: 'GET', headers: serviceHeaders },
+      12_000
     );
     if (!siteResp.ok) {
       sendJson(res, 502, {
@@ -2921,7 +3010,33 @@ export default async function handler(req: RequestWithBody, res: ServerResponse)
         globalAuthUsersProtected: true,
       },
     });
-  } catch {
+  } catch (err: unknown) {
+    const classified = classifyDeleteRpcFailure({
+      thrownError: err,
+      message: err instanceof Error ? err.message : String(err || ''),
+    });
+    if (classified.code === 'DATABASE_TIMEOUT') {
+      sendJson(res, 504, {
+        code: 'SUPABASE_CONNECTION_TIMEOUT',
+        error: 'Timed out while communicating with Supabase. No database changes were confirmed.',
+      });
+      return;
+    }
+    const errMsgLower = (err instanceof Error ? err.message : String(err || '')).toLowerCase();
+    if (
+      err instanceof TypeError ||
+      errMsgLower.includes('fetch') ||
+      errMsgLower.includes('network') ||
+      errMsgLower.includes('econn') ||
+      errMsgLower.includes('enotfound') ||
+      errMsgLower.includes('socket')
+    ) {
+      sendJson(res, 502, {
+        code: 'SUPABASE_CONNECTION_FAILED',
+        error: 'Unable to reach Supabase services. Operation aborted without partial changes.',
+      });
+      return;
+    }
     sendJson(res, 500, {
       code: 'INTERNAL_ADMIN_ACTION_ERROR',
       error: 'Unexpected server error while processing administrative website action.',

@@ -1,0 +1,5 @@
+{
+  "VITE_SUPABASE_URL": "https://umiheyukaddfaupsyooh.supabase.co",
+  "VITE_SUPABASE_ANON_KEY": "sb_publishable_7TtAiiuodpRVh1YxxNyZTQ_tVjv4VL_",
+  "VITE_SUPABASE_ENV": "staging"
+}

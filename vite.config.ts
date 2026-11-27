@@ -2,6 +2,7 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import fs from 'fs';
+import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { defineConfig, loadEnv } from 'vite';
 import resolveTenantHandler from './api/resolve-tenant.ts';
@@ -10,18 +11,79 @@ import publicOrderHandler from './api/public-order.ts';
 import publicInquiryHandler from './api/public-inquiry.ts';
 import customerPortalHandler from './api/customer-portal.ts';
 import adminWebsiteActionHandler from './api/admin-website-action.ts';
+import adminDiagnosticHandler from './api/admin-diagnostic.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+function detectGitBranchName(): string {
+  try {
+    const ref = execSync('git rev-parse --abbrev-ref HEAD', {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 1500,
+    })
+      .toString()
+      .trim()
+      .toLowerCase();
+    if (ref && ref !== 'head') return ref;
+
+    const decorations = execSync('git log -1 --format=%D', {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 1500,
+    })
+      .toString()
+      .toLowerCase();
+    if (/\b(origin\/)?staging\b/.test(decorations)) return 'staging';
+    if (/\b(origin\/)?main\b/.test(decorations)) return 'main';
+  } catch {
+    // Ignore when .git metadata is unavailable
+  }
+  return '';
+}
+
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '');
+  const envGitBranch = (process.env.VERCEL_GIT_COMMIT_REF || process.env.GIT_BRANCH || '').trim().toLowerCase();
+  const detectedGitBranch = envGitBranch || detectGitBranchName();
+  const vercelEnv = (process.env.VERCEL_ENV || '').trim().toLowerCase();
+  const explicitEnv = (process.env.VITE_SUPABASE_ENV || '').trim().toLowerCase();
+  const isVercelBuild = process.env.VERCEL === '1' || Boolean(process.env.VERCEL_URL);
+  const stagingEnvPath = path.resolve(process.cwd(), '.env.staging');
+  const stagingConfigJsonPath = path.resolve(process.cwd(), 'staging.config.json');
+  const hasStagingEnvFile = fs.existsSync(stagingEnvPath);
+  const hasStagingConfigJson = fs.existsSync(stagingConfigJsonPath);
+
+  const isMainOrProduction = vercelEnv === 'production' || detectedGitBranch === 'main';
+
+  // Staging detection:
+  // 1. Vite mode is explicitly 'staging' (e.g. npm run build:staging / npm run dev:staging / scripts/vercel-build.mjs)
+  // 2. VITE_SUPABASE_ENV is set to 'staging'
+  // 3. Git branch (via VERCEL_GIT_COMMIT_REF, GIT_BRANCH, or git metadata) is 'staging' (or starts with staging/stage)
+  // 4. Vercel preview/non-production build where .env.staging or staging.config.json is present on the staging branch
+  const isStaging =
+    !isMainOrProduction &&
+    (mode === 'staging' ||
+      explicitEnv === 'staging' ||
+      detectedGitBranch === 'staging' ||
+      detectedGitBranch.startsWith('staging') ||
+      detectedGitBranch.startsWith('stage') ||
+      (isVercelBuild && (hasStagingEnvFile || hasStagingConfigJson)));
+
+  const effectiveMode = isStaging ? 'staging' : mode;
+  const env = loadEnv(effectiveMode, process.cwd(), '');
+
+  // Separate environment file scan order:
+  // If Staging: prioritize .env.staging.local and .env.staging
+  // If Production/main: strictly avoid .env.staging to protect Production from bleed-through
+  const envFilesToScan = isStaging
+    ? ['.env.staging.local', '.env.staging', '.env.local', '.env']
+    : ['.env.production.local', '.env.production', '.env.local', '.env'];
 
   let localUrl = '';
   let localKey = '';
-  let localEnv = '';
+  let localEnv = isStaging ? 'staging' : '';
   let localServiceRoleKey = '';
-  for (const f of ['.env.local', '.env']) {
+
+  for (const f of envFilesToScan) {
     if (fs.existsSync(f)) {
       const content = fs.readFileSync(f, 'utf8');
       for (const line of content.split('\n')) {
@@ -47,25 +109,62 @@ export default defineConfig(({ mode }) => {
     if (localUrl && localKey) break;
   }
 
+  // Non-dotfile fallback for staging branch if .env.staging was omitted during Git sync
+  if (isStaging && (!localUrl || !localKey) && hasStagingConfigJson) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(stagingConfigJsonPath, 'utf8')) as Record<string, string>;
+      if (!localUrl && typeof parsed.VITE_SUPABASE_URL === 'string' && parsed.VITE_SUPABASE_URL.startsWith('https://')) {
+        localUrl = parsed.VITE_SUPABASE_URL.trim();
+      }
+      if (!localKey && typeof parsed.VITE_SUPABASE_ANON_KEY === 'string' && parsed.VITE_SUPABASE_ANON_KEY.trim()) {
+        localKey = parsed.VITE_SUPABASE_ANON_KEY.trim();
+      }
+      if (!localEnv && typeof parsed.VITE_SUPABASE_ENV === 'string' && parsed.VITE_SUPABASE_ENV.trim()) {
+        localEnv = parsed.VITE_SUPABASE_ENV.trim();
+      }
+    } catch {
+      // Ignore malformed staging.config.json
+    }
+  }
+
   // Server-only environment hydration for /api/* handlers (NEVER injected into Vite define / client bundle)
   if (!process.env.SUPABASE_SERVICE_ROLE_KEY && (env.SUPABASE_SERVICE_ROLE_KEY || localServiceRoleKey)) {
     process.env.SUPABASE_SERVICE_ROLE_KEY = (env.SUPABASE_SERVICE_ROLE_KEY || localServiceRoleKey).trim();
   }
 
-  // Strictly resolve configured public client credentials (process.env > Vite mode env > local .env fallback)
-  const rawUrl = process.env.VITE_SUPABASE_URL || env.VITE_SUPABASE_URL || localUrl || '';
+  // Strictly resolve configured public client credentials:
+  // In Staging mode, .env.staging values take precedence over any inherited non-staging process.env overrides
+  // so Vercel shared/production env vars cannot hijack staging builds.
+  const processUrl = (process.env.VITE_SUPABASE_URL || '').trim();
+  const processKey = (process.env.VITE_SUPABASE_ANON_KEY || '').trim();
+  const processPointsToStaging = processUrl.includes('umiheyukaddfaupsyooh');
+
+  const rawUrl = isStaging
+    ? (processPointsToStaging ? processUrl : '') || localUrl || env.VITE_SUPABASE_URL || ''
+    : processUrl || env.VITE_SUPABASE_URL || localUrl || '';
   const supabaseUrl =
     rawUrl.trim().startsWith('https://') && rawUrl.trim() !== 'https://your-project.supabase.co'
       ? rawUrl.trim()
       : '';
 
-  const rawKey = process.env.VITE_SUPABASE_ANON_KEY || env.VITE_SUPABASE_ANON_KEY || localKey || '';
+  const rawKey = isStaging
+    ? (processPointsToStaging && processKey ? processKey : '') || localKey || env.VITE_SUPABASE_ANON_KEY || ''
+    : processKey || env.VITE_SUPABASE_ANON_KEY || localKey || '';
   const supabaseAnonKey =
     rawKey.trim() && !rawKey.trim().startsWith('sb_secret_')
       ? rawKey.trim()
       : '';
 
-  const supabaseEnv = (process.env.VITE_SUPABASE_ENV || env.VITE_SUPABASE_ENV || localEnv || '').trim();
+  const supabaseEnv = (
+    isStaging
+      ? 'staging'
+      : (process.env.VITE_SUPABASE_ENV || env.VITE_SUPABASE_ENV || localEnv || '')
+  ).trim();
+
+  const resolvedProjectRef = supabaseUrl.match(/^https:\/\/([a-z0-9-]+)\.supabase\.co/i)?.[1] || 'none';
+  console.log(
+    `[vite-config] mode=${mode}, effectiveMode=${effectiveMode}, isStaging=${isStaging}, gitBranch=${detectedGitBranch || 'unset'}, vercelEnv=${vercelEnv || 'unset'}, hasStagingEnvFile=${hasStagingEnvFile}, hasStagingConfigJson=${hasStagingConfigJson}, supabaseProjectRef=${resolvedProjectRef}, supabaseEnv=${supabaseEnv || 'unset'}`
+  );
 
   const resolveTenantApiPlugin = {
     name: 'goamaas-resolve-tenant-api',
@@ -159,6 +258,22 @@ export default defineConfig(({ mode }) => {
                 success: false,
                 code: 'INTERNAL_ADMIN_ACTION_ERROR',
                 error: 'Server error handling administrative website action.',
+              })
+            );
+          }
+          return;
+        }
+        if (pathname === '/api/admin-diagnostic') {
+          try {
+            await adminDiagnosticHandler(req, res);
+          } catch {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(
+              JSON.stringify({
+                ok: false,
+                code: 'INTERNAL_DIAGNOSTIC_ERROR',
+                error: 'Server error handling admin diagnostic.',
               })
             );
           }

@@ -22,6 +22,9 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql IMMUTABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp;
 
+REVOKE ALL ON FUNCTION public.is_authorized_admin_email(TEXT) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.is_authorized_admin_email(TEXT) TO authenticated, service_role;
+
 CREATE OR REPLACE FUNCTION public.is_verified_platform_admin(
   p_user_id UUID DEFAULT auth.uid()
 )
@@ -106,6 +109,12 @@ BEGIN
   return true;
 END;
 $$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp;
+
+REVOKE ALL ON FUNCTION public.is_verified_platform_admin(UUID) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.is_verified_platform_admin(UUID) TO authenticated, service_role;
+
+REVOKE ALL ON FUNCTION public.is_verified_aal2_platform_admin(UUID) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.is_verified_aal2_platform_admin(UUID) TO authenticated, service_role;
 
 -- 2. Protect profiles role updates and inserts
 CREATE OR REPLACE FUNCTION public.protect_profile_role()
@@ -197,3 +206,42 @@ WHERE role = 'admin'
 CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_single_admin_only
   ON public.profiles ((role))
   WHERE role = 'admin';
+
+REVOKE ALL ON FUNCTION public.protect_profile_role() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.protect_profile_role() TO service_role;
+
+REVOKE ALL ON FUNCTION public.protect_profile_role_insert() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.protect_profile_role_insert() TO service_role;
+
+DO $$
+DECLARE
+  v_pr_owner_oid OID;
+  v_pr_owner NAME;
+  v_fn RECORD;
+BEGIN
+  SELECT c.relowner, r.rolname
+  INTO v_pr_owner_oid, v_pr_owner
+  FROM pg_catalog.pg_class c
+  JOIN pg_catalog.pg_roles r ON r.oid = c.relowner
+  WHERE c.oid = 'public.payment_requests'::pg_catalog.regclass;
+
+  IF v_pr_owner IS NOT NULL AND v_pr_owner NOT IN ('anon', 'authenticated', 'service_role') THEN
+    FOR v_fn IN (
+      SELECT p.oid, p.proowner
+      FROM pg_catalog.pg_proc p
+      WHERE p.oid IN (
+        'public.is_authorized_admin_email(text)'::pg_catalog.regprocedure,
+        'public.is_verified_platform_admin(uuid)'::pg_catalog.regprocedure,
+        'public.is_verified_aal2_platform_admin(uuid)'::pg_catalog.regprocedure,
+        'public.protect_profile_role()'::pg_catalog.regprocedure,
+        'public.protect_profile_role_insert()'::pg_catalog.regprocedure
+      )
+    ) LOOP
+      IF v_fn.proowner IS DISTINCT FROM v_pr_owner_oid THEN
+        EXECUTE format('ALTER FUNCTION %s OWNER TO %I', v_fn.oid::pg_catalog.regprocedure, v_pr_owner);
+      END IF;
+    END LOOP;
+  END IF;
+END $$;
+
+NOTIFY pgrst, 'reload schema';

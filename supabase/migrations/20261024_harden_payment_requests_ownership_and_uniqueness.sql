@@ -24,6 +24,8 @@
 -- --------------------------------------------------------------------------------
 -- 1. Prerequisite Validation: Verify required tables, columns, and security helpers
 -- --------------------------------------------------------------------------------
+BEGIN;
+
 DO $$
 DECLARE
   v_missing_roles TEXT[];
@@ -258,6 +260,314 @@ END $$;
 -- --------------------------------------------------------------------------------
 -- 3. Concurrency-Safe Partial Unique Indexes for Reference & Pending Service Guards
 -- --------------------------------------------------------------------------------
+-- Inspect all three existing index names BEFORE creating replacements so any malformed
+-- or outdated non-constraint-backed index is safely dropped and rebuilt in place, while
+-- any malformed constraint-backed index aborts the transaction cleanly without dropping its constraint.
+DO $$
+DECLARE
+  v_idx_name TEXT;
+  v_idx_rec RECORD;
+  v_is_constraint BOOLEAN;
+  v_att_user_id SMALLINT;
+  v_att_service_type SMALLINT;
+  v_coll_user_id OID;
+  v_coll_service_type OID;
+  v_coll_service_id OID;
+  v_coll_transaction_id OID;
+  v_coll_bank_reference OID;
+  v_opc_text_ops OID;
+  v_opc_uuid_ops OID;
+  v_ws_lit TEXT := pg_catalog.quote_literal(E' \t\n\r');
+  v_full_def TEXT;
+  v_col1_expr TEXT;
+  v_col2_expr TEXT;
+  v_col3_expr TEXT;
+  v_pred_expr TEXT;
+  v_pred_ok BOOLEAN;
+  v_idx_ok BOOLEAN;
+BEGIN
+  SELECT attnum, attcollation INTO v_att_user_id, v_coll_user_id
+  FROM pg_catalog.pg_attribute
+  WHERE attrelid = 'public.payment_requests'::pg_catalog.regclass
+    AND attname = 'user_id'
+    AND NOT attisdropped;
+
+  SELECT attnum, attcollation INTO v_att_service_type, v_coll_service_type
+  FROM pg_catalog.pg_attribute
+  WHERE attrelid = 'public.payment_requests'::pg_catalog.regclass
+    AND attname = 'service_type'
+    AND NOT attisdropped;
+
+  SELECT attcollation INTO v_coll_service_id
+  FROM pg_catalog.pg_attribute
+  WHERE attrelid = 'public.payment_requests'::pg_catalog.regclass
+    AND attname = 'service_id'
+    AND NOT attisdropped;
+
+  SELECT attcollation INTO v_coll_transaction_id
+  FROM pg_catalog.pg_attribute
+  WHERE attrelid = 'public.payment_requests'::pg_catalog.regclass
+    AND attname = 'transaction_id'
+    AND NOT attisdropped;
+
+  SELECT attcollation INTO v_coll_bank_reference
+  FROM pg_catalog.pg_attribute
+  WHERE attrelid = 'public.payment_requests'::pg_catalog.regclass
+    AND attname = 'bank_reference'
+    AND NOT attisdropped;
+
+  SELECT oc.oid INTO v_opc_text_ops
+  FROM pg_catalog.pg_opclass oc
+  JOIN pg_catalog.pg_namespace ocn ON ocn.oid = oc.opcnamespace
+  JOIN pg_catalog.pg_am am ON am.oid = oc.opcmethod
+  WHERE ocn.nspname = 'pg_catalog'
+    AND am.amname = 'btree'
+    AND oc.opcname = 'text_ops'
+    AND oc.opcintype = 'text'::pg_catalog.regtype;
+
+  SELECT oc.oid INTO v_opc_uuid_ops
+  FROM pg_catalog.pg_opclass oc
+  JOIN pg_catalog.pg_namespace ocn ON ocn.oid = oc.opcnamespace
+  JOIN pg_catalog.pg_am am ON am.oid = oc.opcmethod
+  WHERE ocn.nspname = 'pg_catalog'
+    AND am.amname = 'btree'
+    AND oc.opcname = 'uuid_ops'
+    AND oc.opcintype = 'uuid'::pg_catalog.regtype;
+
+  IF v_att_user_id IS NULL
+     OR v_att_service_type IS NULL
+     OR v_coll_user_id IS NULL
+     OR v_coll_service_type IS NULL
+     OR v_coll_service_id IS NULL
+     OR v_coll_transaction_id IS NULL
+     OR v_coll_bank_reference IS NULL
+     OR v_opc_text_ops IS NULL
+     OR v_opc_uuid_ops IS NULL THEN
+    RAISE EXCEPTION 'Prerequisite check failed: Could not resolve column metadata, collations, or btree operator classes for public.payment_requests.';
+  END IF;
+
+  FOREACH v_idx_name IN ARRAY ARRAY[
+    'uq_payment_requests_active_transaction_id',
+    'uq_payment_requests_active_bank_reference',
+    'uq_payment_requests_pending_user_service'
+  ] LOOP
+    SELECT
+      idx.oid,
+      idx.relkind,
+      i.indrelid,
+      am.amname,
+      i.indisunique,
+      i.indisvalid,
+      i.indisready,
+      i.indimmediate,
+      i.indisexclusion,
+      i.indnatts,
+      i.indnkeyatts,
+      (SELECT count(*)::INT FROM pg_catalog.unnest(i.indkey::pg_catalog.int2[]) u) AS key_len,
+      (SELECT u.val FROM pg_catalog.unnest(i.indkey::pg_catalog.int2[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 1) AS key_1,
+      (SELECT u.val FROM pg_catalog.unnest(i.indkey::pg_catalog.int2[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 2) AS key_2,
+      (SELECT u.val FROM pg_catalog.unnest(i.indkey::pg_catalog.int2[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 3) AS key_3,
+      (SELECT count(*)::INT FROM pg_catalog.unnest(i.indoption::pg_catalog.int2[]) u) AS opt_len,
+      (SELECT u.val FROM pg_catalog.unnest(i.indoption::pg_catalog.int2[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 1) AS opt_1,
+      (SELECT u.val FROM pg_catalog.unnest(i.indoption::pg_catalog.int2[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 2) AS opt_2,
+      (SELECT u.val FROM pg_catalog.unnest(i.indoption::pg_catalog.int2[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 3) AS opt_3,
+      (SELECT count(*)::INT FROM pg_catalog.unnest(i.indclass::pg_catalog.oid[]) u) AS cls_len,
+      (SELECT u.val FROM pg_catalog.unnest(i.indclass::pg_catalog.oid[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 1) AS cls_1,
+      (SELECT u.val FROM pg_catalog.unnest(i.indclass::pg_catalog.oid[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 2) AS cls_2,
+      (SELECT u.val FROM pg_catalog.unnest(i.indclass::pg_catalog.oid[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 3) AS cls_3,
+      (SELECT count(*)::INT FROM pg_catalog.unnest(i.indcollation::pg_catalog.oid[]) u) AS coll_len,
+      (SELECT u.val FROM pg_catalog.unnest(i.indcollation::pg_catalog.oid[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 1) AS coll_1,
+      (SELECT u.val FROM pg_catalog.unnest(i.indcollation::pg_catalog.oid[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 2) AS coll_2,
+      (SELECT u.val FROM pg_catalog.unnest(i.indcollation::pg_catalog.oid[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 3) AS coll_3,
+      i.indpred
+    INTO v_idx_rec
+    FROM pg_catalog.pg_class idx
+    JOIN pg_catalog.pg_namespace n ON n.oid = idx.relnamespace
+    LEFT JOIN pg_catalog.pg_index i ON i.indexrelid = idx.oid
+    LEFT JOIN pg_catalog.pg_am am ON am.oid = idx.relam
+    WHERE n.nspname = 'public'
+      AND idx.relname = v_idx_name;
+
+    IF FOUND THEN
+      IF v_idx_rec.relkind <> 'i'
+         OR v_idx_rec.indrelid IS DISTINCT FROM 'public.payment_requests'::pg_catalog.regclass THEN
+        RAISE EXCEPTION 'Migration aborted: Relation public.% already exists with unexpected kind "%" or target table.',
+          v_idx_name, v_idx_rec.relkind;
+      END IF;
+
+      v_idx_ok := false;
+      v_pred_ok := false;
+      v_full_def := pg_catalog.pg_get_indexdef(v_idx_rec.oid);
+      v_pred_expr := pg_catalog.replace(
+        pg_catalog.regexp_replace(
+          COALESCE(pg_catalog.pg_get_expr(v_idx_rec.indpred, v_idx_rec.indrelid), ''),
+          '\mpg_catalog\.btrim\(',
+          'btrim(',
+          'g'
+        ),
+        ', ' || v_ws_lit || '::text)',
+        ', ' || v_ws_lit || ')'
+      );
+
+      IF COALESCE(v_idx_rec.indisunique, false)
+         AND COALESCE(v_idx_rec.indisvalid, false)
+         AND COALESCE(v_idx_rec.indisready, false)
+         AND COALESCE(v_idx_rec.indimmediate, false)
+         AND NOT COALESCE(v_idx_rec.indisexclusion, true)
+         AND v_idx_rec.amname = 'btree'
+         AND v_idx_rec.indpred IS NOT NULL
+         AND (
+           v_full_def LIKE ('CREATE UNIQUE INDEX ' || v_idx_name || ' ON public.payment_requests USING btree (%')
+           OR v_full_def LIKE ('CREATE UNIQUE INDEX ' || v_idx_name || ' ON payment_requests USING btree (%')
+         )
+         AND v_full_def NOT ILIKE '%NULLS NOT DISTINCT%' THEN
+
+        IF v_idx_name = 'uq_payment_requests_active_transaction_id' THEN
+          IF v_idx_rec.indnatts = 1
+             AND v_idx_rec.indnkeyatts = 1
+             AND v_idx_rec.key_len = 1
+             AND v_idx_rec.key_1 = 0
+             AND v_idx_rec.opt_len = 1
+             AND v_idx_rec.opt_1 = 0
+             AND v_idx_rec.cls_len = 1
+             AND v_idx_rec.cls_1 = v_opc_text_ops
+             AND v_idx_rec.coll_len = 1
+             AND v_idx_rec.coll_1 = v_coll_transaction_id THEN
+            v_col1_expr := pg_catalog.regexp_replace(
+              pg_catalog.pg_get_indexdef(v_idx_rec.oid, 1, false),
+              '\mpg_catalog\.(upper|btrim)\(',
+              '\1(',
+              'g'
+            );
+            v_pred_ok := v_pred_expr IN (
+              pg_catalog.format('(status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND (transaction_id IS NOT NULL) AND (btrim(transaction_id, %s) <> ''''::text)', v_ws_lit),
+              pg_catalog.format('((status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND (transaction_id IS NOT NULL)) AND (btrim(transaction_id, %s) <> ''''::text)', v_ws_lit),
+              pg_catalog.format('(status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND ((transaction_id IS NOT NULL) AND (btrim(transaction_id, %s) <> ''''::text))', v_ws_lit),
+              pg_catalog.format('(((status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND (transaction_id IS NOT NULL)) AND (btrim(transaction_id, %s) <> ''''::text))', v_ws_lit),
+              pg_catalog.format('((status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND (transaction_id IS NOT NULL) AND (btrim(transaction_id, %s) <> ''''::text))', v_ws_lit),
+              pg_catalog.format('((status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND ((transaction_id IS NOT NULL) AND (btrim(transaction_id, %s) <> ''''::text)))', v_ws_lit),
+              pg_catalog.format('(status = ANY (''{pending,approved}''::text[])) AND (transaction_id IS NOT NULL) AND (btrim(transaction_id, %s) <> ''''::text)', v_ws_lit),
+              pg_catalog.format('((status = ANY (''{pending,approved}''::text[])) AND (transaction_id IS NOT NULL)) AND (btrim(transaction_id, %s) <> ''''::text)', v_ws_lit),
+              pg_catalog.format('(status = ANY (''{pending,approved}''::text[])) AND ((transaction_id IS NOT NULL) AND (btrim(transaction_id, %s) <> ''''::text))', v_ws_lit),
+              pg_catalog.format('(((status = ANY (''{pending,approved}''::text[])) AND (transaction_id IS NOT NULL)) AND (btrim(transaction_id, %s) <> ''''::text))', v_ws_lit),
+              pg_catalog.format('((status = ANY (''{pending,approved}''::text[])) AND (transaction_id IS NOT NULL) AND (btrim(transaction_id, %s) <> ''''::text))', v_ws_lit),
+              pg_catalog.format('((status = ANY (''{pending,approved}''::text[])) AND ((transaction_id IS NOT NULL) AND (btrim(transaction_id, %s) <> ''''::text)))', v_ws_lit)
+            );
+            v_idx_ok := (
+              v_col1_expr IN (
+                pg_catalog.format('upper(btrim(transaction_id, %s::text))', v_ws_lit),
+                pg_catalog.format('upper(btrim(transaction_id, %s))', v_ws_lit)
+              )
+              AND v_pred_ok
+            );
+          END IF;
+
+        ELSIF v_idx_name = 'uq_payment_requests_active_bank_reference' THEN
+          IF v_idx_rec.indnatts = 1
+             AND v_idx_rec.indnkeyatts = 1
+             AND v_idx_rec.key_len = 1
+             AND v_idx_rec.key_1 = 0
+             AND v_idx_rec.opt_len = 1
+             AND v_idx_rec.opt_1 = 0
+             AND v_idx_rec.cls_len = 1
+             AND v_idx_rec.cls_1 = v_opc_text_ops
+             AND v_idx_rec.coll_len = 1
+             AND v_idx_rec.coll_1 = v_coll_bank_reference THEN
+            v_col1_expr := pg_catalog.regexp_replace(
+              pg_catalog.pg_get_indexdef(v_idx_rec.oid, 1, false),
+              '\mpg_catalog\.(upper|btrim)\(',
+              '\1(',
+              'g'
+            );
+            v_pred_ok := v_pred_expr IN (
+              pg_catalog.format('(status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND (bank_reference IS NOT NULL) AND (btrim(bank_reference, %s) <> ''''::text)', v_ws_lit),
+              pg_catalog.format('((status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND (bank_reference IS NOT NULL)) AND (btrim(bank_reference, %s) <> ''''::text)', v_ws_lit),
+              pg_catalog.format('(status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND ((bank_reference IS NOT NULL) AND (btrim(bank_reference, %s) <> ''''::text))', v_ws_lit),
+              pg_catalog.format('(((status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND (bank_reference IS NOT NULL)) AND (btrim(bank_reference, %s) <> ''''::text))', v_ws_lit),
+              pg_catalog.format('((status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND (bank_reference IS NOT NULL) AND (btrim(bank_reference, %s) <> ''''::text))', v_ws_lit),
+              pg_catalog.format('((status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND ((bank_reference IS NOT NULL) AND (btrim(bank_reference, %s) <> ''''::text)))', v_ws_lit),
+              pg_catalog.format('(status = ANY (''{pending,approved}''::text[])) AND (bank_reference IS NOT NULL) AND (btrim(bank_reference, %s) <> ''''::text)', v_ws_lit),
+              pg_catalog.format('((status = ANY (''{pending,approved}''::text[])) AND (bank_reference IS NOT NULL)) AND (btrim(bank_reference, %s) <> ''''::text)', v_ws_lit),
+              pg_catalog.format('(status = ANY (''{pending,approved}''::text[])) AND ((bank_reference IS NOT NULL) AND (btrim(bank_reference, %s) <> ''''::text))', v_ws_lit),
+              pg_catalog.format('(((status = ANY (''{pending,approved}''::text[])) AND (bank_reference IS NOT NULL)) AND (btrim(bank_reference, %s) <> ''''::text))', v_ws_lit),
+              pg_catalog.format('((status = ANY (''{pending,approved}''::text[])) AND (bank_reference IS NOT NULL) AND (btrim(bank_reference, %s) <> ''''::text))', v_ws_lit),
+              pg_catalog.format('((status = ANY (''{pending,approved}''::text[])) AND ((bank_reference IS NOT NULL) AND (btrim(bank_reference, %s) <> ''''::text)))', v_ws_lit)
+            );
+            v_idx_ok := (
+              v_col1_expr IN (
+                pg_catalog.format('upper(btrim(bank_reference, %s::text))', v_ws_lit),
+                pg_catalog.format('upper(btrim(bank_reference, %s))', v_ws_lit)
+              )
+              AND v_pred_ok
+            );
+          END IF;
+
+        ELSIF v_idx_name = 'uq_payment_requests_pending_user_service' THEN
+          IF v_idx_rec.indnatts = 3
+             AND v_idx_rec.indnkeyatts = 3
+             AND v_idx_rec.key_len = 3
+             AND v_idx_rec.key_1 = v_att_user_id
+             AND v_idx_rec.key_2 = v_att_service_type
+             AND v_idx_rec.key_3 = 0
+             AND v_idx_rec.opt_len = 3
+             AND v_idx_rec.opt_1 = 0
+             AND v_idx_rec.opt_2 = 0
+             AND v_idx_rec.opt_3 = 0
+             AND v_idx_rec.cls_len = 3
+             AND v_idx_rec.cls_1 = v_opc_uuid_ops
+             AND v_idx_rec.cls_2 = v_opc_text_ops
+             AND v_idx_rec.cls_3 = v_opc_text_ops
+             AND v_idx_rec.coll_len = 3
+             AND v_idx_rec.coll_1 = v_coll_user_id
+             AND v_idx_rec.coll_2 = v_coll_service_type
+             AND v_idx_rec.coll_3 = v_coll_service_id THEN
+            v_col1_expr := pg_catalog.pg_get_indexdef(v_idx_rec.oid, 1, false);
+            v_col2_expr := pg_catalog.pg_get_indexdef(v_idx_rec.oid, 2, false);
+            v_col3_expr := pg_catalog.regexp_replace(
+              pg_catalog.pg_get_indexdef(v_idx_rec.oid, 3, false),
+              '\mpg_catalog\.(lower|btrim)\(',
+              '\1(',
+              'g'
+            );
+            v_pred_ok := v_pred_expr IN (
+              pg_catalog.format('(status = ''pending''::text) AND (service_id IS NOT NULL) AND (btrim(service_id, %s) <> ''''::text)', v_ws_lit),
+              pg_catalog.format('((status = ''pending''::text) AND (service_id IS NOT NULL)) AND (btrim(service_id, %s) <> ''''::text)', v_ws_lit),
+              pg_catalog.format('(status = ''pending''::text) AND ((service_id IS NOT NULL) AND (btrim(service_id, %s) <> ''''::text))', v_ws_lit),
+              pg_catalog.format('(((status = ''pending''::text) AND (service_id IS NOT NULL)) AND (btrim(service_id, %s) <> ''''::text))', v_ws_lit),
+              pg_catalog.format('((status = ''pending''::text) AND (service_id IS NOT NULL) AND (btrim(service_id, %s) <> ''''::text))', v_ws_lit),
+              pg_catalog.format('((status = ''pending''::text) AND ((service_id IS NOT NULL) AND (btrim(service_id, %s) <> ''''::text)))', v_ws_lit)
+            );
+            v_idx_ok := (
+              v_col1_expr = 'user_id'
+              AND v_col2_expr = 'service_type'
+              AND v_col3_expr IN (
+                pg_catalog.format('lower(btrim(service_id, %s::text))', v_ws_lit),
+                pg_catalog.format('lower(btrim(service_id, %s))', v_ws_lit)
+              )
+              AND v_pred_ok
+            );
+          END IF;
+        END IF;
+      END IF;
+
+      IF NOT COALESCE(v_idx_ok, false) THEN
+        SELECT EXISTS (
+          SELECT 1
+          FROM pg_catalog.pg_constraint con
+          WHERE con.conindid = v_idx_rec.oid
+        ) INTO v_is_constraint;
+
+        IF v_is_constraint THEN
+          RAISE EXCEPTION 'Migration aborted: Index public.% has an incorrect definition and is constraint-backed; dropping its constraint automatically is prohibited.',
+            v_idx_name;
+        ELSE
+          EXECUTE pg_catalog.format('DROP INDEX public.%I', v_idx_name);
+        END IF;
+      END IF;
+    END IF;
+  END LOOP;
+END $$;
+
 -- Prevent reuse of any normalized non-empty transaction_id across pending or approved requests.
 -- Rejected requests ('rejected') are excluded so merchants can resubmit after rejection.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_requests_active_transaction_id
@@ -272,21 +582,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_requests_active_bank_reference
   WHERE status IN ('pending', 'approved')
     AND bank_reference IS NOT NULL
     AND btrim(bank_reference, E' \t\n\r') <> '';
-
--- Upgrade uq_payment_requests_pending_user_service in place if an older case-sensitive expression exists.
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1
-    FROM pg_catalog.pg_indexes
-    WHERE schemaname = 'public'
-      AND tablename = 'payment_requests'
-      AND indexname = 'uq_payment_requests_pending_user_service'
-      AND indexdef NOT ILIKE '%lower(btrim(service_id%'
-  ) THEN
-    DROP INDEX public.uq_payment_requests_pending_user_service;
-  END IF;
-END $$;
 
 -- Prevent concurrent duplicate pending requests for the same user, service_type, and normalized service_id.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_requests_pending_user_service
@@ -1445,7 +1740,25 @@ DECLARE
   v_pr_owner_name NAME;
   v_bad_funcs TEXT[];
   v_extra_overloads TEXT[];
-  v_valid_idx_count INTEGER;
+  v_att_user_id SMALLINT;
+  v_att_service_type SMALLINT;
+  v_coll_user_id OID;
+  v_coll_service_type OID;
+  v_coll_service_id OID;
+  v_coll_transaction_id OID;
+  v_coll_bank_reference OID;
+  v_opc_text_ops OID;
+  v_opc_uuid_ops OID;
+  v_ws_lit TEXT := pg_catalog.quote_literal(E' \t\n\r');
+  v_idx_rec RECORD;
+  v_idx_def TEXT;
+  v_col1_expr TEXT;
+  v_col2_expr TEXT;
+  v_col3_expr TEXT;
+  v_pred_expr TEXT;
+  v_pred_ok BOOLEAN;
+  v_idx_ok BOOLEAN;
+  v_found_count INTEGER := 0;
   v_active_trg_count INTEGER;
 BEGIN
   -- 7a. Verify RLS is enabled, NOT forced (so owner-aligned SECURITY DEFINER RPCs can update rows),
@@ -1676,23 +1989,283 @@ BEGIN
       array_to_string(v_bad_funcs, ', ');
   END IF;
 
-  -- 7e. Verify all 3 partial unique indexes and both enforcement triggers exist and are active
-  SELECT count(*) INTO v_valid_idx_count
-  FROM pg_catalog.pg_index i
-  JOIN pg_catalog.pg_class idx ON idx.oid = i.indexrelid
-  JOIN pg_catalog.pg_namespace n ON n.oid = idx.relnamespace
-  WHERE i.indrelid = 'public.payment_requests'::pg_catalog.regclass
-    AND n.nspname = 'public'
-    AND idx.relname IN (
-      'uq_payment_requests_active_transaction_id',
-      'uq_payment_requests_active_bank_reference',
-      'uq_payment_requests_pending_user_service'
-    )
-    AND i.indisvalid = true
-    AND i.indisunique = true;
+  -- 7e. Verify all 3 partial unique indexes have exact intended expressions, columns, operator classes,
+  --     collations, sort/null ordering, partial predicates, valid/unique status, and active triggers
+  SELECT attnum, attcollation INTO v_att_user_id, v_coll_user_id
+  FROM pg_catalog.pg_attribute
+  WHERE attrelid = 'public.payment_requests'::pg_catalog.regclass
+    AND attname = 'user_id'
+    AND NOT attisdropped;
 
-  IF v_valid_idx_count <> 3 THEN
-    RAISE EXCEPTION 'Security invariant check failed: Expected 3 valid unique indexes on public.payment_requests, found %.', v_valid_idx_count;
+  SELECT attnum, attcollation INTO v_att_service_type, v_coll_service_type
+  FROM pg_catalog.pg_attribute
+  WHERE attrelid = 'public.payment_requests'::pg_catalog.regclass
+    AND attname = 'service_type'
+    AND NOT attisdropped;
+
+  SELECT attcollation INTO v_coll_service_id
+  FROM pg_catalog.pg_attribute
+  WHERE attrelid = 'public.payment_requests'::pg_catalog.regclass
+    AND attname = 'service_id'
+    AND NOT attisdropped;
+
+  SELECT attcollation INTO v_coll_transaction_id
+  FROM pg_catalog.pg_attribute
+  WHERE attrelid = 'public.payment_requests'::pg_catalog.regclass
+    AND attname = 'transaction_id'
+    AND NOT attisdropped;
+
+  SELECT attcollation INTO v_coll_bank_reference
+  FROM pg_catalog.pg_attribute
+  WHERE attrelid = 'public.payment_requests'::pg_catalog.regclass
+    AND attname = 'bank_reference'
+    AND NOT attisdropped;
+
+  SELECT oc.oid INTO v_opc_text_ops
+  FROM pg_catalog.pg_opclass oc
+  JOIN pg_catalog.pg_namespace ocn ON ocn.oid = oc.opcnamespace
+  JOIN pg_catalog.pg_am am ON am.oid = oc.opcmethod
+  WHERE ocn.nspname = 'pg_catalog'
+    AND am.amname = 'btree'
+    AND oc.opcname = 'text_ops'
+    AND oc.opcintype = 'text'::pg_catalog.regtype;
+
+  SELECT oc.oid INTO v_opc_uuid_ops
+  FROM pg_catalog.pg_opclass oc
+  JOIN pg_catalog.pg_namespace ocn ON ocn.oid = oc.opcnamespace
+  JOIN pg_catalog.pg_am am ON am.oid = oc.opcmethod
+  WHERE ocn.nspname = 'pg_catalog'
+    AND am.amname = 'btree'
+    AND oc.opcname = 'uuid_ops'
+    AND oc.opcintype = 'uuid'::pg_catalog.regtype;
+
+  IF v_att_user_id IS NULL
+     OR v_att_service_type IS NULL
+     OR v_coll_user_id IS NULL
+     OR v_coll_service_type IS NULL
+     OR v_coll_service_id IS NULL
+     OR v_coll_transaction_id IS NULL
+     OR v_coll_bank_reference IS NULL
+     OR v_opc_text_ops IS NULL
+     OR v_opc_uuid_ops IS NULL THEN
+    RAISE EXCEPTION 'Security invariant check failed: Could not resolve column metadata, collations, or btree operator classes for public.payment_requests.';
+  END IF;
+
+  v_found_count := 0;
+  FOR v_idx_rec IN
+    SELECT
+      idx.relname,
+      idx.oid,
+      idx.relkind,
+      am.amname,
+      i.indisvalid,
+      i.indisunique,
+      i.indisready,
+      i.indimmediate,
+      i.indisexclusion,
+      i.indnatts,
+      i.indnkeyatts,
+      (SELECT count(*)::INT FROM pg_catalog.unnest(i.indkey::pg_catalog.int2[]) u) AS key_len,
+      (SELECT u.val FROM pg_catalog.unnest(i.indkey::pg_catalog.int2[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 1) AS key_1,
+      (SELECT u.val FROM pg_catalog.unnest(i.indkey::pg_catalog.int2[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 2) AS key_2,
+      (SELECT u.val FROM pg_catalog.unnest(i.indkey::pg_catalog.int2[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 3) AS key_3,
+      (SELECT count(*)::INT FROM pg_catalog.unnest(i.indoption::pg_catalog.int2[]) u) AS opt_len,
+      (SELECT u.val FROM pg_catalog.unnest(i.indoption::pg_catalog.int2[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 1) AS opt_1,
+      (SELECT u.val FROM pg_catalog.unnest(i.indoption::pg_catalog.int2[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 2) AS opt_2,
+      (SELECT u.val FROM pg_catalog.unnest(i.indoption::pg_catalog.int2[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 3) AS opt_3,
+      (SELECT count(*)::INT FROM pg_catalog.unnest(i.indclass::pg_catalog.oid[]) u) AS cls_len,
+      (SELECT u.val FROM pg_catalog.unnest(i.indclass::pg_catalog.oid[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 1) AS cls_1,
+      (SELECT u.val FROM pg_catalog.unnest(i.indclass::pg_catalog.oid[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 2) AS cls_2,
+      (SELECT u.val FROM pg_catalog.unnest(i.indclass::pg_catalog.oid[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 3) AS cls_3,
+      (SELECT count(*)::INT FROM pg_catalog.unnest(i.indcollation::pg_catalog.oid[]) u) AS coll_len,
+      (SELECT u.val FROM pg_catalog.unnest(i.indcollation::pg_catalog.oid[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 1) AS coll_1,
+      (SELECT u.val FROM pg_catalog.unnest(i.indcollation::pg_catalog.oid[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 2) AS coll_2,
+      (SELECT u.val FROM pg_catalog.unnest(i.indcollation::pg_catalog.oid[]) WITH ORDINALITY AS u(val, ord) WHERE u.ord = 3) AS coll_3,
+      i.indpred,
+      i.indrelid
+    FROM pg_catalog.pg_index i
+    JOIN pg_catalog.pg_class idx ON idx.oid = i.indexrelid
+    JOIN pg_catalog.pg_namespace n ON n.oid = idx.relnamespace
+    JOIN pg_catalog.pg_am am ON am.oid = idx.relam
+    WHERE i.indrelid = 'public.payment_requests'::pg_catalog.regclass
+      AND n.nspname = 'public'
+      AND idx.relname IN (
+        'uq_payment_requests_active_transaction_id',
+        'uq_payment_requests_active_bank_reference',
+        'uq_payment_requests_pending_user_service'
+      )
+  LOOP
+    IF v_idx_rec.relkind <> 'i'
+       OR NOT COALESCE(v_idx_rec.indisvalid, false)
+       OR NOT COALESCE(v_idx_rec.indisunique, false)
+       OR NOT COALESCE(v_idx_rec.indisready, false)
+       OR NOT COALESCE(v_idx_rec.indimmediate, false)
+       OR COALESCE(v_idx_rec.indisexclusion, true)
+       OR v_idx_rec.amname <> 'btree'
+       OR v_idx_rec.indpred IS NULL THEN
+      RAISE EXCEPTION 'Security invariant check failed: Index public.% has invalid state, access method, or missing partial predicate.',
+        v_idx_rec.relname;
+    END IF;
+
+    v_idx_def := pg_catalog.pg_get_indexdef(v_idx_rec.oid);
+    v_pred_expr := pg_catalog.replace(
+      pg_catalog.regexp_replace(
+        pg_catalog.pg_get_expr(v_idx_rec.indpred, v_idx_rec.indrelid),
+        '\mpg_catalog\.btrim\(',
+        'btrim(',
+        'g'
+      ),
+      ', ' || v_ws_lit || '::text)',
+      ', ' || v_ws_lit || ')'
+    );
+    v_pred_ok := false;
+    v_idx_ok := false;
+
+    IF (
+         v_idx_def LIKE ('CREATE UNIQUE INDEX ' || v_idx_rec.relname || ' ON public.payment_requests USING btree (%')
+         OR v_idx_def LIKE ('CREATE UNIQUE INDEX ' || v_idx_rec.relname || ' ON payment_requests USING btree (%')
+       )
+       AND v_idx_def NOT ILIKE '%NULLS NOT DISTINCT%' THEN
+
+      IF v_idx_rec.relname = 'uq_payment_requests_active_transaction_id' THEN
+        IF v_idx_rec.indnatts = 1
+           AND v_idx_rec.indnkeyatts = 1
+           AND v_idx_rec.key_len = 1
+           AND v_idx_rec.key_1 = 0
+           AND v_idx_rec.opt_len = 1
+           AND v_idx_rec.opt_1 = 0
+           AND v_idx_rec.cls_len = 1
+           AND v_idx_rec.cls_1 = v_opc_text_ops
+           AND v_idx_rec.coll_len = 1
+           AND v_idx_rec.coll_1 = v_coll_transaction_id THEN
+          v_col1_expr := pg_catalog.regexp_replace(
+            pg_catalog.pg_get_indexdef(v_idx_rec.oid, 1, false),
+            '\mpg_catalog\.(upper|btrim)\(',
+            '\1(',
+            'g'
+          );
+          v_pred_ok := v_pred_expr IN (
+            pg_catalog.format('(status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND (transaction_id IS NOT NULL) AND (btrim(transaction_id, %s) <> ''''::text)', v_ws_lit),
+            pg_catalog.format('((status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND (transaction_id IS NOT NULL)) AND (btrim(transaction_id, %s) <> ''''::text)', v_ws_lit),
+            pg_catalog.format('(status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND ((transaction_id IS NOT NULL) AND (btrim(transaction_id, %s) <> ''''::text))', v_ws_lit),
+            pg_catalog.format('(((status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND (transaction_id IS NOT NULL)) AND (btrim(transaction_id, %s) <> ''''::text))', v_ws_lit),
+            pg_catalog.format('((status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND (transaction_id IS NOT NULL) AND (btrim(transaction_id, %s) <> ''''::text))', v_ws_lit),
+            pg_catalog.format('((status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND ((transaction_id IS NOT NULL) AND (btrim(transaction_id, %s) <> ''''::text)))', v_ws_lit),
+            pg_catalog.format('(status = ANY (''{pending,approved}''::text[])) AND (transaction_id IS NOT NULL) AND (btrim(transaction_id, %s) <> ''''::text)', v_ws_lit),
+            pg_catalog.format('((status = ANY (''{pending,approved}''::text[])) AND (transaction_id IS NOT NULL)) AND (btrim(transaction_id, %s) <> ''''::text)', v_ws_lit),
+            pg_catalog.format('(status = ANY (''{pending,approved}''::text[])) AND ((transaction_id IS NOT NULL) AND (btrim(transaction_id, %s) <> ''''::text))', v_ws_lit),
+            pg_catalog.format('(((status = ANY (''{pending,approved}''::text[])) AND (transaction_id IS NOT NULL)) AND (btrim(transaction_id, %s) <> ''''::text))', v_ws_lit),
+            pg_catalog.format('((status = ANY (''{pending,approved}''::text[])) AND (transaction_id IS NOT NULL) AND (btrim(transaction_id, %s) <> ''''::text))', v_ws_lit),
+            pg_catalog.format('((status = ANY (''{pending,approved}''::text[])) AND ((transaction_id IS NOT NULL) AND (btrim(transaction_id, %s) <> ''''::text)))', v_ws_lit)
+          );
+          v_idx_ok := (
+            v_col1_expr IN (
+              pg_catalog.format('upper(btrim(transaction_id, %s::text))', v_ws_lit),
+              pg_catalog.format('upper(btrim(transaction_id, %s))', v_ws_lit)
+            )
+            AND v_pred_ok
+          );
+        END IF;
+
+      ELSIF v_idx_rec.relname = 'uq_payment_requests_active_bank_reference' THEN
+        IF v_idx_rec.indnatts = 1
+           AND v_idx_rec.indnkeyatts = 1
+           AND v_idx_rec.key_len = 1
+           AND v_idx_rec.key_1 = 0
+           AND v_idx_rec.opt_len = 1
+           AND v_idx_rec.opt_1 = 0
+           AND v_idx_rec.cls_len = 1
+           AND v_idx_rec.cls_1 = v_opc_text_ops
+           AND v_idx_rec.coll_len = 1
+           AND v_idx_rec.coll_1 = v_coll_bank_reference THEN
+          v_col1_expr := pg_catalog.regexp_replace(
+            pg_catalog.pg_get_indexdef(v_idx_rec.oid, 1, false),
+            '\mpg_catalog\.(upper|btrim)\(',
+            '\1(',
+            'g'
+          );
+          v_pred_ok := v_pred_expr IN (
+            pg_catalog.format('(status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND (bank_reference IS NOT NULL) AND (btrim(bank_reference, %s) <> ''''::text)', v_ws_lit),
+            pg_catalog.format('((status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND (bank_reference IS NOT NULL)) AND (btrim(bank_reference, %s) <> ''''::text)', v_ws_lit),
+            pg_catalog.format('(status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND ((bank_reference IS NOT NULL) AND (btrim(bank_reference, %s) <> ''''::text))', v_ws_lit),
+            pg_catalog.format('(((status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND (bank_reference IS NOT NULL)) AND (btrim(bank_reference, %s) <> ''''::text))', v_ws_lit),
+            pg_catalog.format('((status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND (bank_reference IS NOT NULL) AND (btrim(bank_reference, %s) <> ''''::text))', v_ws_lit),
+            pg_catalog.format('((status = ANY (ARRAY[''pending''::text, ''approved''::text])) AND ((bank_reference IS NOT NULL) AND (btrim(bank_reference, %s) <> ''''::text)))', v_ws_lit),
+            pg_catalog.format('(status = ANY (''{pending,approved}''::text[])) AND (bank_reference IS NOT NULL) AND (btrim(bank_reference, %s) <> ''''::text)', v_ws_lit),
+            pg_catalog.format('((status = ANY (''{pending,approved}''::text[])) AND (bank_reference IS NOT NULL)) AND (btrim(bank_reference, %s) <> ''''::text)', v_ws_lit),
+            pg_catalog.format('(status = ANY (''{pending,approved}''::text[])) AND ((bank_reference IS NOT NULL) AND (btrim(bank_reference, %s) <> ''''::text))', v_ws_lit),
+            pg_catalog.format('(((status = ANY (''{pending,approved}''::text[])) AND (bank_reference IS NOT NULL)) AND (btrim(bank_reference, %s) <> ''''::text))', v_ws_lit),
+            pg_catalog.format('((status = ANY (''{pending,approved}''::text[])) AND (bank_reference IS NOT NULL) AND (btrim(bank_reference, %s) <> ''''::text))', v_ws_lit),
+            pg_catalog.format('((status = ANY (''{pending,approved}''::text[])) AND ((bank_reference IS NOT NULL) AND (btrim(bank_reference, %s) <> ''''::text)))', v_ws_lit)
+          );
+          v_idx_ok := (
+            v_col1_expr IN (
+              pg_catalog.format('upper(btrim(bank_reference, %s::text))', v_ws_lit),
+              pg_catalog.format('upper(btrim(bank_reference, %s))', v_ws_lit)
+            )
+            AND v_pred_ok
+          );
+        END IF;
+
+      ELSIF v_idx_rec.relname = 'uq_payment_requests_pending_user_service' THEN
+        IF v_idx_rec.indnatts = 3
+           AND v_idx_rec.indnkeyatts = 3
+           AND v_idx_rec.key_len = 3
+           AND v_idx_rec.key_1 = v_att_user_id
+           AND v_idx_rec.key_2 = v_att_service_type
+           AND v_idx_rec.key_3 = 0
+           AND v_idx_rec.opt_len = 3
+           AND v_idx_rec.opt_1 = 0
+           AND v_idx_rec.opt_2 = 0
+           AND v_idx_rec.opt_3 = 0
+           AND v_idx_rec.cls_len = 3
+           AND v_idx_rec.cls_1 = v_opc_uuid_ops
+           AND v_idx_rec.cls_2 = v_opc_text_ops
+           AND v_idx_rec.cls_3 = v_opc_text_ops
+           AND v_idx_rec.coll_len = 3
+           AND v_idx_rec.coll_1 = v_coll_user_id
+           AND v_idx_rec.coll_2 = v_coll_service_type
+           AND v_idx_rec.coll_3 = v_coll_service_id THEN
+          v_col1_expr := pg_catalog.pg_get_indexdef(v_idx_rec.oid, 1, false);
+          v_col2_expr := pg_catalog.pg_get_indexdef(v_idx_rec.oid, 2, false);
+          v_col3_expr := pg_catalog.regexp_replace(
+            pg_catalog.pg_get_indexdef(v_idx_rec.oid, 3, false),
+            '\mpg_catalog\.(lower|btrim)\(',
+            '\1(',
+            'g'
+          );
+          v_pred_ok := v_pred_expr IN (
+            pg_catalog.format('(status = ''pending''::text) AND (service_id IS NOT NULL) AND (btrim(service_id, %s) <> ''''::text)', v_ws_lit),
+            pg_catalog.format('((status = ''pending''::text) AND (service_id IS NOT NULL)) AND (btrim(service_id, %s) <> ''''::text)', v_ws_lit),
+            pg_catalog.format('(status = ''pending''::text) AND ((service_id IS NOT NULL) AND (btrim(service_id, %s) <> ''''::text))', v_ws_lit),
+            pg_catalog.format('(((status = ''pending''::text) AND (service_id IS NOT NULL)) AND (btrim(service_id, %s) <> ''''::text))', v_ws_lit),
+            pg_catalog.format('((status = ''pending''::text) AND (service_id IS NOT NULL) AND (btrim(service_id, %s) <> ''''::text))', v_ws_lit),
+            pg_catalog.format('((status = ''pending''::text) AND ((service_id IS NOT NULL) AND (btrim(service_id, %s) <> ''''::text)))', v_ws_lit)
+          );
+          v_idx_ok := (
+            v_col1_expr = 'user_id'
+            AND v_col2_expr = 'service_type'
+            AND v_col3_expr IN (
+              pg_catalog.format('lower(btrim(service_id, %s::text))', v_ws_lit),
+              pg_catalog.format('lower(btrim(service_id, %s))', v_ws_lit)
+            )
+            AND v_pred_ok
+          );
+        END IF;
+      END IF;
+    END IF;
+
+    IF NOT COALESCE(v_idx_ok, false) THEN
+      RAISE EXCEPTION 'Security invariant check failed: Index public.% has unexpected columns, expressions, operator classes, collations, or partial predicate: %',
+        v_idx_rec.relname, v_idx_def;
+    END IF;
+
+    v_found_count := v_found_count + 1;
+  END LOOP;
+
+  IF v_found_count <> 3 THEN
+    RAISE EXCEPTION 'Security invariant check failed: Expected 3 verified partial unique indexes on public.payment_requests, found %.',
+      v_found_count;
   END IF;
 
   SELECT count(*) INTO v_active_trg_count
@@ -1706,3 +2279,4 @@ BEGIN
     RAISE EXCEPTION 'Security invariant check failed: Expected 2 active enforcement triggers on public.payment_requests, found %.', v_active_trg_count;
   END IF;
 END $$;
+COMMIT;

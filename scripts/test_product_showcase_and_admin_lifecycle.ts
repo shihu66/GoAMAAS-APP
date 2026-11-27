@@ -10,6 +10,8 @@ import {
   mergeStoreProductsWithWebsites,
 } from '../src/lib/storefrontSync';
 import {
+  adminDeleteSubscribedWebsiteInDb,
+  adminRetryWebsiteStorageCleanupInDb,
   sanitizeWebsiteConfigForInsert,
 } from '../src/lib/supabase';
 import {
@@ -364,6 +366,10 @@ async function runTests() {
   let siblingSiteConfigOverride: Record<string, unknown> | null = null;
   let globallyProtectedPathsMock = new Set<string>();
   let globallyAbortedPathsMock = new Set<string>();
+  let authUserIdOverride: string | null = null;
+  let siteNotFoundInMock = false;
+  let networkThrowOnRestGetError: Error | null = null;
+  let storageDeleteOmitSubstring: string | null = null;
   let mockCleanupJobState: {
     id: string;
     websiteId: string;
@@ -450,10 +456,10 @@ async function runTests() {
           (init?.headers as Record<string, string> | undefined)?.Authorization || ''
         );
         const token = auth.replace(/^Bearer\s+/i, '').trim();
-        if (token === adminToken || token === adminAal1Token) {
+        if (token === adminToken || token === adminAal1Token || token.startsWith('eyJ') && authUserIdOverride) {
           return new Response(
             JSON.stringify({
-              id: ADMIN_UUID,
+              id: authUserIdOverride ?? ADMIN_UUID,
               email: 'official.amaas.dev@gmail.com',
               email_confirmed_at: '2026-01-01T00:00:00Z',
               factors: adminFactorsOverride ?? [{ factor_type: 'totp', status: 'verified' }],
@@ -535,6 +541,15 @@ async function runTests() {
       }
 
       if (url.includes('/rest/v1/subscribed_websites') && method === 'GET') {
+        if (networkThrowOnRestGetError) {
+          throw networkThrowOnRestGetError;
+        }
+        if (siteNotFoundInMock && url.includes(`id=eq.${WEBSITE_UUID}`)) {
+          return new Response(JSON.stringify([]), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
         const effectiveSite =
           siteStoreIdOverride !== undefined
             ? { ...currentSiteState, store_id: siteStoreIdOverride }
@@ -648,6 +663,15 @@ async function runTests() {
         if (forceStorageDeleteFail) {
           return new Response(JSON.stringify({ error: 'Storage delete error' }), {
             status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (storageDeleteOmitSubstring) {
+          const returnedPrefixes = prefixes.filter(
+            (name) => !name.includes(storageDeleteOmitSubstring!)
+          );
+          return new Response(JSON.stringify(returnedPrefixes.map((name) => ({ name }))), {
+            status: 200,
             headers: { 'Content-Type': 'application/json' },
           });
         }
@@ -2071,6 +2095,207 @@ async function runTests() {
         rpcHttpErrorOverride = null;
         console.error = origConsoleError;
       }
+    });
+
+    await check('2.29 API rejects invalid UUID, JWT sub mismatch, duplicate delete (404 NOT_FOUND), and fails closed on Supabase connection/timeout errors', async () => {
+      storageDeleteRequests = [];
+
+      // 1) Invalid website UUID format
+      const badUuidReq = makeMockReqRes({
+        origin: 'https://app.amaas.xyz',
+        authorization: `Bearer ${adminToken}`,
+        ip: '203.0.113.87',
+        body: {
+          action: 'delete',
+          websiteId: 'not-a-valid-uuid',
+          confirmSubdomain: 'fortyninee',
+          explicitConfirmed: true,
+        },
+      });
+      await adminWebsiteActionHandler(badUuidReq.req, badUuidReq.res);
+      assert.equal(badUuidReq.getResult().statusCode, 400);
+      assert.equal(badUuidReq.getResult().json?.code, 'INVALID_WEBSITE_ID');
+      assert.equal(storageDeleteRequests.length, 0);
+
+      // 2) JWT sub mismatch vs verified caller ID from /auth/v1/user
+      const mismatchedJwt = buildFakeJwt({ sub: MERCHANT_UUID, aal: 'aal2' });
+      authUserIdOverride = ADMIN_UUID;
+      try {
+        const subMismatchReq = makeMockReqRes({
+          origin: 'https://app.amaas.xyz',
+          authorization: `Bearer ${mismatchedJwt}`,
+          ip: '203.0.113.87',
+          body: {
+            action: 'delete',
+            websiteId: WEBSITE_UUID,
+            confirmSubdomain: 'fortyninee',
+            explicitConfirmed: true,
+          },
+        });
+        await adminWebsiteActionHandler(subMismatchReq.req, subMismatchReq.res);
+        assert.equal(subMismatchReq.getResult().statusCode, 401);
+        assert.equal(subMismatchReq.getResult().json?.code, 'INVALID_SESSION');
+        assert.equal(storageDeleteRequests.length, 0);
+      } finally {
+        authUserIdOverride = null;
+      }
+
+      // 3a) Duplicate deletion request (website already absent in REST lookup)
+      siteNotFoundInMock = true;
+      try {
+        const dupRestReq = makeMockReqRes({
+          origin: 'https://app.amaas.xyz',
+          authorization: `Bearer ${adminToken}`,
+          ip: '203.0.113.87',
+          body: {
+            action: 'delete',
+            websiteId: WEBSITE_UUID,
+            confirmSubdomain: 'fortyninee',
+            explicitConfirmed: true,
+          },
+        });
+        await adminWebsiteActionHandler(dupRestReq.req, dupRestReq.res);
+        assert.equal(dupRestReq.getResult().statusCode, 404);
+        assert.equal(dupRestReq.getResult().json?.code, 'NOT_FOUND');
+        assert.equal(storageDeleteRequests.length, 0);
+      } finally {
+        siteNotFoundInMock = false;
+      }
+
+      // 3b) Duplicate deletion request (RPC returns NOT_FOUND)
+      customRpcResultOverride = {
+        success: false,
+        code: 'NOT_FOUND',
+        message: 'Website record not found or already deleted.',
+      };
+      try {
+        const dupRpcReq = makeMockReqRes({
+          origin: 'https://app.amaas.xyz',
+          authorization: `Bearer ${adminToken}`,
+          ip: '203.0.113.87',
+          body: {
+            action: 'delete',
+            websiteId: WEBSITE_UUID,
+            confirmSubdomain: 'fortyninee',
+            explicitConfirmed: true,
+          },
+        });
+        await adminWebsiteActionHandler(dupRpcReq.req, dupRpcReq.res);
+        assert.equal(dupRpcReq.getResult().statusCode, 404);
+        assert.equal(dupRpcReq.getResult().json?.code, 'NOT_FOUND');
+        assert.equal(storageDeleteRequests.length, 0);
+      } finally {
+        customRpcResultOverride = null;
+      }
+
+      // 4) Supabase connection network failure (502) and connection timeout (504)
+      networkThrowOnRestGetError = new Error('connect ECONNREFUSED 127.0.0.1:5432');
+      try {
+        const connFailReq = makeMockReqRes({
+          origin: 'https://app.amaas.xyz',
+          authorization: `Bearer ${adminToken}`,
+          ip: '203.0.113.87',
+          body: {
+            action: 'delete',
+            websiteId: WEBSITE_UUID,
+            confirmSubdomain: 'fortyninee',
+            explicitConfirmed: true,
+          },
+        });
+        await adminWebsiteActionHandler(connFailReq.req, connFailReq.res);
+        assert.equal(connFailReq.getResult().statusCode, 502);
+        assert.equal(connFailReq.getResult().json?.code, 'SUPABASE_CONNECTION_FAILED');
+      } finally {
+        networkThrowOnRestGetError = null;
+      }
+
+      const timeoutErr = new Error('The operation was aborted due to timeout');
+      timeoutErr.name = 'AbortError';
+      networkThrowOnRestGetError = timeoutErr;
+      try {
+        const connTimeoutReq = makeMockReqRes({
+          origin: 'https://app.amaas.xyz',
+          authorization: `Bearer ${adminToken}`,
+          ip: '203.0.113.87',
+          body: {
+            action: 'delete',
+            websiteId: WEBSITE_UUID,
+            confirmSubdomain: 'fortyninee',
+            explicitConfirmed: true,
+          },
+        });
+        await adminWebsiteActionHandler(connTimeoutReq.req, connTimeoutReq.res);
+        assert.equal(connTimeoutReq.getResult().statusCode, 504);
+        assert.equal(connTimeoutReq.getResult().json?.code, 'SUPABASE_CONNECTION_TIMEOUT');
+      } finally {
+        networkThrowOnRestGetError = null;
+      }
+    });
+
+    await check('2.30 Partial Storage DELETE 200 array response marks unconfirmed paths as failed instead of silently dropping them', async () => {
+      storageDeleteRequests = [];
+      storageDeleteOmitSubstring = 'products/item-1.png';
+      try {
+        const partialReq = makeMockReqRes({
+          origin: 'https://app.amaas.xyz',
+          authorization: `Bearer ${adminToken}`,
+          ip: '203.0.113.88',
+          body: {
+            action: 'delete',
+            websiteId: WEBSITE_UUID,
+            confirmSubdomain: 'fortyninee',
+            explicitConfirmed: true,
+          },
+        });
+        await adminWebsiteActionHandler(partialReq.req, partialReq.res);
+        const out = partialReq.getResult();
+        assert.equal(out.statusCode, 200);
+        assert.equal(out.json?.ok, true);
+        assert.equal(out.json?.deletedStorageObjects, 1);
+        assert.equal(out.json?.storageCleanupStatus, 'partial_failed');
+        const failed = (out.json?.failedStoragePaths as string[]) || [];
+        assert.equal(failed.length, 1);
+        assert.ok(failed[0].includes('products/item-1.png'));
+        assert.ok(String(out.json?.storageCleanupWarning || '').length > 0);
+      } finally {
+        storageDeleteOmitSubstring = null;
+      }
+    });
+
+    await check('2.31 Client wrappers and AppContext fail closed without fake local/offline success on delete or cleanup retry', async () => {
+      // Unconfigured runtime check on client DB wrappers
+      const delOffline = await adminDeleteSubscribedWebsiteInDb(WEBSITE_UUID, {
+        confirmSubdomain: 'fortyninee',
+        explicitConfirmed: true,
+      });
+      assert.equal(delOffline.success, false);
+      assert.equal(delOffline.code, 'SUPABASE_NOT_CONFIGURED');
+
+      const retryOffline = await adminRetryWebsiteStorageCleanupInDb(WEBSITE_UUID);
+      assert.equal(retryOffline.success, false);
+      assert.equal(retryOffline.code, 'SUPABASE_NOT_CONFIGURED');
+
+      // Static verification of AppContext & AdminDashboardPage fail-closed & manual review wiring
+      const appCtxSrc = fs.readFileSync(path.join(root, 'src/context/AppContext.tsx'), 'utf8');
+      const retryStart = appCtxSrc.indexOf('const retryWebsiteStorageCleanup =');
+      const delStart = appCtxSrc.indexOf('const adminDeleteSubscribedWebsite =');
+      const reqStart = appCtxSrc.indexOf('const requestWebsiteContentUpdate =');
+      assert.ok(retryStart > 0 && delStart > retryStart && reqStart > delStart);
+
+      const retrySlice = appCtxSrc.slice(retryStart, delStart);
+      assert.ok(retrySlice.includes('SUPABASE_NOT_CONFIGURED'));
+      assert.ok(!retrySlice.includes('offline demo mode'));
+
+      const delSlice = appCtxSrc.slice(delStart, reqStart);
+      assert.ok(delSlice.includes('SUPABASE_NOT_CONFIGURED'));
+      assert.ok(!delSlice.includes('deleted permanently.'));
+
+      const adminUiSrc = fs.readFileSync(
+        path.join(root, 'src/pages/admin/AdminDashboardPage.tsx'),
+        'utf8'
+      );
+      assert.ok(adminUiSrc.includes('manualReviewAssetPaths'));
+      assert.ok(adminUiSrc.includes('Uncertain Storage Assets Held for Manual Review'));
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -3906,6 +4131,296 @@ async function runTests() {
       directRecordBlocked = true;
     }
     assert.equal(directRecordBlocked, true);
+  });
+
+  await check('3.18 Subdomain release on permanent delete and preservation on suspend (Requirements A through I)', async () => {
+    await setDbSession(null, null, 'service_role');
+
+    // Setup Merchant A with subdomain 'urbanfashion'
+    const storeAId = (
+      await db.query<{ id: string }>(
+        `INSERT INTO public.stores (owner_id, name, slug, category, currency) VALUES ('${DB_MERCH_A}', 'Urban Fashion Store A', 'urban-store-a', 'Retail', '৳') RETURNING id;`
+      )
+    ).rows[0].id;
+
+    const siteAId = (
+      await db.query<{ id: string }>(
+        `INSERT INTO public.subscribed_websites (
+          user_id, store_id, business_name, niche, subdomain, full_domain,
+          template_id, template_name, status, payment_status, deployment_status,
+          current_period_end, grace_period_end
+        ) VALUES (
+          '${DB_MERCH_A}', '${storeAId}', 'Urban Fashion', 'ecommerce', 'urbanfashion', 'urbanfashion.amaas.xyz',
+          't1', 'Modern', 'active', 'paid', 'live',
+          NOW() + INTERVAL '30 days', NOW() + INTERVAL '35 days'
+        ) RETURNING id;`
+      )
+    ).rows[0].id;
+
+    // A. Check subdomain is taken before deletion
+    const availBefore = await db.query<{ res: { available: boolean; code: string } }>(
+      `SELECT public.check_subdomain_availability('urbanfashion') AS res;`
+    );
+    assert.equal(availBefore.rows[0].res.available, false);
+    assert.equal(availBefore.rows[0].res.code, 'TAKEN');
+
+    // C. Suspended website keeps its subdomain reserved
+    const siteSuspId = (
+      await db.query<{ id: string }>(
+        `INSERT INTO public.subscribed_websites (
+          user_id, store_id, business_name, niche, subdomain, full_domain,
+          template_id, template_name, status, payment_status, deployment_status,
+          current_period_end, grace_period_end
+        ) VALUES (
+          '${DB_MERCH_A}', '${storeAId}', 'Suspended Shop', 'ecommerce', 'suspended-shop', 'suspended-shop.amaas.xyz',
+          't1', 'Modern', 'suspended', 'paid', 'suspended',
+          NOW() + INTERVAL '30 days', NOW() + INTERVAL '35 days'
+        ) RETURNING id;`
+      )
+    ).rows[0].id;
+
+    const availSusp = await db.query<{ res: { available: boolean; code: string } }>(
+      `SELECT public.check_subdomain_availability('suspended-shop') AS res;`
+    );
+    assert.equal(availSusp.rows[0].res.available, false);
+    assert.equal(availSusp.rows[0].res.code, 'TAKEN');
+
+    // E. Failed permanent deletion (wrong subdomain confirmation) does NOT release subdomain
+    const failDelRes = await db.query<{ res: { success: boolean; code: string } }>(
+      `SELECT public.admin_permanently_delete_website('${siteAId}'::uuid, '${DB_ADMIN}'::uuid, 'wrong-subdomain', 'Should fail') AS res;`
+    );
+    assert.equal(failDelRes.rows[0].res.success, false);
+    assert.equal(failDelRes.rows[0].res.code, 'SUBDOMAIN_CONFIRMATION_MISMATCH');
+
+    const availAfterFail = await db.query<{ res: { available: boolean } }>(
+      `SELECT public.check_subdomain_availability('urbanfashion') AS res;`
+    );
+    assert.equal(availAfterFail.rows[0].res.available, false);
+
+    // A & H & I. Successful permanent deletion releases subdomain 'urbanfashion' while preserving audit & payments
+    const delRes = await db.query<{ res: { success: boolean; code?: string; message?: string; deletedWebsiteId: string } }>(
+      `SELECT public.admin_permanently_delete_website('${siteAId}'::uuid, '${DB_ADMIN}'::uuid, 'urbanfashion', 'Permanent delete release test') AS res;`
+    );
+    console.log('DEL RES:', delRes.rows[0].res);
+    assert.equal(delRes.rows[0].res.success, true);
+
+    const availAfterDel = await db.query<{ res: { available: boolean; code: string } }>(
+      `SELECT public.check_subdomain_availability('urbanfashion') AS res;`
+    );
+    assert.equal(availAfterDel.rows[0].res.available, true);
+    assert.equal(availAfterDel.rows[0].res.code, 'AVAILABLE');
+
+    // B & F. Merchant B can successfully register and publish a new website using 'urbanfashion.amaas.xyz'
+    const storeBId = (
+      await db.query<{ id: string }>(
+        `INSERT INTO public.stores (owner_id, name, slug, category, currency) VALUES ('${DB_MERCH_B}', 'Merchant B Store', 'merchant-b-store', 'Retail', '৳') RETURNING id;`
+      )
+    ).rows[0].id;
+
+    const siteBId = (
+      await db.query<{ id: string }>(
+        `INSERT INTO public.subscribed_websites (
+          user_id, store_id, business_name, niche, subdomain, full_domain,
+          template_id, template_name, status, payment_status, deployment_status,
+          current_period_end, grace_period_end
+        ) VALUES (
+          '${DB_MERCH_B}', '${storeBId}', 'Merchant B Urban Fashion', 'ecommerce', 'urbanfashion', 'urbanfashion.amaas.xyz',
+          't1', 'Modern', 'active', 'paid', 'live',
+          NOW() + INTERVAL '30 days', NOW() + INTERVAL '35 days'
+        ) RETURNING id;`
+      )
+    ).rows[0].id;
+    assert.ok(siteBId);
+
+    // Verify 'urbanfashion' is taken again by Merchant B
+    const availMerchantB = await db.query<{ res: { available: boolean } }>(
+      `SELECT public.check_subdomain_availability('urbanfashion') AS res;`
+    );
+    assert.equal(availMerchantB.rows[0].res.available, false);
+
+    // D. Deleting Merchant A's site never affected Merchant B's site or other subdomains
+    const auditCount = await db.query<{ count: string }>(
+      `SELECT COUNT(*) FROM public.website_lifecycle_audit_logs WHERE website_id = '${siteAId}'::uuid AND action = 'delete';`
+    );
+    assert.equal(Number(auditCount.rows[0].count), 1);
+  });
+
+  await check('3.19 Legacy non-atomic RPC is disabled, financial payment_requests history survives all deletes, and unowned (user_id NULL) websites persist manual review paths cleanly', async () => {
+    // 1) Legacy admin_delete_subscribed_website is revoked from client roles and raises under service_role
+    await setDbSession(null, null, 'postgres');
+    const legPriv = await db.query<{ anon_exec: boolean; auth_exec: boolean }>(`
+      SELECT
+        has_function_privilege('anon', 'public.admin_delete_subscribed_website(uuid)', 'EXECUTE') AS anon_exec,
+        has_function_privilege('authenticated', 'public.admin_delete_subscribed_website(uuid)', 'EXECUTE') AS auth_exec;
+    `);
+    assert.equal(legPriv.rows[0].anon_exec, false);
+    assert.equal(legPriv.rows[0].auth_exec, false);
+
+    await setDbSession(null, null, 'service_role');
+    let legacyDisabledThrew = false;
+    try {
+      await db.query(`SELECT public.admin_delete_subscribed_website('${siteBId}'::uuid);`);
+    } catch {
+      legacyDisabledThrew = true;
+    }
+    assert.equal(legacyDisabledThrew, true);
+
+    // 2) Financial payment history for deleted siteAId ('TRX-ALPHA-001') survived exclusive delete,
+    //    AND payment history for shared-store siteShared2Id survives its permanent delete intact
+    await setDbSession(null, null, 'postgres');
+    await db.exec(`
+      INSERT INTO public.payment_requests (
+        user_id, store_id, customer_name, customer_phone, customer_email,
+        service_type, service_id, service_name, plan_tier, amount, payment_method, transaction_id, status
+      ) VALUES (
+        '${DB_MERCH_C}', '${storeSharedId}', 'Merchant C', '01733333333', 'merchant.c@amaas.test',
+        'website_subscription', '${siteShared2Id}', 'Shared Two', 'AMAAS Website Lite', 600, 'bKash', 'TXN-SHARED-KEEP-1', 'approved'
+      );
+    `);
+    await setDbSession(null, null, 'service_role');
+    const delShared2 = await db.query<{ res: { success: boolean } }>(
+      `SELECT public.admin_permanently_delete_website('${siteShared2Id}'::uuid, '${DB_ADMIN}'::uuid, 'shared-two', 'Payment retention check') AS res;`
+    );
+    assert.equal(delShared2.rows[0].res.success, true);
+
+    await setDbSession(null, null, 'postgres');
+    const payHistoryCheck = await db.query<{ alpha_cnt: string; shared_cnt: string; shared_amt: string }>(`
+      SELECT
+        (SELECT COUNT(*) FROM public.payment_requests WHERE transaction_id = 'TRX-ALPHA-001' AND status = 'approved' AND store_id IS NULL) AS alpha_cnt,
+        (SELECT COUNT(*) FROM public.payment_requests WHERE transaction_id = 'TXN-SHARED-KEEP-1' AND status = 'approved') AS shared_cnt,
+        COALESCE((SELECT MAX(amount)::text FROM public.payment_requests WHERE transaction_id = 'TXN-SHARED-KEEP-1'), '0') AS shared_amt;
+    `);
+    assert.equal(Number(payHistoryCheck.rows[0].alpha_cnt), 1);
+    assert.equal(Number(payHistoryCheck.rows[0].shared_cnt), 1);
+    assert.equal(Number(payHistoryCheck.rows[0].shared_amt), 600);
+
+    // 3) Legacy/unowned website (user_id IS NULL) still deletes cleanly and persists manual_review_paths in outbox
+    await db.exec(`ALTER TABLE public.subscribed_websites ALTER COLUMN user_id DROP NOT NULL;`);
+    let unownedSiteId = '';
+    try {
+      unownedSiteId = (
+        await db.query<{ id: string }>(`
+          INSERT INTO public.subscribed_websites (
+            user_id, store_id, business_name, niche, subdomain, full_domain,
+            template_id, template_name, status, payment_status, deployment_status,
+            config
+          ) VALUES (
+            NULL, NULL, 'Legacy Unowned Site', 'ecommerce', 'legacy-unowned', 'legacy-unowned.amaas.xyz',
+            't1', 'Modern', 'active', 'paid', 'live',
+            jsonb_build_object('heroImageUrl', 'https://mock.supabase.co/storage/v1/object/public/website-assets/legacy-folder/hero.png')
+          ) RETURNING id;
+        `)
+      ).rows[0].id;
+
+      await setDbSession(null, null, 'service_role');
+      const unownedDel = await db.query<{
+        res: {
+          success: boolean;
+          manualReviewRequired: boolean;
+          manualReviewObjectPaths: string[];
+        };
+      }>(
+        `SELECT public.admin_permanently_delete_website('${unownedSiteId}'::uuid, '${DB_ADMIN}'::uuid, 'legacy-unowned', 'Legacy unowned cleanup') AS res;`
+      );
+      assert.equal(unownedDel.rows[0].res.success, true);
+      assert.equal(unownedDel.rows[0].res.manualReviewRequired, true);
+      assert.ok(unownedDel.rows[0].res.manualReviewObjectPaths.includes('legacy-folder/hero.png'));
+
+      const outboxRow = await db.query<{ owner_user_id: string | null; manual_review_paths: string[]; manual_review_required: boolean }>(
+        `SELECT owner_user_id::text, manual_review_paths, manual_review_required FROM public.website_deletion_storage_cleanups WHERE website_id = '${unownedSiteId}'::uuid;`
+      );
+      assert.equal(outboxRow.rows.length, 1);
+      assert.equal(outboxRow.rows[0].owner_user_id, null);
+      assert.equal(outboxRow.rows[0].manual_review_required, true);
+      assert.ok(outboxRow.rows[0].manual_review_paths.includes('legacy-folder/hero.png'));
+    } finally {
+      await setDbSession(null, null, 'postgres');
+      await db.exec(`ALTER TABLE public.subscribed_websites ALTER COLUMN user_id SET NOT NULL;`);
+    }
+  });
+
+  await check('3.20 Single-admin & AAL2 TOTP SQL migration (20261124) demotes spoofed admins and enforces AAL2 + verified TOTP', async () => {
+    await setDbSession(null, null, 'postgres');
+
+    // Provide minimal auth.mfa_factors table mirroring Supabase GoTrue MFA schema
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS auth.mfa_factors (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+        factor_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+
+    const singleAdminSql = fs.readFileSync(
+      path.join(root, 'proposed_migrations/20261124_single_admin_and_aal2_enforcement.sql'),
+      'utf8'
+    );
+    await db.exec(singleAdminSql);
+
+    // 1) Spoofed admin was automatically demoted to merchant; primary admin retained
+    const rolesRes = await db.query<{ id: string; role: string }>(
+      `SELECT id::text, role FROM public.profiles WHERE id IN ('${DB_ADMIN}', '${DB_SECONDARY_ADMIN}');`
+    );
+    const roleById = new Map(rolesRes.rows.map((r) => [r.id, r.role]));
+    assert.equal(roleById.get(DB_ADMIN), 'admin');
+    assert.equal(roleById.get(DB_SECONDARY_ADMIN), 'merchant');
+
+    // 2) Second admin promotion is blocked by single-admin enforcement
+    let secondAdminBlocked = false;
+    try {
+      await db.exec(`UPDATE public.profiles SET role = 'admin' WHERE id = '${DB_MERCH_A}'::uuid;`);
+    } catch {
+      secondAdminBlocked = true;
+    }
+    assert.equal(secondAdminBlocked, true);
+
+    // 3) is_verified_platform_admin verifies primary admin only
+    const adminCheck = await db.query<{ ok_primary: boolean; ok_merch: boolean }>(`
+      SELECT
+        public.is_verified_platform_admin('${DB_ADMIN}'::uuid) AS ok_primary,
+        public.is_verified_platform_admin('${DB_MERCH_A}'::uuid) AS ok_merch;
+    `);
+    assert.equal(adminCheck.rows[0].ok_primary, true);
+    assert.equal(adminCheck.rows[0].ok_merch, false);
+
+    // 4) is_verified_aal2_platform_admin requires BOTH aal='aal2' JWT claim AND verified TOTP factor
+    await db.exec(`
+      SELECT set_config('request.jwt.claims', json_build_object('sub', '${DB_ADMIN}', 'role', 'authenticated', 'aal', 'aal1')::text, false);
+    `);
+    const aal1NoFactor = await db.query<{ ok: boolean }>(
+      `SELECT public.is_verified_aal2_platform_admin('${DB_ADMIN}'::uuid) AS ok;`
+    );
+    assert.equal(aal1NoFactor.rows[0].ok, false);
+
+    // Even with aal2 claim, missing TOTP factor must still return false
+    await db.exec(`
+      SELECT set_config('request.jwt.claims', json_build_object('sub', '${DB_ADMIN}', 'role', 'authenticated', 'aal', 'aal2')::text, false);
+    `);
+    const aal2NoFactor = await db.query<{ ok: boolean }>(
+      `SELECT public.is_verified_aal2_platform_admin('${DB_ADMIN}'::uuid) AS ok;`
+    );
+    assert.equal(aal2NoFactor.rows[0].ok, false);
+
+    // Enroll verified TOTP factor -> aal1 still fails, aal2 passes
+    await db.exec(`
+      INSERT INTO auth.mfa_factors (user_id, factor_type, status)
+      VALUES ('${DB_ADMIN}'::uuid, 'totp', 'verified');
+      SELECT set_config('request.jwt.claims', json_build_object('sub', '${DB_ADMIN}', 'role', 'authenticated', 'aal', 'aal1')::text, false);
+    `);
+    const aal1WithFactor = await db.query<{ ok: boolean }>(
+      `SELECT public.is_verified_aal2_platform_admin('${DB_ADMIN}'::uuid) AS ok;`
+    );
+    assert.equal(aal1WithFactor.rows[0].ok, false);
+
+    await db.exec(`
+      SELECT set_config('request.jwt.claims', json_build_object('sub', '${DB_ADMIN}', 'role', 'authenticated', 'aal', 'aal2')::text, false);
+    `);
+    const aal2WithFactor = await db.query<{ ok: boolean }>(
+      `SELECT public.is_verified_aal2_platform_admin('${DB_ADMIN}'::uuid) AS ok;`
+    );
+    assert.equal(aal2WithFactor.rows[0].ok, true);
   });
 
   await db.close();

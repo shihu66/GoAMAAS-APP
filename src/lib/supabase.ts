@@ -142,17 +142,57 @@ const getEnvVar = (key: string): string => {
   return '';
 };
 
-const supabaseUrl =
+const readStaticViteEnv = (): {
+  url: string;
+  anonKey: string;
+  env: string;
+} => {
+  let url = '';
+  let anonKey = '';
+  let env = '';
+  try {
+    // @ts-ignore - static property accesses are inlined by Vite `define`
+    const rawUrl = import.meta.env.VITE_SUPABASE_URL;
+    if (typeof rawUrl === 'string' && rawUrl.trim().startsWith('https://')) {
+      url = rawUrl.trim();
+    }
+  } catch {}
+  try {
+    // @ts-ignore - static property accesses are inlined by Vite `define`
+    const rawKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+    if (typeof rawKey === 'string' && rawKey.trim()) {
+      anonKey = rawKey.trim();
+    }
+  } catch {}
+  try {
+    // @ts-ignore - static property accesses are inlined by Vite `define`
+    const rawEnv = import.meta.env.VITE_SUPABASE_ENV;
+    if (typeof rawEnv === 'string' && rawEnv.trim()) {
+      env = rawEnv.trim();
+    }
+  } catch {}
+  return { url, anonKey, env };
+};
+
+const staticViteEnv = readStaticViteEnv();
+
+export const supabaseUrl =
+  staticViteEnv.url ||
   getEnvVar('VITE_SUPABASE_URL') ||
   getEnvVar('NEXT_PUBLIC_SUPABASE_URL') ||
   getEnvVar('SUPABASE_URL');
 const supabaseAnonKey =
+  staticViteEnv.anonKey ||
   getEnvVar('VITE_SUPABASE_ANON_KEY') ||
   getEnvVar('VITE_SUPABASE_PUBLISHABLE_KEY') ||
   getEnvVar('NEXT_PUBLIC_SUPABASE_ANON_KEY') ||
   getEnvVar('SUPABASE_ANON_KEY') ||
   getEnvVar('SUPABASE_PUBLISHABLE_KEY');
-export const supabaseEnv = getEnvVar('VITE_SUPABASE_ENV') || getEnvVar('SUPABASE_ENV');
+export const supabaseEnv =
+  staticViteEnv.env || getEnvVar('VITE_SUPABASE_ENV') || getEnvVar('SUPABASE_ENV');
+
+export const STAGING_SUPABASE_PROJECT_REF = 'umiheyukaddfaupsyooh';
+export const STAGING_SUPABASE_URL = `https://${STAGING_SUPABASE_PROJECT_REF}.supabase.co`;
 
 function decodeBase64UrlJson(segment: string): Record<string, unknown> | null {
   try {
@@ -241,6 +281,22 @@ const credentialCheck = validateSupabaseClientCredentials(supabaseUrl, supabaseA
 
 // Check if credentials exist, are non-secret public values, and belong to the same Supabase project
 export const isSupabaseConfigured: boolean = credentialCheck.valid;
+
+export function isStagingSupabaseRuntime(
+  url: string = supabaseUrl,
+  configured: boolean = isSupabaseConfigured
+): boolean {
+  if (!configured) return false;
+  try {
+    const parsed = new URL((url || '').trim());
+    return (
+      parsed.protocol === 'https:' &&
+      parsed.hostname.toLowerCase() === `${STAGING_SUPABASE_PROJECT_REF}.supabase.co`
+    );
+  } catch {
+    return false;
+  }
+}
 
 export interface SupabaseConfigStatus {
   isConfigured: boolean;
@@ -4286,7 +4342,13 @@ async function callServerAdminWebsiteActionApi(payload: {
 
     const contentType = String(resp.headers.get('content-type') || '').toLowerCase();
     if (!contentType.includes('application/json')) {
-      return { handled: false, success: false, message: '' };
+      return {
+        handled: false,
+        success: false,
+        code: 'ADMIN_API_UNREACHABLE',
+        message:
+          'Server-side administrative action endpoint returned a non-JSON response or is unreachable.',
+      };
     }
 
     const body = (await resp.json()) as {
@@ -4367,8 +4429,17 @@ async function callServerAdminWebsiteActionApi(payload: {
       storageCleanupSkipped: body?.storageCleanupSkipped,
       storageCleanupWarning: body?.storageCleanupWarning,
     };
-  } catch {
-    return { handled: false, success: false, message: '' };
+  } catch (err: unknown) {
+    const diag =
+      err instanceof Error && err.message
+        ? err.message
+        : 'Network error calling server-side administrative action endpoint.';
+    return {
+      handled: false,
+      success: false,
+      code: 'API_NETWORK_ERROR',
+      message: diag,
+    };
   }
 }
 
@@ -4383,11 +4454,13 @@ export async function adminDeleteSubscribedWebsiteInDb(
   }
 
   if (!isSupabaseConfigured || !supabase) {
+    const msg =
+      'Supabase is not configured. Permanent website deletion cannot proceed without a live database connection.';
     return {
-      success: true,
-      deletedWebsiteId: cleanId,
-      message: 'Website and exclusively associated store data deleted locally.',
-      error: null,
+      success: false,
+      code: 'SUPABASE_NOT_CONFIGURED',
+      message: msg,
+      error: new Error(msg),
     };
   }
 
@@ -4527,14 +4600,13 @@ export async function adminRetryWebsiteStorageCleanupInDb(
     return { success: false, message: err.message, error: err };
   }
   if (!isSupabaseConfigured || !supabase) {
+    const msg =
+      'Supabase is not configured. Storage cleanup retry requires a live server connection.';
     return {
-      success: true,
-      code: 'STORAGE_CLEANUP_COMPLETED',
-      websiteId: cleanId,
-      cleanupStatus: 'completed',
-      deletedStorageObjects: 0,
-      message: 'Local storage cleanup completed.',
-      error: null,
+      success: false,
+      code: 'SUPABASE_NOT_CONFIGURED',
+      message: msg,
+      error: new Error(msg),
     };
   }
   try {
@@ -4599,7 +4671,7 @@ export async function fetchPendingWebsiteStorageCleanupsFromDb(): Promise<{
     const mapped: WebsiteStorageCleanupJob[] = (Array.isArray(data) ? data : []).map((row: any) => ({
       id: String(row.id),
       websiteId: String(row.website_id),
-      ownerUserId: String(row.owner_user_id),
+      ownerUserId: row.owner_user_id ? String(row.owner_user_id) : '',
       deletedStoreId: row.deleted_store_id || null,
       preservedStoreId: row.preserved_store_id || null,
       isSharedStore: Boolean(row.is_shared_store),
