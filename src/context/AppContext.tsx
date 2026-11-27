@@ -5270,7 +5270,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           });
         }
       } else {
-        const failCode = serverCheck.status === 'mfa_required' ? 'MFA_REQUIRED' : 'FORBIDDEN';
+        const failCode =
+          serverCheck.status === 'mfa_setup_required'
+            ? 'MFA_SETUP_REQUIRED'
+            : serverCheck.status === 'mfa_required'
+              ? 'MFA_REQUIRED'
+              : 'FORBIDDEN';
         const failMsg =
           serverCheck.message ||
           'Unauthorized: Verified platform administrator role with TOTP MFA is required.';
